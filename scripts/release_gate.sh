@@ -1,0 +1,277 @@
+#!/bin/bash
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORK_ROOT="$ROOT/../work"
+OUTPUT_ROOT="$ROOT/../outputs"
+FINAL_LINK="$OUTPUT_ROOT/videotext.app"
+PROMOTE=false
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
+usage() {
+  printf 'Использование: %s <короткое-видео> <модель-whisper> [--promote]\n' "$0"
+}
+
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+  usage >&2
+  exit 2
+fi
+
+VIDEO_PATH="$1"
+MODEL_PATH="$2"
+if [[ $# -eq 3 ]]; then
+  [[ "$3" == "--promote" ]] || { usage >&2; exit 2; }
+  PROMOTE=true
+fi
+
+[[ -f "$VIDEO_PATH" ]] || { printf 'Не найдено короткое видео: %s\n' "$VIDEO_PATH" >&2; exit 2; }
+[[ -f "$MODEL_PATH" ]] || { printf 'Не найдена модель Whisper: %s\n' "$MODEL_PATH" >&2; exit 2; }
+
+STAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
+RUN_DIR="$WORK_ROOT/release-gate/$STAMP"
+CANDIDATE_ROOT="${TMPDIR:-/private/tmp}/videotext-release-gate/$STAMP"
+CANDIDATE="$CANDIDATE_ROOT/videotext.app"
+EVIDENCE="$RUN_DIR/evidence.env"
+mkdir -p "$RUN_DIR" "$CANDIDATE_ROOT" "$OUTPUT_ROOT"
+
+record() {
+  printf '%s=%q\n' "$1" "$2" >> "$EVIDENCE"
+}
+
+fail() {
+  record status FAIL
+  record failure "$1"
+  printf 'RELEASE GATE FAIL: %s\nEvidence: %s\n' "$1" "$EVIDENCE" >&2
+  exit 1
+}
+
+active_tools() {
+  ps -axo pid=,comm= | awk '$2 ~ /(^|\/)(videotext|whisper-cli|ffmpeg|ffprobe)$/ {print}'
+}
+
+require_no_active_tools() {
+  local active
+  active="$(active_tools)"
+  [[ -z "$active" ]] || fail "активны процессы: $active"
+}
+
+release_files() {
+  find "$ROOT/Sources" "$ROOT/Resources" -type f -print
+  printf '%s\n' \
+    "$ROOT/scripts/build_app.sh" \
+    "$ROOT/scripts/test_e2e.sh" \
+    "$ROOT/scripts/release_gate.sh" \
+    "$ROOT/Tests/EndToEnd.swift"
+}
+
+release_inputs_hash() {
+  release_files | LC_ALL=C sort | while IFS= read -r path; do
+    [[ -f "$path" ]] || exit 1
+    printf '%s  %s\n' "$(shasum -a 256 "$path" | awk '{print $1}')" "${path#"$ROOT"/}"
+  done | shasum -a 256 | awk '{print $1}'
+}
+
+bundle_hash() {
+  local app="$1"
+  (
+    cd "$app"
+    find . -type f -print | LC_ALL=C sort | while IFS= read -r path; do
+      printf '%s  %s\n' "$(shasum -a 256 "$path" | awk '{print $1}')" "$path"
+    done
+  ) | shasum -a 256 | awk '{print $1}'
+}
+
+assert_snapshot() {
+  local current candidate_current
+  current="$(release_inputs_hash)" || fail "не удалось вычислить hash release inputs"
+  [[ "$current" == "$SOURCE_HASH" ]] || fail "release inputs изменились после начала gate"
+  candidate_current="$(bundle_hash "$CANDIDATE")"
+  [[ "$candidate_current" == "$CANDIDATE_HASH" ]] || fail "release candidate изменился после сборки"
+}
+
+stop_smoke_app() {
+  local pid
+  for pid in ${SMOKE_PIDS:-}; do
+    kill "$pid" 2>/dev/null || true
+  done
+}
+
+trap stop_smoke_app EXIT
+
+: > "$EVIDENCE"
+record status RUNNING
+record started_at "$STAMP"
+record video_path "$VIDEO_PATH"
+record video_sha256 "$(shasum -a 256 "$VIDEO_PATH" | awk '{print $1}')"
+record whisper_model_path "$MODEL_PATH"
+record whisper_model_sha256 "$(shasum -a 256 "$MODEL_PATH" | awk '{print $1}')"
+for tool in ffmpeg ffprobe whisper-cli; do
+  command -v "$tool" >/dev/null 2>&1 || fail "не найден обязательный инструмент $tool"
+done
+record ffmpeg_version "$(ffmpeg -version 2>/dev/null | sed -n '1p')"
+record ffprobe_version "$(ffprobe -version 2>/dev/null | sed -n '1p')"
+record whisper_version "$(whisper-cli --version 2>&1 | sed -n '1p')"
+
+require_no_active_tools
+SOURCE_HASH="$(release_inputs_hash)" || fail "не удалось вычислить hash release inputs"
+record release_inputs_sha256 "$SOURCE_HASH"
+
+if ! VIDEOTEXT_APP_PATH="$CANDIDATE" "$ROOT/scripts/build_app.sh" > "$RUN_DIR/build.log" 2>&1; then
+  record build_command "VIDEOTEXT_APP_PATH=$CANDIDATE $ROOT/scripts/build_app.sh"
+  record build_exit_status 1
+  record build_log "$RUN_DIR/build.log"
+  fail "сборка candidate завершилась ошибкой"
+fi
+record build_command "VIDEOTEXT_APP_PATH=$CANDIDATE $ROOT/scripts/build_app.sh"
+record build_exit_status 0
+record build_log "$RUN_DIR/build.log"
+[[ -d "$CANDIDATE" ]] || fail "candidate не создан"
+record codesign_before_command "codesign --verify --deep --strict $CANDIDATE"
+if ! codesign --verify --deep --strict "$CANDIDATE" > "$RUN_DIR/codesign-before.log" 2>&1; then
+  record codesign_before_exit_status 1
+  record codesign_before_log "$RUN_DIR/codesign-before.log"
+  fail "candidate не прошел codesign"
+fi
+record codesign_before_exit_status 0
+record codesign_before_log "$RUN_DIR/codesign-before.log"
+CANDIDATE_HASH="$(bundle_hash "$CANDIDATE")"
+record candidate_path "$CANDIDATE"
+record candidate_sha256 "$CANDIDATE_HASH"
+assert_snapshot
+
+for run in 1 2; do
+  log="$RUN_DIR/e2e-$run.log"
+  if ! "$ROOT/scripts/test_e2e.sh" "$VIDEO_PATH" "$MODEL_PATH" > "$log" 2>&1; then
+    record "e2e_${run}_command" "$ROOT/scripts/test_e2e.sh $VIDEO_PATH $MODEL_PATH"
+    record "e2e_${run}_exit_status" 1
+    record "e2e_${run}_log" "$log"
+    fail "E2E #$run завершился с ненулевым кодом"
+  fi
+  /usr/bin/grep -Fq 'E2E PASS' "$log" || fail "E2E #$run не содержит E2E PASS"
+  record "e2e_${run}_command" "$ROOT/scripts/test_e2e.sh $VIDEO_PATH $MODEL_PATH"
+  record "e2e_${run}_exit_status" 0
+  record "e2e_${run}_status" PASS
+  record "e2e_${run}_log" "$log"
+  assert_snapshot
+  require_no_active_tools
+done
+
+record smoke_command "open -n $CANDIDATE"
+if ! open -n "$CANDIDATE" > "$RUN_DIR/smoke-open.log" 2>&1; then
+  record smoke_open_exit_status 1
+  record smoke_log "$RUN_DIR/smoke-open.log"
+  fail "candidate не запускается"
+fi
+record smoke_open_exit_status 0
+record smoke_log "$RUN_DIR/smoke-open.log"
+sleep 5
+SMOKE_PIDS="$(pgrep -x videotext 2>/dev/null || true)"
+[[ -n "$SMOKE_PIDS" ]] || fail "после smoke-запуска не найден процесс videotext"
+for pid in $SMOKE_PIDS; do
+  kill -0 "$pid" 2>/dev/null || fail "smoke-процесс videotext завершился преждевременно"
+done
+stop_smoke_app
+SMOKE_PIDS=""
+
+for _ in 1 2 3 4 5; do
+  pgrep -x videotext >/dev/null || break
+  sleep 1
+done
+require_no_active_tools
+record codesign_after_command "codesign --verify --deep --strict $CANDIDATE"
+if ! codesign --verify --deep --strict "$CANDIDATE" > "$RUN_DIR/codesign-after.log" 2>&1; then
+  record codesign_after_exit_status 1
+  record codesign_after_log "$RUN_DIR/codesign-after.log"
+  fail "подпись candidate повреждена после smoke-запуска"
+fi
+record codesign_after_exit_status 0
+record codesign_after_log "$RUN_DIR/codesign-after.log"
+assert_snapshot
+
+record candidate_version "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$CANDIDATE/Contents/Info.plist")"
+record candidate_build "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$CANDIDATE/Contents/Info.plist")"
+record candidate_architecture "$(file "$CANDIDATE/Contents/MacOS/videotext")"
+record smoke_status PASS
+
+if [[ "$PROMOTE" == true ]]; then
+  require_no_active_tools
+  if [[ -L "$FINAL_LINK" ]]; then
+    FINAL_APP="$(readlink "$FINAL_LINK")"
+  else
+    FINAL_APP="$FINAL_LINK"
+  fi
+  FINAL_PARENT="$(dirname "$FINAL_APP")"
+  STAGED_APP="$FINAL_PARENT/.videotext-release-$STAMP.app"
+  BACKUP_DIR="$WORK_ROOT/release-gate/backups"
+  BACKUP_APP="$BACKUP_DIR/videotext-before-$STAMP.app"
+  mkdir -p "$FINAL_PARENT" "$BACKUP_DIR"
+
+  ditto --norsrc "$CANDIDATE" "$STAGED_APP" || fail "не удалось подготовить promotion copy"
+  record promotion_copy_command "ditto --norsrc $CANDIDATE $STAGED_APP"
+  record promotion_copy_exit_status 0
+  if command -v SetFile >/dev/null 2>&1; then
+    SetFile -a e "$STAGED_APP"
+    sleep 1
+  fi
+  xattr -cr "$STAGED_APP"
+  codesign --force --deep --sign - "$STAGED_APP" > "$RUN_DIR/codesign-promote.log" 2>&1 || \
+    fail "не удалось переподписать promotion copy"
+  codesign --verify --deep --strict "$STAGED_APP" >> "$RUN_DIR/codesign-promote.log" 2>&1 || \
+    fail "promotion copy не прошла codesign"
+  [[ "$(bundle_hash "$STAGED_APP")" == "$CANDIDATE_HASH" ]] || \
+    fail "hash promotion copy не совпадает с candidate"
+
+  require_no_active_tools
+  if [[ -e "$FINAL_APP" ]]; then
+    mv "$FINAL_APP" "$BACKUP_APP" || fail "не удалось сохранить предыдущую стабильную сборку"
+  fi
+  if ! mv "$STAGED_APP" "$FINAL_APP"; then
+    [[ -e "$BACKUP_APP" ]] && mv "$BACKUP_APP" "$FINAL_APP"
+    fail "не удалось продвинуть candidate"
+  fi
+  sleep 5
+  if ! codesign --verify --deep --strict "$FINAL_APP" > "$RUN_DIR/codesign-final.log" 2>&1; then
+    mv "$FINAL_APP" "$RUN_DIR/failed-promoted.app"
+    [[ -e "$BACKUP_APP" ]] && mv "$BACKUP_APP" "$FINAL_APP"
+    fail "финальная сборка не прошла codesign; предыдущая версия восстановлена"
+  fi
+  if [[ "$(bundle_hash "$FINAL_APP")" != "$CANDIDATE_HASH" ]]; then
+    mv "$FINAL_APP" "$RUN_DIR/failed-promoted.app"
+    [[ -e "$BACKUP_APP" ]] && mv "$BACKUP_APP" "$FINAL_APP"
+    fail "hash финальной сборки не совпадает с candidate; предыдущая версия восстановлена"
+  fi
+  record final_path "$FINAL_APP"
+  record final_sha256 "$CANDIDATE_HASH"
+  record promotion_command "mv $STAGED_APP $FINAL_APP"
+  record promotion_exit_status 0
+  record promoted true
+else
+  record promoted false
+fi
+
+record completed_at "$(date -u '+%Y%m%dT%H%M%SZ')"
+record status PASS
+
+required_evidence=(
+  release_inputs_sha256 candidate_sha256
+  build_command build_exit_status build_log
+  e2e_1_command e2e_1_exit_status e2e_1_log
+  e2e_2_command e2e_2_exit_status e2e_2_log
+  smoke_command smoke_open_exit_status smoke_log
+  codesign_before_command codesign_before_exit_status codesign_before_log
+  codesign_after_command codesign_after_exit_status codesign_after_log
+)
+if [[ "$PROMOTE" == true ]]; then
+  required_evidence+=(
+    promotion_copy_command promotion_copy_exit_status
+    promotion_command promotion_exit_status final_path final_sha256
+  )
+fi
+for key in "${required_evidence[@]}"; do
+  /usr/bin/grep -q "^${key}=" "$EVIDENCE" || fail "evidence не содержит $key"
+done
+printf 'RELEASE GATE PASS\nCandidate: %s\nEvidence: %s\n' "$CANDIDATE" "$EVIDENCE"
+if [[ "$PROMOTE" == false ]]; then
+  printf 'Стабильная сборка не заменена. Для продвижения повторите с --promote.\n'
+fi

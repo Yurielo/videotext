@@ -1,0 +1,28 @@
+{
+  "appName": "videotext",
+  "appVersion": "0.4.3",
+  "build": "baseline-schema-v3",
+  "createdAt": "2026-08-19T00:00:00Z",
+  "updatedAt": "2026-08-19T00:00:00Z",
+  "sourceMediaPath": "/tmp/videotext-baseline-source.mp4",
+  "projectFolderPath": "/tmp/videotext-baseline-project",
+  "durationSeconds": 12.5,
+  "outputs": [],
+  "schemaVersion": 3,
+  "workflow": {
+    "status": "ready",
+    "progress": 0,
+    "mode": "resumeProject",
+    "operations": {}
+  },
+  "fragments": [],
+  "subtitleStyle": {
+    "textColorHex": "#FFFFFF",
+    "outlineColorHex": "#000000",
+    "fontName": "Helvetica",
+    "fontSize": 28,
+    "outlineWidth": 2,
+    "position": "bottom",
+    "backgroundOpacity": 0
+  }
+}

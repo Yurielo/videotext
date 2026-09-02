@@ -1,0 +1,31 @@
+# macOS
+.DS_Store
+
+# Swift and Xcode
+.build/
+.swiftpm/
+DerivedData/
+build/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+
+# Local application artifacts
+work/
+logs/
+*.log
+*.app
+*.dmg
+*.mp4
+*.mov
+*.m4a
+*.wav
+*.srt
+!Tests/Fixtures/**
+
+# Local models and credentials
+models/
+.env
+.env.*
+*.pem
+*.key

@@ -1,0 +1,107 @@
+import Foundation
+
+@main
+struct ProjectSchemaProbe {
+    static func main() throws {
+        guard CommandLine.arguments.count == 2 else {
+            fputs("Использование: videotext-project-schema-probe <legacy-manifest-v3.json>\n", stderr)
+            exit(2)
+        }
+
+        let fileManager = FileManager.default
+        let temporaryRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("videotext-schema-probe-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: temporaryRoot) }
+
+        let sourceURL = temporaryRoot.appendingPathComponent("source.mp4")
+        let projectURL = temporaryRoot.appendingPathComponent("project", isDirectory: true)
+        try fileManager.createDirectory(at: projectURL, withIntermediateDirectories: true)
+        try Data("synthetic-media".utf8).write(to: sourceURL)
+
+        let fixtureURL = URL(fileURLWithPath: CommandLine.arguments[1])
+        var object = try requireObject(JSONSerialization.jsonObject(with: Data(contentsOf: fixtureURL)))
+        object["sourceMediaPath"] = sourceURL.path
+        object["projectFolderPath"] = projectURL.path
+        let layout = ProjectLayout(root: projectURL)
+        try layout.createDirectories()
+        try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+            .write(to: layout.manifestURL, options: .atomic)
+
+        let historyURL = temporaryRoot.appendingPathComponent("history.json")
+        let store = ProjectStore(history: ProjectHistoryStore(indexURL: historyURL))
+        let (migrated, reopenedSource) = try store.openProject(at: projectURL)
+        try require(reopenedSource.path == sourceURL.path, "после миграции изменился source path")
+        try require(migrated.schemaVersion == ProjectSchema.currentVersion, "schema v3 не поднята до current")
+        try require(migrated.artifacts?.isEmpty == true, "artifact registry не инициализирован")
+        try require(migrated.transcriptRevisions?.isEmpty == true, "transcript revisions не инициализированы")
+        try require(migrated.reviewTasks?.isEmpty == true, "review tasks не инициализированы")
+        try require(fileManager.fileExists(atPath: layout.legacyManifestBackupURL(schemaVersion: 3).path), "нет backup schema v3")
+
+        var uniquePaths = Set<String>()
+        for language in ArtifactLanguage.allCases {
+            try require(uniquePaths.insert(layout.transcriptURL(language: language).path).inserted, "transcript path collision")
+            try require(uniquePaths.insert(layout.subtitlesURL(language: language).path).inserted, "subtitle path collision")
+            for granularity in TopicGranularity.allCases {
+                try require(uniquePaths.insert(layout.topicsURL(language: language, granularity: granularity).path).inserted, "topics path collision")
+                try require(uniquePaths.insert(layout.topicCacheDirectory(language: language, granularity: granularity).path).inserted, "topic cache collision")
+            }
+        }
+
+        let artifact = ProjectArtifactRecord(
+            id: "transcript-ru-source-v1",
+            kind: .transcript,
+            path: layout.transcriptURL(language: .ru).path,
+            language: .ru,
+            origin: .source,
+            granularity: nil,
+            sourceArtifactID: nil,
+            sourceRevision: "revision-1",
+            dependencyIDs: [],
+            contentHash: "fixture-hash",
+            createdAt: Date(),
+            generator: BuildInfo.name,
+            generatorVersion: BuildInfo.version,
+            model: "fixture-model",
+            validationStatus: .ready,
+            qualityStatus: .needsReview,
+            reviewTaskCount: 1
+        )
+        try store.registerArtifact(artifact, in: projectURL)
+        let artifactManifest = try store.load(from: projectURL)
+        let storedArtifact = artifactManifest.artifacts?.first
+        try require(artifactManifest.artifacts?.count == 1, "artifact registry count changed")
+        try require(storedArtifact?.id == artifact.id, "artifact id round-trip failed")
+        try require(storedArtifact?.path == artifact.path, "artifact path round-trip failed")
+        try require(storedArtifact?.language == .ru, "artifact language round-trip failed")
+        try require(storedArtifact?.qualityStatus == .needsReview, "artifact quality round-trip failed")
+
+        var future = try requireObject(JSONSerialization.jsonObject(with: Data(contentsOf: layout.manifestURL)))
+        future["schemaVersion"] = ProjectSchema.currentVersion + 1
+        try JSONSerialization.data(withJSONObject: future, options: [.prettyPrinted, .sortedKeys])
+            .write(to: layout.manifestURL, options: .atomic)
+        do {
+            _ = try store.load(from: projectURL)
+            throw ProbeFailure(message: "future schema was accepted")
+        } catch WorkflowError.unsupportedProjectSchema(let version) {
+            try require(version == ProjectSchema.currentVersion + 1, "wrong rejected schema version")
+        }
+
+        print("PROJECT_SCHEMA_PROBE_PASS")
+    }
+
+    private static func requireObject(_ value: Any) throws -> [String: Any] {
+        guard let object = value as? [String: Any] else {
+            throw ProbeFailure(message: "fixture is not a JSON object")
+        }
+        return object
+    }
+
+    private static func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+        guard condition() else { throw ProbeFailure(message: message) }
+    }
+}
+
+private struct ProbeFailure: LocalizedError {
+    var message: String
+    var errorDescription: String? { message }
+}
