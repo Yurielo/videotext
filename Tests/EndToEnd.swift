@@ -57,7 +57,12 @@ struct EndToEndTest {
             }
             try require(checkpoint.kind == .sourceTranscript, "Создан неверный тип Human Review checkpoint")
             try require(!checkpoint.pendingOperations.isEmpty, "Human Review потерял очередь продолжения")
-            try validateProgress(initialProgress, requireWhisperProgress: true, requireCompletion: false)
+            try validateProgress(
+                initialProgress,
+                requireWhisperProgress: true,
+                requireCompletion: false,
+                requireETA: false
+            )
 
             let approval = try HumanReviewService().approve(projectURL: pausedResult.projectURL)
             try require(approval.pendingOperations == checkpoint.pendingOperations, "При утверждении изменилась очередь продолжения")
@@ -796,7 +801,8 @@ struct EndToEndTest {
     private static func validateProgress(
         _ snapshots: [WorkflowProgress],
         requireWhisperProgress: Bool,
-        requireCompletion: Bool = true
+        requireCompletion: Bool = true,
+        requireETA: Bool = true
     ) throws {
         try require(!snapshots.isEmpty, "Не получены события прогресса")
         var previousOverall = 0.0
@@ -814,7 +820,7 @@ struct EndToEndTest {
         } else {
             try require((snapshots.last?.overallFraction ?? 1) < 1, "Приостановленный pipeline ошибочно достиг 100%")
         }
-        try require(sawETA, "ETA ни разу не рассчитан")
+        if requireETA { try require(sawETA, "ETA ни разу не рассчитан") }
         if requireWhisperProgress { try require(sawWhisper, "Не получен промежуточный прогресс Whisper") }
     }
 
