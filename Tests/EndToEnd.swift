@@ -736,7 +736,10 @@ struct EndToEndTest {
         try require(log.contains { $0.contains("Запуск: Диагностика") }, "Диагностика не добавлена автоматически")
         try require(log.contains { $0.contains("Запуск: Манифест проекта") }, "Манифест не добавлен автоматически")
         try require(log.contains { $0.contains("Запуск: Проверка временной шкалы") }, "Проверка временной шкалы не добавлена автоматически")
-        try require(log.contains { $0.contains("другой версией алгоритма") }, "Устаревший topics.json не был явно отклонён")
+        try require(
+            log.contains { $0.contains("отсутствует или устарел") },
+            "Устаревший topics.json не был явно отклонён"
+        )
         try require(log.contains { $0.contains("Запуск: Тематический таймкодинг") }, "Тематический таймкодинг не выполнен")
         try require(log.contains { $0.contains("Запуск: Поиск результатов") }, "Обнаружение результатов не выполнено автоматически")
     }
