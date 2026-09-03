@@ -47,12 +47,48 @@ struct EndToEndTest {
             )
 
             var initialProgress: [WorkflowProgress] = []
-            let initialResult = try await initialEngine.run(
+            let pausedResult = try await initialEngine.run(
                 settings: initialSettings,
                 onLog: { print($0) },
                 onProgress: { initialProgress.append($0) }
             )
-            try validateInitialProject(initialResult, mediaURL: mediaURL, progress: initialProgress)
+            guard let checkpoint = pausedResult.checkpoint else {
+                throw EndToEndError.failed("Первичная обработка не остановилась для Human Review")
+            }
+            try require(checkpoint.kind == .sourceTranscript, "Создан неверный тип Human Review checkpoint")
+            try require(!checkpoint.pendingOperations.isEmpty, "Human Review потерял очередь продолжения")
+            try validateProgress(initialProgress, requireWhisperProgress: true, requireCompletion: false)
+
+            let approval = try HumanReviewService().approve(projectURL: pausedResult.projectURL)
+            try require(approval.pendingOperations == checkpoint.pendingOperations, "При утверждении изменилась очередь продолжения")
+            let resumedSettings = WorkflowSettings(
+                mediaURL: mediaURL,
+                projectURL: pausedResult.projectURL,
+                selectedOperations: Set(approval.pendingOperations),
+                mode: .resumeProject,
+                rangeStart: 1,
+                rangeEnd: 6,
+                fragmentName: "",
+                burnFragmentSubtitles: false,
+                subtitleStyle: .standard,
+                selectedTopicID: nil,
+                whisperModelPath: modelPath,
+                whisperLanguage: "auto",
+                sourceHumanReviewEnabled: true
+            )
+            var resumedProgress: [WorkflowProgress] = []
+            let initialResult = try await initialEngine.run(
+                settings: resumedSettings,
+                onLog: { print($0) },
+                onProgress: { resumedProgress.append($0) }
+            )
+            try require(initialResult.checkpoint == nil, "Утверждённая ревизия повторно открыла Human Review")
+            try validateInitialProject(
+                initialResult,
+                mediaURL: mediaURL,
+                progress: resumedProgress,
+                requireWhisperProgress: false
+            )
             try validateHybridTopics(initialResult.projectURL)
             try validateProjectLocator(projectURL: initialResult.projectURL, parent: mediaURL.deletingLastPathComponent())
             try require(initialController.launchedExecutables.contains { URL(fileURLWithPath: $0).lastPathComponent == "whisper-cli" }, "Первичная расшифровка не запускала Whisper")
@@ -167,7 +203,12 @@ struct EndToEndTest {
         }
     }
 
-    private static func validateInitialProject(_ result: WorkflowResult, mediaURL: URL, progress: [WorkflowProgress]) throws {
+    private static func validateInitialProject(
+        _ result: WorkflowResult,
+        mediaURL: URL,
+        progress: [WorkflowProgress],
+        requireWhisperProgress: Bool
+    ) throws {
         let expectedName = "Обработка видео \(mediaURL.deletingPathExtension().lastPathComponent)"
         try require(result.projectURL.lastPathComponent == expectedName, "Неверное имя автоматического проекта")
         let layout = ProjectLayout(root: result.projectURL)
@@ -189,7 +230,7 @@ struct EndToEndTest {
         for url in requiredFiles { try require(nonemptyFile(at: url), "Отсутствует или пуст результат: \(url.path)") }
         let cues = try SRTService().load(from: layout.fullSRTURL)
         try require(!cues.isEmpty, "full.srt не содержит субтитров")
-        try validateProgress(progress, requireWhisperProgress: true)
+        try validateProgress(progress, requireWhisperProgress: requireWhisperProgress)
         let payload = NotificationPayload.success(mediaName: mediaURL.lastPathComponent, elapsed: result.elapsed, projectURL: result.projectURL)
         try require(payload.title.contains("завершена") && payload.body.contains(mediaURL.lastPathComponent), "Некорректное уведомление об успехе")
     }
@@ -752,7 +793,11 @@ struct EndToEndTest {
         try body.write(to: url, atomically: true, encoding: .utf8)
     }
 
-    private static func validateProgress(_ snapshots: [WorkflowProgress], requireWhisperProgress: Bool) throws {
+    private static func validateProgress(
+        _ snapshots: [WorkflowProgress],
+        requireWhisperProgress: Bool,
+        requireCompletion: Bool = true
+    ) throws {
         try require(!snapshots.isEmpty, "Не получены события прогресса")
         var previousOverall = 0.0
         var sawETA = false
@@ -764,7 +809,11 @@ struct EndToEndTest {
             if snapshot.estimatedTotal != nil, snapshot.remaining != nil { sawETA = true }
             if snapshot.operation == .transcribe, snapshot.operationFraction > 0, snapshot.operationFraction < 1 { sawWhisper = true }
         }
-        try require(abs((snapshots.last?.overallFraction ?? 0) - 1) < 0.000_001, "Итоговый прогресс не достиг 100%")
+        if requireCompletion {
+            try require(abs((snapshots.last?.overallFraction ?? 0) - 1) < 0.000_001, "Итоговый прогресс не достиг 100%")
+        } else {
+            try require((snapshots.last?.overallFraction ?? 1) < 1, "Приостановленный pipeline ошибочно достиг 100%")
+        }
         try require(sawETA, "ETA ни разу не рассчитан")
         if requireWhisperProgress { try require(sawWhisper, "Не получен промежуточный прогресс Whisper") }
     }
