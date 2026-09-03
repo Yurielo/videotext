@@ -481,6 +481,7 @@ struct EndToEndTest {
         let layout = ProjectLayout(root: projectURL)
         let fillerReport = try? FillerWordService().load(from: layout.fillerWordsURL)
         let hasFillerInRange = fillerReport?.candidates.contains { $0.end > 1 && $0.start < 6 } == true
+        let projectStyle = try ProjectStore().load(from: projectURL).subtitleStyle ?? .standard
         let settings = WorkflowSettings(
             mediaURL: mediaURL,
             projectURL: projectURL,
@@ -490,7 +491,7 @@ struct EndToEndTest {
             rangeEnd: 6,
             fragmentName: "Итоговый вариант E2E",
             burnFragmentSubtitles: true,
-            subtitleStyle: .standard,
+            subtitleStyle: projectStyle,
             selectedTopicID: nil,
             whisperModelPath: modelPath,
             whisperLanguage: "auto",
