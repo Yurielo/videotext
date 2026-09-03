@@ -102,6 +102,15 @@ trap stop_smoke_app EXIT
 : > "$EVIDENCE"
 record status RUNNING
 record started_at "$STAMP"
+[[ -z "$(git -C "$ROOT" status --porcelain=v1)" ]] || fail "рабочее дерево содержит незакоммиченные изменения"
+SOURCE_COMMIT="$(git -C "$ROOT" rev-parse HEAD)" || fail "не удалось определить commit release candidate"
+SOURCE_VERSION="$(sed -n 's/.*static let version = "\([^"]*\)".*/\1/p' "$ROOT/Sources/videotext/Core/Models.swift" | head -1)"
+SOURCE_BUILD="$(sed -n 's/.*static let build = "\([^"]*\)".*/\1/p' "$ROOT/Sources/videotext/Core/Models.swift" | head -1)"
+[[ -n "$SOURCE_VERSION" && -n "$SOURCE_BUILD" ]] || fail "не удалось прочитать BuildInfo"
+record source_commit "$SOURCE_COMMIT"
+record source_tree_clean true
+record source_version "$SOURCE_VERSION"
+record source_build "$SOURCE_BUILD"
 record video_path "$VIDEO_PATH"
 record video_sha256 "$(shasum -a 256 "$VIDEO_PATH" | awk '{print $1}')"
 record whisper_model_path "$MODEL_PATH"
@@ -135,6 +144,14 @@ if ! codesign --verify --deep --strict "$CANDIDATE" > "$RUN_DIR/codesign-before.
 fi
 record codesign_before_exit_status 0
 record codesign_before_log "$RUN_DIR/codesign-before.log"
+CANDIDATE_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$CANDIDATE/Contents/Info.plist")"
+CANDIDATE_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$CANDIDATE/Contents/Info.plist")"
+record candidate_version "$CANDIDATE_VERSION"
+record candidate_build "$CANDIDATE_BUILD"
+[[ "$CANDIDATE_VERSION" == "$SOURCE_VERSION" ]] || \
+  fail "версия candidate $CANDIDATE_VERSION не совпадает с BuildInfo $SOURCE_VERSION"
+[[ "$CANDIDATE_BUILD" == "$SOURCE_BUILD" ]] || \
+  fail "build candidate $CANDIDATE_BUILD не совпадает с BuildInfo $SOURCE_BUILD"
 CANDIDATE_HASH="$(bundle_hash "$CANDIDATE")"
 record candidate_path "$CANDIDATE"
 record candidate_sha256 "$CANDIDATE_HASH"
@@ -189,8 +206,6 @@ record codesign_after_exit_status 0
 record codesign_after_log "$RUN_DIR/codesign-after.log"
 assert_snapshot
 
-record candidate_version "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$CANDIDATE/Contents/Info.plist")"
-record candidate_build "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$CANDIDATE/Contents/Info.plist")"
 record candidate_architecture "$(file "$CANDIDATE/Contents/MacOS/videotext")"
 record smoke_status PASS
 
@@ -254,7 +269,9 @@ record completed_at "$(date -u '+%Y%m%dT%H%M%SZ')"
 record status PASS
 
 required_evidence=(
+  source_commit source_tree_clean source_version source_build
   release_inputs_sha256 candidate_sha256
+  candidate_version candidate_build
   build_command build_exit_status build_log
   e2e_1_command e2e_1_exit_status e2e_1_log
   e2e_2_command e2e_2_exit_status e2e_2_log
