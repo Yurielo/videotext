@@ -75,6 +75,17 @@ struct ProjectStore {
             if manifest.artifacts == nil { manifest.artifacts = [] }
             if manifest.transcriptRevisions == nil { manifest.transcriptRevisions = [] }
             if manifest.reviewTasks == nil { manifest.reviewTasks = [] }
+            if manifest.humanReviewState == nil {
+                var state = HumanReviewState.newProjectDefault
+                var revisions = manifest.transcriptRevisions ?? []
+                for language in ArtifactLanguage.allCases {
+                    guard let index = revisions.lastIndex(where: { $0.language == language }) else { continue }
+                    revisions[index].reviewStatus = .approved
+                    state.activeRevisionIDs[language.rawValue] = revisions[index].id
+                }
+                manifest.transcriptRevisions = revisions
+                manifest.humanReviewState = state
+            }
             if manifest.blurAdjustments == nil { manifest.blurAdjustments = [] }
             if manifest.watermarkAdjustments == nil { manifest.watermarkAdjustments = [] }
             if manifest.fillerMuteRecords == nil { manifest.fillerMuteRecords = [] }
@@ -104,6 +115,7 @@ struct ProjectStore {
             languageProfile: nil,
             transcriptRevisions: [],
             reviewTasks: [],
+            humanReviewState: .newProjectDefault,
             blurAdjustments: [],
             watermarkAdjustments: [],
             fillerMuteRecords: [],

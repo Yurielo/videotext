@@ -35,6 +35,9 @@ struct ProjectSchemaProbe {
         try require(migrated.artifacts?.isEmpty == true, "artifact registry не инициализирован")
         try require(migrated.transcriptRevisions?.isEmpty == true, "transcript revisions не инициализированы")
         try require(migrated.reviewTasks?.isEmpty == true, "review tasks не инициализированы")
+        try require(migrated.humanReviewState?.sourceReviewEnabled == true, "source Human Review не включён по умолчанию")
+        try require(migrated.humanReviewState?.translationReviewEnabled == false, "translation Human Review должен быть выключен по умолчанию")
+        try require(migrated.humanReviewState?.pendingCheckpoint == nil, "legacy migration создала ложный checkpoint")
         try require(fileManager.fileExists(atPath: layout.legacyManifestBackupURL(schemaVersion: 3).path), "нет backup schema v3")
 
         var uniquePaths = Set<String>()

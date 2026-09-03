@@ -2,7 +2,7 @@ import Foundation
 
 enum ProjectSchema {
     static let minimumSupportedVersion = 1
-    static let currentVersion = 4
+    static let currentVersion = 5
 }
 
 enum ArtifactLanguage: String, CaseIterable, Codable, Identifiable, Equatable {
@@ -99,6 +99,13 @@ enum TranscriptRevisionOrigin: String, Codable, Equatable {
     case userEdited
 }
 
+enum TranscriptReviewStatus: String, Codable, Equatable {
+    case pending
+    case draft
+    case approved
+    case superseded
+}
+
 struct TranscriptRevision: Codable, Identifiable, Equatable {
     var id: String
     var language: ArtifactLanguage
@@ -108,6 +115,52 @@ struct TranscriptRevision: Codable, Identifiable, Equatable {
     var subtitleArtifactID: String
     var contentHash: String?
     var createdAt: Date
+    var reviewStatus: TranscriptReviewStatus? = nil
+}
+
+enum HumanReviewCheckpointKind: String, Codable, Equatable {
+    case sourceTranscript
+    case translatedTranscript
+}
+
+struct HumanReviewCheckpoint: Codable, Equatable {
+    var kind: HumanReviewCheckpointKind
+    var language: ArtifactLanguage
+    var revisionID: String
+    var pendingOperations: [WorkflowOperation]
+    var createdAt: Date
+}
+
+struct HumanReviewState: Codable, Equatable {
+    var sourceReviewEnabled: Bool
+    var translationReviewEnabled: Bool
+    var activeRevisionIDs: [String: String]
+    var draftRevisionIDs: [String: String]
+    var pendingCheckpoint: HumanReviewCheckpoint?
+
+    static let newProjectDefault = HumanReviewState(
+        sourceReviewEnabled: true,
+        translationReviewEnabled: false,
+        activeRevisionIDs: [:],
+        draftRevisionIDs: [:],
+        pendingCheckpoint: nil
+    )
+
+    func activeRevisionID(for language: ArtifactLanguage) -> String? {
+        activeRevisionIDs[language.rawValue]
+    }
+}
+
+extension ProjectManifest {
+    func activeTranscriptRevision(for language: ArtifactLanguage) -> TranscriptRevision? {
+        if let id = humanReviewState?.activeRevisionID(for: language),
+           let revision = transcriptRevisions?.first(where: { $0.id == id }) {
+            return revision
+        }
+        return transcriptRevisions?.last(where: {
+            $0.language == language && ($0.reviewStatus == .approved || $0.reviewStatus == nil)
+        })
+    }
 }
 
 enum ReviewTaskStatus: String, Codable, Equatable {

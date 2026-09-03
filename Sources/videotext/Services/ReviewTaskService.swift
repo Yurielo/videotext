@@ -66,6 +66,7 @@ struct ReviewTaskService {
         try Data(contentsOf: layout.transcriptURL(language: task.language)).write(to: revisionTranscriptURL, options: .atomic)
         try Data(contentsOf: layout.subtitlesURL(language: task.language)).write(to: revisionSubtitleURL, options: .atomic)
 
+        let isCheckpointDraft = manifest.humanReviewState?.pendingCheckpoint?.language == task.language
         let revision = TranscriptRevision(
             id: revisionID,
             language: task.language,
@@ -74,7 +75,8 @@ struct ReviewTaskService {
             transcriptArtifactID: transcriptArtifactID,
             subtitleArtifactID: subtitleArtifactID,
             contentHash: contentHash,
-            createdAt: Date()
+            createdAt: Date(),
+            reviewStatus: isCheckpointDraft ? .draft : .approved
         )
         tasks[taskIndex].status = .resolved
         tasks[taskIndex].resolvedAt = Date()
@@ -83,6 +85,13 @@ struct ReviewTaskService {
         revisions.removeAll { $0.id == revision.id }
         revisions.append(revision)
         manifest.transcriptRevisions = revisions
+        var humanReviewState = manifest.humanReviewState ?? .newProjectDefault
+        if isCheckpointDraft {
+            humanReviewState.draftRevisionIDs[task.language.rawValue] = revisionID
+        } else {
+            humanReviewState.activeRevisionIDs[task.language.rawValue] = revisionID
+        }
+        manifest.humanReviewState = humanReviewState
         manifest.reviewTasks = tasks
         var artifacts = manifest.artifacts ?? []
         for index in artifacts.indices where

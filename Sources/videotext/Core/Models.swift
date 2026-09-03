@@ -2,8 +2,8 @@ import Foundation
 
 enum BuildInfo {
     static let name = "videotext"
-    static let version = "0.4.3"
-    static let build = "2026.08.19-qa13"
+    static let version = "0.5.0"
+    static let build = "2026.09.03-human-review1"
 }
 
 enum WorkflowOperation: String, CaseIterable, Identifiable, Codable {
@@ -145,6 +145,7 @@ enum ProjectStatus: String, Codable {
     case ready
     case running
     case completed
+    case awaitingReview
     case stopped
     case failed
 
@@ -153,6 +154,7 @@ enum ProjectStatus: String, Codable {
         case .ready: return "Готово"
         case .running: return "Выполняется"
         case .completed: return "Завершено"
+        case .awaitingReview: return "Ожидает проверки"
         case .stopped: return "Остановлено"
         case .failed: return "Ошибка"
         }
@@ -267,6 +269,7 @@ struct ProjectManifest: Codable {
     var languageProfile: LanguageProfile?
     var transcriptRevisions: [TranscriptRevision]?
     var reviewTasks: [ReviewTask]?
+    var humanReviewState: HumanReviewState? = nil
     var blurAdjustments: [BlurAdjustmentRecord]? = nil
     var watermarkAdjustments: [WatermarkAdjustmentRecord]? = nil
     var fillerMuteRecords: [FillerMuteRecord]? = nil
@@ -628,6 +631,8 @@ struct WorkflowSettings {
     var audioEnhancementProfile: AudioEnhancementProfile = .normal
     var dubbingLanguage: ArtifactLanguage = .ru
     var dubbingMixMode: DubbingMixMode = .replace
+    var sourceHumanReviewEnabled: Bool = true
+    var translationHumanReviewEnabled: Bool = false
 }
 
 struct AppAlert: Identifiable {

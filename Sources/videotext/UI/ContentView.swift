@@ -11,6 +11,9 @@ struct ContentView: View {
     @State private var previewTopic: TopicSegment?
     @State private var editingTopic: TopicSegment?
     @State private var editingReviewTask: ReviewTask?
+    @State private var editingReviewCue: SubtitleCue?
+    @State private var reviewSearch = ""
+    @State private var reviewIssuesOnly = false
     @State private var confirmTopicRemoval = false
 
     var body: some View {
@@ -59,6 +62,13 @@ struct ContentView: View {
             if let mediaURL = model.mediaURL {
                 ReviewTaskEditView(mediaURL: mediaURL, task: task) { replacement in
                     model.resolveReviewTask(task, replacementText: replacement)
+                }
+            }
+        }
+        .sheet(item: $editingReviewCue) { cue in
+            if let mediaURL = model.mediaURL {
+                TranscriptCueEditView(mediaURL: mediaURL, cue: cue) { replacement in
+                    model.saveHumanReviewCue(cue, replacementText: replacement)
                 }
             }
         }
@@ -149,7 +159,7 @@ struct ContentView: View {
             } label: {
                 Label(model.isRunning ? "Выполняется..." : "Запустить", systemImage: model.isRunning ? "hourglass" : "play.fill")
             }
-            .disabled(model.isRunning || model.projectURL == nil || model.selectedOperations.isEmpty)
+            .disabled(model.isRunning || model.projectURL == nil || model.selectedOperations.isEmpty || model.humanReviewCheckpoint != nil)
             .keyboardShortcut(.return, modifiers: .command)
             Button(role: .destructive) {
                 model.stop()
@@ -274,7 +284,7 @@ struct ContentView: View {
                 }
 
                 GroupBox("Расшифровка") {
-                    VStack(alignment: .leading) {
+                    VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             TextField("Путь к модели Whisper", text: $model.whisperModelPath)
                             Button("Выбрать") {
@@ -287,6 +297,10 @@ struct ContentView: View {
                             Text("EN").tag("en")
                         }
                         .pickerStyle(.segmented)
+                        Toggle("Human Review исходной расшифровки", isOn: $model.sourceHumanReviewEnabled)
+                            .disabled(model.isRunning || model.humanReviewCheckpoint != nil)
+                        Toggle("Human Review перевода", isOn: $model.translationHumanReviewEnabled)
+                            .disabled(model.isRunning || model.humanReviewCheckpoint != nil)
                     }
                     .textFieldStyle(.roundedBorder)
                     .padding(6)
@@ -1026,9 +1040,9 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Требует ручной проверки")
+                    Text(model.humanReviewCheckpoint == nil ? "Требует ручной проверки" : "Human Review")
                         .font(.headline)
-                    Text("Pipeline продолжает работу; исправления сохраняются новой ревизией.")
+                    Text(reviewPanelSubtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1043,7 +1057,51 @@ struct ContentView: View {
                 .disabled(model.projectURL == nil)
             }
 
-            if model.unresolvedReviewTasks.isEmpty {
+            if let checkpoint = model.humanReviewCheckpoint {
+                HStack(spacing: 10) {
+                    Label(checkpoint.language.rawValue.uppercased(), systemImage: "pause.circle.fill")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.orange)
+                    TextField("Поиск в расшифровке", text: $reviewSearch)
+                    Toggle("Только замечания", isOn: $reviewIssuesOnly)
+                        .toggleStyle(.checkbox)
+                    Button {
+                        model.approveHumanReview()
+                    } label: {
+                        Label("Завершить проверку", systemImage: "checkmark.seal.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.isRunning)
+                }
+
+                List(filteredReviewCues) { cue in
+                    Button {
+                        editingReviewCue = cue
+                    } label: {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: reviewCueIDs.contains(cue.id) ? "exclamationmark.triangle.fill" : "text.bubble")
+                                .foregroundStyle(reviewCueIDs.contains(cue.id) ? Color.red : Color.secondary)
+                            Text("\(TimecodeParser.display(cue.start)) – \(TimecodeParser.display(cue.end))")
+                                .font(.caption.monospacedDigit())
+                                .frame(width: 175, alignment: .leading)
+                            Text(cue.text)
+                                .foregroundStyle(reviewCueIDs.contains(cue.id) ? Color.red : Color.primary)
+                                .lineLimit(3)
+                            Spacer()
+                            Image(systemName: "pencil")
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 4)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(model.isRunning)
+                }
+            }
+
+            if model.humanReviewCheckpoint != nil {
+                EmptyView()
+            } else if model.unresolvedReviewTasks.isEmpty {
                 ContentUnavailableView("Заданий нет", systemImage: "checkmark.circle")
             } else {
                 List(model.unresolvedReviewTasks) { task in
@@ -1221,9 +1279,30 @@ struct ContentView: View {
         case .ready: return .secondary
         case .running: return .blue
         case .completed: return .green
+        case .awaitingReview: return .orange
         case .stopped: return .orange
         case .failed: return .red
         }
+    }
+
+    private var reviewCueIDs: Set<Int> {
+        Set(model.unresolvedReviewTasks.flatMap(\.cueIDs))
+    }
+
+    private var filteredReviewCues: [SubtitleCue] {
+        let query = reviewSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        return model.reviewCues.filter { cue in
+            (!reviewIssuesOnly || reviewCueIDs.contains(cue.id))
+                && (query.isEmpty || cue.text.localizedCaseInsensitiveContains(query))
+        }
+    }
+
+    private var reviewPanelSubtitle: String {
+        guard let checkpoint = model.humanReviewCheckpoint else {
+            return "Исправления сохраняются новой ревизией."
+        }
+        let kind = checkpoint.kind == .sourceTranscript ? "исходной расшифровки" : "перевода"
+        return "Pipeline приостановлен для проверки \(kind); cue ID и таймкоды защищены."
     }
 
     private func openMediaFile() -> URL? {
@@ -1414,6 +1493,86 @@ private struct ReviewTaskEditView: View {
         player.play()
         stopTask = Task {
             let duration = max(0, task.end - task.start)
+            try? await Task.sleep(nanoseconds: UInt64(min(duration, 86_400) * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await MainActor.run { player.pause() }
+        }
+    }
+}
+
+private struct TranscriptCueEditView: View {
+    let mediaURL: URL
+    let cue: SubtitleCue
+    let onSave: (String) -> Bool
+    @Environment(\.dismiss) private var dismiss
+    @State private var replacementText: String
+    @State private var player: AVPlayer
+    @State private var stopTask: Task<Void, Never>?
+
+    init(mediaURL: URL, cue: SubtitleCue, onSave: @escaping (String) -> Bool) {
+        self.mediaURL = mediaURL
+        self.cue = cue
+        self.onSave = onSave
+        _replacementText = State(initialValue: cue.text)
+        _player = State(initialValue: AVPlayer(url: mediaURL))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Label("Редактирование текста", systemImage: "text.cursor")
+                        .font(.headline)
+                    Text("\(TimecodeParser.display(cue.start)) – \(TimecodeParser.display(cue.end))")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Закрыть") { dismiss() }
+            }
+            VideoPlayer(player: player)
+                .aspectRatio(16 / 9, contentMode: .fit)
+            HStack {
+                Button {
+                    playRange()
+                } label: {
+                    Label("Прослушать фрагмент", systemImage: "play.fill")
+                }
+                Spacer()
+                Label("Таймкод защищён", systemImage: "lock.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            TextEditor(text: $replacementText)
+                .font(.body)
+                .frame(minHeight: 120)
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.35)))
+                .accessibilityLabel("Исправленный текст cue")
+            HStack {
+                Spacer()
+                Button("Отмена") { dismiss() }
+                Button("Сохранить черновик") {
+                    if onSave(replacementText) { dismiss() }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(replacementText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding()
+        .frame(minWidth: 760, minHeight: 620)
+        .onAppear { playRange() }
+        .onDisappear {
+            stopTask?.cancel()
+            player.pause()
+        }
+    }
+
+    private func playRange() {
+        stopTask?.cancel()
+        player.seek(to: CMTime(seconds: cue.start, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        player.play()
+        stopTask = Task {
+            let duration = max(0, cue.end - cue.start)
             try? await Task.sleep(nanoseconds: UInt64(min(duration, 86_400) * 1_000_000_000))
             guard !Task.isCancelled else { return }
             await MainActor.run { player.pause() }

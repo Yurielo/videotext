@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import AppKit
 
 @MainActor
 final class WorkflowViewModel: ObservableObject {
@@ -49,6 +50,9 @@ final class WorkflowViewModel: ObservableObject {
     @Published var audioEnhancementProfile = AudioEnhancementProfile.normal
     @Published var dubbingLanguage = ArtifactLanguage.ru
     @Published var dubbingMixMode = DubbingMixMode.replace
+    @Published var sourceHumanReviewEnabled = true
+    @Published var translationHumanReviewEnabled = false
+    @Published var humanReviewCheckpoint: HumanReviewCheckpoint?
     @Published var quoteCandidates: [QuoteRangeCandidate] = []
     @Published var selectedQuoteCandidateID = ""
     @Published var topics: [TopicSegment] = []
@@ -77,6 +81,7 @@ final class WorkflowViewModel: ObservableObject {
     private let resultsDetector = ResultsDetector()
     private let resultSummaryService = ProjectResultSummaryService()
     private let reviewTaskService = ReviewTaskService()
+    private let humanReviewService = HumanReviewService()
     private var clockTask: Task<Void, Never>?
     private var runTask: Task<Void, Never>?
     private var runStartedAt: Date?
@@ -116,6 +121,9 @@ final class WorkflowViewModel: ObservableObject {
             topicsFileStatus = nil
             clearTopicMetadata()
             subtitleStyle = .standard
+            sourceHumanReviewEnabled = true
+            translationHumanReviewEnabled = false
+            humanReviewCheckpoint = nil
             progress = .idle
             log.append("Создан новый проект: \(automaticProject.path)")
             status = "Готово"
@@ -145,6 +153,9 @@ final class WorkflowViewModel: ObservableObject {
                 clearTopicMetadata()
             }
             subtitleStyle = manifest.subtitleStyle ?? .standard
+            sourceHumanReviewEnabled = manifest.humanReviewState?.sourceReviewEnabled ?? true
+            translationHumanReviewEnabled = manifest.humanReviewState?.translationReviewEnabled ?? false
+            humanReviewCheckpoint = manifest.humanReviewState?.pendingCheckpoint
             progress = .idle
             status = manifest.workflow?.status.title ?? "Готово"
             selectedHistoryID = projectRoot.path
@@ -161,6 +172,11 @@ final class WorkflowViewModel: ObservableObject {
     }
 
     func run() {
+        if humanReviewCheckpoint != nil {
+            status = "Ожидает проверки"
+            alert = AppAlert(title: "Требуется Human Review", message: "Завершите проверку расшифровки перед продолжением операций.")
+            return
+        }
         startRun(operations: selectedOperations)
     }
 
@@ -441,8 +457,18 @@ final class WorkflowViewModel: ObservableObject {
     private func refreshProjectResults(_ projectURL: URL) {
         outputs = resultsDetector.discover(in: projectURL)
         resultSummary = resultSummaryService.summarize(projectURL: projectURL)
-        reviewTasks = (try? store.load(from: projectURL).reviewTasks) ?? []
-        reviewCues = (try? SRTService().load(from: ProjectLayout(root: projectURL).fullSRTURL)) ?? []
+        let manifest = try? store.load(from: projectURL)
+        reviewTasks = manifest?.reviewTasks ?? []
+        humanReviewCheckpoint = manifest?.humanReviewState?.pendingCheckpoint
+        let layout = ProjectLayout(root: projectURL)
+        let reviewURL: URL
+        if let language = humanReviewCheckpoint?.language,
+           manifest?.languageProfile?.effective != language {
+            reviewURL = layout.subtitlesURL(language: language)
+        } else {
+            reviewURL = layout.fullSRTURL
+        }
+        reviewCues = (try? SRTService().load(from: reviewURL)) ?? []
         fillerCandidates = (try? FillerWordService().load(from: ProjectLayout(root: projectURL).fillerWordsURL).candidates) ?? []
         selectedFillerCandidateIDs = selectedFillerCandidateIDs.intersection(Set(fillerCandidates.map(\.id)))
     }
@@ -467,6 +493,43 @@ final class WorkflowViewModel: ObservableObject {
         } catch {
             reportPreparationError(error)
             return false
+        }
+    }
+
+    func saveHumanReviewCue(_ cue: SubtitleCue, replacementText: String) -> Bool {
+        guard !isRunning, let projectURL, let checkpoint = humanReviewCheckpoint else { return false }
+        do {
+            reviewCues = try humanReviewService.saveDraftCue(
+                projectURL: projectURL,
+                language: checkpoint.language,
+                cueID: cue.id,
+                replacementText: replacementText
+            )
+            refreshProjectResults(projectURL)
+            log.append("Human Review: сохранён текст cue \(cue.id), таймкод не изменён.")
+            return true
+        } catch {
+            reportPreparationError(error)
+            return false
+        }
+    }
+
+    func approveHumanReview() {
+        guard !isRunning, let projectURL else { return }
+        do {
+            let approval = try humanReviewService.approve(projectURL: projectURL)
+            humanReviewCheckpoint = nil
+            reviewCues = approval.cues
+            runMode = .resumeProject
+            refreshProjectResults(projectURL)
+            log.append("Human Review завершён: утверждена ревизия \(approval.revision.id).")
+            if approval.pendingOperations.isEmpty {
+                status = "Завершено"
+            } else {
+                startRun(operations: Set(approval.pendingOperations))
+            }
+        } catch {
+            reportPreparationError(error)
         }
     }
 
@@ -682,7 +745,9 @@ final class WorkflowViewModel: ObservableObject {
             selectedFillerCandidateIDs: selectedFillerCandidateIDs,
             audioEnhancementProfile: audioEnhancementProfile,
             dubbingLanguage: dubbingLanguage,
-            dubbingMixMode: dubbingMixMode
+            dubbingMixMode: dubbingMixMode,
+            sourceHumanReviewEnabled: sourceHumanReviewEnabled,
+            translationHumanReviewEnabled: translationHumanReviewEnabled
         )
 
         runTask = Task { [weak self] in
@@ -711,20 +776,29 @@ final class WorkflowViewModel: ObservableObject {
                     self.topicsFileStatus = nil
                     self.clearTopicMetadata()
                 }
-                self.status = "Завершено"
+                self.humanReviewCheckpoint = result.checkpoint
+                self.status = result.checkpoint == nil ? "Завершено" : "Ожидает проверки"
                 self.runMode = .resumeProject
                 self.progress.elapsed = result.elapsed
                 self.progress.estimatedTotal = result.elapsed
                 self.progress.remaining = 0
-                await self.notifications.notifySuccess(
-                    mediaName: mediaURL.lastPathComponent,
-                    elapsed: result.elapsed,
-                    projectURL: result.projectURL
-                )
-                self.alert = AppAlert(
-                    title: "Обработка завершена",
-                    message: "\(mediaURL.lastPathComponent) готово за \(TimeTextFormatter.string(result.elapsed))."
-                )
+                if let checkpoint = result.checkpoint {
+                    NSSound.beep()
+                    self.alert = AppAlert(
+                        title: "Требуется Human Review",
+                        message: "Проверьте расшифровку \(checkpoint.language.rawValue.uppercased()). После утверждения обработка продолжится автоматически."
+                    )
+                } else {
+                    await self.notifications.notifySuccess(
+                        mediaName: mediaURL.lastPathComponent,
+                        elapsed: result.elapsed,
+                        projectURL: result.projectURL
+                    )
+                    self.alert = AppAlert(
+                        title: "Обработка завершена",
+                        message: "\(mediaURL.lastPathComponent) готово за \(TimeTextFormatter.string(result.elapsed))."
+                    )
+                }
             } catch is CancellationError {
                 self.status = "Остановлено"
                 self.alert = AppAlert(title: "Обработка остановлена", message: "Задание можно продолжить из истории проектов.")
@@ -781,6 +855,7 @@ struct WorkflowResult {
     var outputs: [ProjectOutput]
     var topics: [TopicSegment]
     var elapsed: TimeInterval
+    var checkpoint: HumanReviewCheckpoint? = nil
 }
 
 final class WorkflowEngine: @unchecked Sendable {
@@ -797,6 +872,7 @@ final class WorkflowEngine: @unchecked Sendable {
     let detector = ResultsDetector()
     let ollamaMemory = OllamaMemoryManager()
     let transcriptionQuality = TranscriptionQualityService()
+    let humanReview: HumanReviewService
     let translationAdapter: TranslationAdapter
     let localWhisperRetry: LocalWhisperRetryService
     let fillerWords = FillerWordService()
@@ -823,6 +899,7 @@ final class WorkflowEngine: @unchecked Sendable {
         audioEnhancement = AudioEnhancementAdapter(runner: runner)
         speechSynthesis = SpeechSynthesisAdapter(runner: runner)
         localWhisperRetry = LocalWhisperRetryService(runner: runner)
+        humanReview = HumanReviewService(store: store)
     }
 
     func cancel() {
@@ -862,6 +939,23 @@ final class WorkflowEngine: @unchecked Sendable {
         log("Исходный файл: \(mediaURL.path)")
         log("Папка проекта: \(projectURL.path)")
         var manifest = try store.ensureProject(at: projectURL, mediaURL: mediaURL, mode: settings.mode)
+        if let checkpoint = manifest.humanReviewState?.pendingCheckpoint {
+            let discovered = detector.discover(in: projectURL)
+            log("Операции не запущены: ожидается Human Review \(checkpoint.language.rawValue.uppercased()).")
+            return WorkflowResult(
+                projectURL: projectURL,
+                outputs: discovered,
+                topics: (try? Self.loadTopics(projectURL: projectURL).topics) ?? [],
+                elapsed: 0,
+                checkpoint: checkpoint
+            )
+        }
+        try store.mutate(projectURL) { manifest in
+            var state = manifest.humanReviewState ?? .newProjectDefault
+            state.sourceReviewEnabled = settings.sourceHumanReviewEnabled
+            state.translationReviewEnabled = settings.translationHumanReviewEnabled
+            manifest.humanReviewState = state
+        }
         try updateWorkflow(projectURL, status: .running, progress: 0, mode: settings.mode, error: nil)
 
         do {
@@ -884,6 +978,25 @@ final class WorkflowEngine: @unchecked Sendable {
                     tracker.finish(operation, recordActual: false)
                     try updateWorkflow(projectURL, status: .running, progress: Double(index + 1) / Double(max(operations.count, 1)), mode: settings.mode, error: nil)
                     try refreshDetectedResults(in: projectURL)
+                    if let checkpoint = try checkpointAfter(
+                        operation,
+                        settings: settings,
+                        projectURL: projectURL,
+                        pendingOperations: Array(operations.dropFirst(index + 1))
+                    ) {
+                        let progress = Double(index + 1) / Double(max(operations.count, 1))
+                        try updateWorkflow(projectURL, status: .awaitingReview, progress: progress, mode: .resumeProject, error: nil)
+                        let elapsed = Date().timeIntervalSince(startedAt)
+                        let discovered = detector.discover(in: projectURL)
+                        log("Восстановлена приостановка для Human Review \(checkpoint.language.rawValue.uppercased()).")
+                        return WorkflowResult(
+                            projectURL: projectURL,
+                            outputs: discovered,
+                            topics: (try? Self.loadTopics(projectURL: projectURL).topics) ?? [],
+                            elapsed: elapsed,
+                            checkpoint: checkpoint
+                        )
+                    }
                     continue
                 }
 
@@ -1264,7 +1377,7 @@ final class WorkflowEngine: @unchecked Sendable {
                 case .detectFillerWords:
                     let current = try store.load(from: projectURL)
                     guard let language = current.languageProfile?.effective,
-                          let revision = current.transcriptRevisions?.last(where: { $0.language == language }) else {
+                          let revision = current.activeTranscriptRevision(for: language) else {
                         throw WorkflowError.processFailed("Не найдена актуальная ревизия расшифровки для анализа слов-паразитов.")
                     }
                     let report = try fillerWords.analyze(
@@ -1487,7 +1600,7 @@ final class WorkflowEngine: @unchecked Sendable {
                           settings.dubbingLanguage != sourceLanguage else {
                         throw WorkflowError.processFailed("Для дубляжа выберите язык перевода, отличный от языка исходного видео.")
                     }
-                    guard let revision = current.transcriptRevisions?.last(where: { $0.language == settings.dubbingLanguage }) else {
+                    guard let revision = current.activeTranscriptRevision(for: settings.dubbingLanguage) else {
                         throw WorkflowError.processFailed("Не найдена переведённая ревизия для дубляжа.")
                     }
                     let targetSRT = layout.subtitlesURL(language: settings.dubbingLanguage)
@@ -1563,6 +1676,25 @@ final class WorkflowEngine: @unchecked Sendable {
                 tracker.finish(operation)
                 try updateWorkflow(projectURL, status: .running, progress: Double(index + 1) / Double(max(operations.count, 1)), mode: settings.mode, error: nil)
                 try refreshDetectedResults(in: projectURL)
+                if let checkpoint = try checkpointAfter(
+                    operation,
+                    settings: settings,
+                    projectURL: projectURL,
+                    pendingOperations: Array(operations.dropFirst(index + 1))
+                ) {
+                    let progress = Double(index + 1) / Double(max(operations.count, 1))
+                    try updateWorkflow(projectURL, status: .awaitingReview, progress: progress, mode: .resumeProject, error: nil)
+                    let elapsed = Date().timeIntervalSince(startedAt)
+                    let discovered = detector.discover(in: projectURL)
+                    log("Обработка приостановлена для Human Review \(checkpoint.language.rawValue.uppercased()).")
+                    return WorkflowResult(
+                        projectURL: projectURL,
+                        outputs: discovered,
+                        topics: (try? Self.loadTopics(projectURL: projectURL).topics) ?? [],
+                        elapsed: elapsed,
+                        checkpoint: checkpoint
+                    )
+                }
             }
         } catch is CancellationError {
             cleanupPartialFiles(in: projectURL)
@@ -1599,8 +1731,79 @@ final class WorkflowEngine: @unchecked Sendable {
             projectURL: projectURL,
             outputs: discovered,
             topics: (try? Self.loadTopics(projectURL: projectURL).topics) ?? [],
-            elapsed: elapsed
+            elapsed: elapsed,
+            checkpoint: nil
         )
+    }
+
+    private func checkpointAfter(
+        _ operation: WorkflowOperation,
+        settings: WorkflowSettings,
+        projectURL: URL,
+        pendingOperations: [WorkflowOperation]
+    ) throws -> HumanReviewCheckpoint? {
+        let manifest = try store.load(from: projectURL)
+        let kind: HumanReviewCheckpointKind
+        let language: ArtifactLanguage
+        let revision: TranscriptRevision
+        switch operation {
+        case .assessTranscriptionQuality:
+            guard let sourceLanguage = manifest.languageProfile?.effective,
+                  let sourceRevision = revisionMatchingWorkingSubtitle(
+                    manifest: manifest,
+                    language: sourceLanguage,
+                    projectURL: projectURL
+                  ) else {
+                throw WorkflowError.processFailed("Не найдена исходная ревизия для Human Review.")
+            }
+            kind = .sourceTranscript
+            language = sourceLanguage
+            revision = sourceRevision
+        case .translateTranscript:
+            guard let sourceLanguage = manifest.languageProfile?.effective else {
+                throw WorkflowError.processFailed("Не определён исходный язык Human Review перевода.")
+            }
+            let targetLanguage: ArtifactLanguage = sourceLanguage == .ru ? .en : .ru
+            guard let translatedRevision = manifest.transcriptRevisions?.last(where: {
+                $0.language == targetLanguage && $0.origin == .translated
+            }) else {
+                throw WorkflowError.processFailed("Не найдена переведённая ревизия для Human Review.")
+            }
+            kind = .translatedTranscript
+            language = targetLanguage
+            revision = translatedRevision
+        default:
+            return nil
+        }
+        return try humanReview.transitionAfterGeneration(
+            projectURL: projectURL,
+            kind: kind,
+            language: language,
+            revisionID: revision.id,
+            pendingOperations: pendingOperations,
+            sourceReviewEnabled: settings.sourceHumanReviewEnabled,
+            translationReviewEnabled: settings.translationHumanReviewEnabled
+        )
+    }
+
+    private func revisionMatchingWorkingSubtitle(
+        manifest: ProjectManifest,
+        language: ArtifactLanguage,
+        projectURL: URL
+    ) -> TranscriptRevision? {
+        let layout = ProjectLayout(root: projectURL)
+        let subtitleURL = manifest.languageProfile?.effective == language
+            ? layout.fullSRTURL
+            : layout.subtitlesURL(language: language)
+        if let text = try? String(contentsOf: subtitleURL, encoding: .utf8) {
+            let hash = StableTopicHash.string(text)
+            if let revision = manifest.transcriptRevisions?.last(where: {
+                $0.language == language && $0.contentHash == hash
+            }) {
+                return revision
+            }
+        }
+        return manifest.activeTranscriptRevision(for: language)
     }
 
     private func createFragment(
@@ -1792,7 +1995,7 @@ final class WorkflowEngine: @unchecked Sendable {
         case .translateTranscript:
             guard settings.mode != .newProject,
                   let sourceLanguage = manifest.languageProfile?.effective,
-                  let sourceRevision = manifest.transcriptRevisions?.last(where: { $0.language == sourceLanguage }) else {
+                  let sourceRevision = manifest.activeTranscriptRevision(for: sourceLanguage) else {
                 return false
             }
             let targetLanguage: ArtifactLanguage = sourceLanguage == .ru ? .en : .ru
@@ -1843,7 +2046,7 @@ final class WorkflowEngine: @unchecked Sendable {
             guard settings.mode != .newProject,
                   nonemptyFile(layout.fillerWordsURL),
                   let language = manifest.languageProfile?.effective,
-                  let revision = manifest.transcriptRevisions?.last(where: { $0.language == language }),
+                  let revision = manifest.activeTranscriptRevision(for: language),
                   let report = try? fillerWords.load(from: layout.fillerWordsURL) else { return false }
             return report.transcriptRevisionID == revision.id
         case .analyzeAudio:
@@ -2497,7 +2700,7 @@ final class WorkflowEngine: @unchecked Sendable {
         layout: ProjectLayout
     ) throws -> TranscriptRevision {
         let manifest = try store.load(from: projectURL)
-        if let revision = manifest.transcriptRevisions?.last(where: { $0.language == language }) {
+        if let revision = manifest.activeTranscriptRevision(for: language) {
             return revision
         }
         if !nonemptyFile(layout.transcriptURL) {
@@ -2646,7 +2849,7 @@ final class WorkflowEngine: @unchecked Sendable {
         var languages = [source]
         for language in ArtifactLanguage.allCases where language != source {
             if nonemptyFile(layout.subtitlesURL(language: language)),
-               manifest.transcriptRevisions?.contains(where: { $0.language == language }) == true {
+               manifest.activeTranscriptRevision(for: language) != nil {
                 languages.append(language)
             }
         }
@@ -2662,7 +2865,7 @@ final class WorkflowEngine: @unchecked Sendable {
         layout: ProjectLayout
     ) throws {
         let manifest = try store.load(from: projectURL)
-        let sourceRevision = manifest.transcriptRevisions?.last(where: { $0.language == language })
+        let sourceRevision = manifest.activeTranscriptRevision(for: language)
         let sourceArtifactID = sourceRevision?.subtitleArtifactID
         let jsonURL = layout.topicsURL(language: language, granularity: granularity)
         let content = try String(contentsOf: jsonURL, encoding: .utf8)
