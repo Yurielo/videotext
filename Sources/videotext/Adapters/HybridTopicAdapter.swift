@@ -351,7 +351,8 @@ struct HybridTopicAdapter: TopicAdapter {
             for _ in 0..<2 {
                 try Task.checkCancellation()
                 do {
-                    let review = try await provider.describeTopics(request, model: model, correction: correction)
+                    let rawReview = try await provider.describeTopics(request, model: model, correction: correction)
+                    let review = repairingShortTitles(in: rawReview, language: request.language)
                     let issues = validator.topicReviewIssues(review, request: request)
                     if issues.isEmpty { return CachedTopicReview(model: model, review: review) }
                     correction = issues.joined(separator: " ")
@@ -365,6 +366,35 @@ struct HybridTopicAdapter: TopicAdapter {
             }
         }
         throw WorkflowError.invalidTopics("LLM не описала диапазоны \(request.id): \(failures.joined(separator: " | "))")
+    }
+
+    private func repairingShortTitles(
+        in review: TopicReviewResponse,
+        language: ArtifactLanguage
+    ) -> TopicReviewResponse {
+        let topics = review.topics.map { item -> TopicReviewItem in
+            var repaired = item
+            var words = repaired.title.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+            guard words.count < 3 else { return repaired }
+
+            var normalizedTitleWords = Set(words.map { $0.lowercased() })
+            for keyword in repaired.keywords {
+                let keywordWords = keyword.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+                for word in keywordWords where !normalizedTitleWords.contains(word.lowercased()) && words.count < 3 {
+                    words.append(word)
+                    normalizedTitleWords.insert(word.lowercased())
+                }
+                if words.count >= 3 { break }
+            }
+            let fallbackWords = language == .ru ? ["Обсуждение", "темы"] : ["Topic", "discussion"]
+            for word in fallbackWords where words.count < 3 && !normalizedTitleWords.contains(word.lowercased()) {
+                words.insert(word, at: 0)
+                normalizedTitleWords.insert(word.lowercased())
+            }
+            repaired.title = words.joined(separator: " ")
+            return repaired
+        }
+        return TopicReviewResponse(topics: topics)
     }
 
     private func makeTopic(

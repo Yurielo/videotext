@@ -17,6 +17,7 @@ final class FakeTopicAIProvider: TopicAIProvider {
     var descriptionCalls = 0
     var responseDelay: UInt64 = 0
     var failPrimary = false
+    var shortTitles = false
 
     func availableLanguageModels() async throws -> [String] {
         [primaryLanguageModel, fallbackLanguageModel]
@@ -62,7 +63,9 @@ final class FakeTopicAIProvider: TopicAIProvider {
         return TopicReviewResponse(topics: request.blocks.map { block in
             let astronomy = block.cues.contains { $0.text.contains("звёзд") }
             return TopicReviewItem(
-                title: astronomy ? "Наблюдение далёких звёзд телескопом" : "Приготовление овощного супа дома",
+                title: shortTitles
+                    ? (astronomy ? "Наблюдение звёзд" : "Приготовление супа")
+                    : (astronomy ? "Наблюдение далёких звёзд телескопом" : "Приготовление овощного супа дома"),
                 summary: astronomy
                     ? "Астрономы обсуждают наблюдение звёзд и настройку телескопа."
                     : "Обсуждается приготовление овощного супа и выбор ингредиентов.",
@@ -89,6 +92,7 @@ struct TopicAnalysisProbe {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: root) }
             try validatePreprocessing()
+            try await validateShortTitleRepair(parent: root)
             let cues = syntheticCues()
             let sourceSRT = root.appendingPathComponent("source.srt")
             try SRTService().write(cues, to: sourceSRT)
@@ -158,6 +162,28 @@ struct TopicAnalysisProbe {
         let paragraphs = TopicTextPreprocessor().prepare(cues)
         try require(Set(paragraphs.flatMap(\.cueIDs)) == Set([1, 2, 3]), "не сохранена связь после удаления прогрессивного повтора")
         try require(paragraphs.map(\.text).joined(separator: " ").contains("новый проект"), "потеряна полная прогрессивная реплика")
+    }
+
+    private static func validateShortTitleRepair(parent: URL) async throws {
+        let provider = FakeTopicAIProvider()
+        provider.shortTitles = true
+        let cues = syntheticCues()
+        let root = parent.appendingPathComponent("short-title-repair", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let sourceSRT = root.appendingPathComponent("source.srt")
+        try SRTService().write(cues, to: sourceSRT)
+        let file = try await HybridTopicAdapter(provider: provider).buildTopics(
+            from: cues,
+            sourceSRT: sourceSRT,
+            context: TopicBuildContext(projectURL: root, mediaDuration: 720, granularity: .normal),
+            onProgress: { _ in },
+            onLog: { _ in }
+        )
+        try require(file.topics.allSatisfy {
+            (3...8).contains($0.title.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).count)
+        }, "короткое название LLM не исправлено детерминированно")
+        try require(file.topics[0].title.contains("звёзд"), "исправление потеряло смысл первого названия")
+        try require(file.topics[1].title.contains("суп"), "исправление потеряло смысл второго названия")
     }
 
     private static func validateStrictFailure(file: TopicsFile, cues: [SubtitleCue]) throws {

@@ -426,7 +426,7 @@ enum TopicAnalysisMode: String, CaseIterable, Identifiable, Codable {
 enum TopicAlgorithmIdentity {
     static let schemaVersion = 2
     static let hybridAdapter = "HybridTopicAdapter"
-    static let hybridVersion = "hybrid-cue-review-v6"
+    static let hybridVersion = "hybrid-cue-review-v7"
     static let draftAdapter = "DraftTopicAdapter"
     static let draftVersion = "draft-keyword-v2"
 
