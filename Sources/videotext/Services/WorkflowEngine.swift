@@ -13,7 +13,7 @@ final class WorkflowViewModel: ObservableObject {
     @Published var burnFragmentSubtitles = true
     @Published var subtitleStyle = SubtitleStyleSettings.standard
     @Published var whisperModelPath = ""
-    @Published var whisperLanguage = "auto"
+    @Published var whisperLanguage = "ru"
     @Published var topicGranularity = TopicGranularity.normal
     @Published var artifactLanguage = ArtifactLanguage.ru
     @Published var topicAnalysisMode = TopicAnalysisMode.hybrid
@@ -24,6 +24,7 @@ final class WorkflowViewModel: ObservableObject {
     @Published var quoteTrailingPadding: Double = 0.2
     @Published var speedFactor: Double = 1
     @Published var speedSource = SpeedSourceKind.fullVideo
+    @Published var blurEnabled = false
     @Published var blurSource = SpeedSourceKind.fullVideo
     @Published var blurRegion = NormalizedVideoRect(x: 0.65, y: 0.05, width: 0.3, height: 0.2)
     @Published var blurIntensity: Double = 12
@@ -43,7 +44,7 @@ final class WorkflowViewModel: ObservableObject {
     @Published var watermarkEndText = "00:00:10.000"
     @Published var watermarkIncludesBlur = false
     @Published var watermarkBurnSubtitles = false
-    @Published var fillerMode = FillerProcessingMode.detectOnly
+    @Published var fillerMode = FillerProcessingMode.muteAll
     @Published var fillerCandidates: [FillerWordCandidate] = []
     @Published var selectedFillerCandidateIDs = Set<String>()
     @Published var fillerSearch = ""
@@ -52,6 +53,7 @@ final class WorkflowViewModel: ObservableObject {
     @Published var dubbingMixMode = DubbingMixMode.replace
     @Published var sourceHumanReviewEnabled = true
     @Published var translationHumanReviewEnabled = false
+    @Published var fillerAnalysisBeforeReview = true
     @Published var humanReviewCheckpoint: HumanReviewCheckpoint?
     @Published var quoteCandidates: [QuoteRangeCandidate] = []
     @Published var selectedQuoteCandidateID = ""
@@ -121,8 +123,12 @@ final class WorkflowViewModel: ObservableObject {
             topicsFileStatus = nil
             clearTopicMetadata()
             subtitleStyle = .standard
+            whisperLanguage = "ru"
+            blurEnabled = false
+            fillerMode = .muteAll
             sourceHumanReviewEnabled = true
             translationHumanReviewEnabled = false
+            fillerAnalysisBeforeReview = true
             humanReviewCheckpoint = nil
             progress = .idle
             log.append("Создан новый проект: \(automaticProject.path)")
@@ -153,8 +159,11 @@ final class WorkflowViewModel: ObservableObject {
                 clearTopicMetadata()
             }
             subtitleStyle = manifest.subtitleStyle ?? .standard
+            blurEnabled = false
+            fillerMode = .muteAll
             sourceHumanReviewEnabled = manifest.humanReviewState?.sourceReviewEnabled ?? true
             translationHumanReviewEnabled = manifest.humanReviewState?.translationReviewEnabled ?? false
+            fillerAnalysisBeforeReview = manifest.humanReviewState?.fillerAnalysisBeforeReview ?? true
             humanReviewCheckpoint = manifest.humanReviewState?.pendingCheckpoint
             progress = .idle
             status = manifest.workflow?.status.title ?? "Готово"
@@ -197,6 +206,7 @@ final class WorkflowViewModel: ObservableObject {
     }
 
     func createBlurredVideo() {
+        guard blurEnabled else { return }
         startRun(operations: [.applyBlur])
     }
 
@@ -226,6 +236,12 @@ final class WorkflowViewModel: ObservableObject {
 
     func selectHighConfidenceFillers() {
         for candidate in fillerCandidates where candidate.highConfidence {
+            setFillerCandidate(candidate.id, selected: true)
+        }
+    }
+
+    func selectAllFillers() {
+        for candidate in fillerCandidates {
             setFillerCandidate(candidate.id, selected: true)
         }
     }
@@ -475,6 +491,28 @@ final class WorkflowViewModel: ObservableObject {
 
     var unresolvedReviewTasks: [ReviewTask] {
         reviewTasks.filter { $0.status == .needsReview }.sorted { $0.start < $1.start }
+    }
+
+    var canBeginHumanReview: Bool {
+        !isRunning && projectURL != nil && humanReviewCheckpoint == nil && !reviewCues.isEmpty
+    }
+
+    func beginHumanReview() {
+        guard let projectURL else { return }
+        do {
+            let manifest = try store.load(from: projectURL)
+            let language = manifest.languageProfile?.effective ?? artifactLanguage
+            humanReviewCheckpoint = try humanReviewService.beginReview(
+                projectURL: projectURL,
+                language: language
+            )
+            sourceHumanReviewEnabled = true
+            status = "Ожидает проверки"
+            refreshProjectResults(projectURL)
+            log.append("Human Review исходной расшифровки открыт вручную.")
+        } catch {
+            reportPreparationError(error)
+        }
     }
 
     func resolveReviewTask(_ task: ReviewTask, replacementText: String) -> Bool {
@@ -747,7 +785,8 @@ final class WorkflowViewModel: ObservableObject {
             dubbingLanguage: dubbingLanguage,
             dubbingMixMode: dubbingMixMode,
             sourceHumanReviewEnabled: sourceHumanReviewEnabled,
-            translationHumanReviewEnabled: translationHumanReviewEnabled
+            translationHumanReviewEnabled: translationHumanReviewEnabled,
+            fillerAnalysisBeforeReview: fillerAnalysisBeforeReview
         )
 
         runTask = Task { [weak self] in
@@ -914,7 +953,10 @@ final class WorkflowEngine: @unchecked Sendable {
         guard let mediaURL = settings.mediaURL else { throw WorkflowError.missingMedia }
         let projectURL = try settings.projectURL ?? store.createAutomaticProject(for: mediaURL)
         let layout = ProjectLayout(root: projectURL)
-        let operations = expanded(settings.selectedOperations)
+        let operations = expanded(
+            settings.selectedOperations,
+            includeFillerAnalysisBeforeReview: settings.fillerAnalysisBeforeReview
+        )
         let existingDuration = (try? store.load(from: projectURL).durationSeconds) ?? nil
         let etaContext = ETAContext(
             mediaDuration: existingDuration,
@@ -954,6 +996,7 @@ final class WorkflowEngine: @unchecked Sendable {
             var state = manifest.humanReviewState ?? .newProjectDefault
             state.sourceReviewEnabled = settings.sourceHumanReviewEnabled
             state.translationReviewEnabled = settings.translationHumanReviewEnabled
+            state.fillerAnalysisBeforeReview = settings.fillerAnalysisBeforeReview
             manifest.humanReviewState = state
         }
         try updateWorkflow(projectURL, status: .running, progress: 0, mode: settings.mode, error: nil)
@@ -1438,7 +1481,9 @@ final class WorkflowEngine: @unchecked Sendable {
                     let selectedIDs: Set<String>
                     switch settings.fillerMode {
                     case .detectOnly:
-                        throw WorkflowError.processFailed("Для mute выберите режим выбранных или уверенных кандидатов.")
+                        throw WorkflowError.processFailed("Для mute выберите всех, выбранных или уверенных кандидатов.")
+                    case .muteAll:
+                        selectedIDs = Set(report.candidates.map(\.id))
                     case .muteSelected:
                         selectedIDs = settings.selectedFillerCandidateIDs
                     case .muteHighConfidence:
@@ -1748,6 +1793,7 @@ final class WorkflowEngine: @unchecked Sendable {
         let revision: TranscriptRevision
         switch operation {
         case .assessTranscriptionQuality:
+            guard !settings.fillerAnalysisBeforeReview else { return nil }
             guard let sourceLanguage = manifest.languageProfile?.effective,
                   let sourceRevision = revisionMatchingWorkingSubtitle(
                     manifest: manifest,
@@ -1755,6 +1801,19 @@ final class WorkflowEngine: @unchecked Sendable {
                     projectURL: projectURL
                   ) else {
                 throw WorkflowError.processFailed("Не найдена исходная ревизия для Human Review.")
+            }
+            kind = .sourceTranscript
+            language = sourceLanguage
+            revision = sourceRevision
+        case .detectFillerWords:
+            guard settings.fillerAnalysisBeforeReview,
+                  let sourceLanguage = manifest.languageProfile?.effective,
+                  let sourceRevision = revisionMatchingWorkingSubtitle(
+                    manifest: manifest,
+                    language: sourceLanguage,
+                    projectURL: projectURL
+                  ) else {
+                return nil
             }
             kind = .sourceTranscript
             language = sourceLanguage
@@ -2173,13 +2232,23 @@ final class WorkflowEngine: @unchecked Sendable {
         }
     }
 
-    private func expanded(_ selected: Set<WorkflowOperation>) -> [WorkflowOperation] {
+    func expanded(
+        _ selected: Set<WorkflowOperation>,
+        includeFillerAnalysisBeforeReview: Bool = false
+    ) -> [WorkflowOperation] {
         var result = Set<WorkflowOperation>()
         func visit(_ operation: WorkflowOperation) {
             operation.dependencies.forEach(visit)
             result.insert(operation)
         }
         var automatic = selected
+        let transcriptConsumers: Set<WorkflowOperation> = [
+            .transcribe, .translateTranscript, .validateTimeline, .topicTimecoding,
+            .cutRange, .burnFragmentSubtitles, .cutTopic, .burnSubtitles, .createDubbing
+        ]
+        if includeFillerAnalysisBeforeReview && !selected.isDisjoint(with: transcriptConsumers) {
+            automatic.insert(.detectFillerWords)
+        }
         let videoOperations: Set<WorkflowOperation> = [.cutRange, .burnFragmentSubtitles, .cutTopic, .burnSubtitles, .adjustSpeed, .applyBlur, .applyWatermark, .muteFillerWords, .enhanceAudio, .createDubbing]
         if !selected.isDisjoint(with: videoOperations) {
             automatic.insert(.ffprobeValidate)

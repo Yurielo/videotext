@@ -85,6 +85,8 @@ struct ProjectStore {
                 }
                 manifest.transcriptRevisions = revisions
                 manifest.humanReviewState = state
+            } else if manifest.humanReviewState?.fillerAnalysisBeforeReview == nil {
+                manifest.humanReviewState?.fillerAnalysisBeforeReview = true
             }
             if manifest.blurAdjustments == nil { manifest.blurAdjustments = [] }
             if manifest.watermarkAdjustments == nil { manifest.watermarkAdjustments = [] }

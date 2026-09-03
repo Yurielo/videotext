@@ -211,6 +211,14 @@ struct HumanReviewProbe {
             completedManifest.reviewTasks?.first(where: { $0.id == "unrelated-old-task" })?.status == .needsReview,
             "утверждение закрыло задание другой ревизии"
         )
+        let activeRU = try requireValue(completedManifest.activeTranscriptRevision(for: .ru), "нет активной RU-ревизии")
+        let reopened = try service.beginReview(projectURL: project, language: .ru)
+        try require(reopened.revisionID == activeRU.id, "ручной Human Review открыт не для активной ревизии")
+        try require(reopened.pendingOperations.isEmpty, "ручной Human Review создал лишнюю очередь")
+        let reopenedManifest = try store.load(from: project)
+        try require(reopenedManifest.workflow?.status == .awaitingReview, "ручной Human Review не приостановил проект")
+        _ = try service.approve(projectURL: project)
+        try require(try store.load(from: project).workflow?.status == .completed, "ручной Human Review не завершил проект")
         print("HUMAN_REVIEW_PROBE_PASS")
     }
 
@@ -238,6 +246,11 @@ struct HumanReviewProbe {
 
     private static func require(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {
         guard try condition() else { throw ProbeFailure(message: message) }
+    }
+
+    private static func requireValue<T>(_ value: T?, _ message: String) throws -> T {
+        guard let value else { throw ProbeFailure(message: message) }
+        return value
     }
 }
 

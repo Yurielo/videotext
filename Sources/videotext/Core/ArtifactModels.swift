@@ -134,6 +134,7 @@ struct HumanReviewCheckpoint: Codable, Equatable {
 struct HumanReviewState: Codable, Equatable {
     var sourceReviewEnabled: Bool
     var translationReviewEnabled: Bool
+    var fillerAnalysisBeforeReview: Bool? = nil
     var activeRevisionIDs: [String: String]
     var draftRevisionIDs: [String: String]
     var pendingCheckpoint: HumanReviewCheckpoint?
@@ -141,6 +142,7 @@ struct HumanReviewState: Codable, Equatable {
     static let newProjectDefault = HumanReviewState(
         sourceReviewEnabled: true,
         translationReviewEnabled: false,
+        fillerAnalysisBeforeReview: true,
         activeRevisionIDs: [:],
         draftRevisionIDs: [:],
         pendingCheckpoint: nil
@@ -362,6 +364,7 @@ struct FillerMuteRecord: Codable, Equatable, Identifiable {
 
 enum FillerProcessingMode: String, CaseIterable, Codable, Identifiable {
     case detectOnly
+    case muteAll
     case muteSelected
     case muteHighConfidence
 
@@ -370,6 +373,7 @@ enum FillerProcessingMode: String, CaseIterable, Codable, Identifiable {
     var title: String {
         switch self {
         case .detectOnly: return "Только определить"
+        case .muteAll: return "Mute всех"
         case .muteSelected: return "Mute выбранных"
         case .muteHighConfidence: return "Mute уверенных"
         }

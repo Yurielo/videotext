@@ -12,6 +12,7 @@ enum WorkflowOperation: String, CaseIterable, Identifiable, Codable {
     case detectLanguage
     case transcribe
     case assessTranscriptionQuality
+    case detectFillerWords
     case translateTranscript
     case validateTimeline
     case topicTimecoding
@@ -22,7 +23,6 @@ enum WorkflowOperation: String, CaseIterable, Identifiable, Codable {
     case adjustSpeed
     case applyBlur
     case applyWatermark
-    case detectFillerWords
     case muteFillerWords
     case analyzeAudio
     case enhanceAudio
@@ -222,7 +222,7 @@ struct SubtitleStyleSettings: Codable, Equatable {
         textColorHex: "#FFFFFF",
         outlineColorHex: "#000000",
         fontName: "Helvetica",
-        fontSize: 28,
+        fontSize: 20,
         outlineWidth: 2,
         position: .bottom,
         backgroundOpacity: 0
@@ -626,13 +626,14 @@ struct WorkflowSettings {
     var watermarkEnd: TimeInterval? = nil
     var watermarkIncludesBlur: Bool = false
     var watermarkBurnSubtitles: Bool = false
-    var fillerMode: FillerProcessingMode = .detectOnly
+    var fillerMode: FillerProcessingMode = .muteAll
     var selectedFillerCandidateIDs: Set<String> = []
     var audioEnhancementProfile: AudioEnhancementProfile = .normal
     var dubbingLanguage: ArtifactLanguage = .ru
     var dubbingMixMode: DubbingMixMode = .replace
     var sourceHumanReviewEnabled: Bool = true
     var translationHumanReviewEnabled: Bool = false
+    var fillerAnalysisBeforeReview: Bool = true
 }
 
 struct AppAlert: Identifiable {

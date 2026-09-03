@@ -15,6 +15,7 @@ struct ContentView: View {
     @State private var reviewSearch = ""
     @State private var reviewIssuesOnly = false
     @State private var confirmTopicRemoval = false
+    @State private var selectedResultsTab = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -81,6 +82,9 @@ struct ContentView: View {
                 model.removeSelectedTopicBoundary()
             }
             Button("Отмена", role: .cancel) {}
+        }
+        .onChange(of: model.humanReviewCheckpoint) { _, checkpoint in
+            if checkpoint != nil { selectedResultsTab = 2 }
         }
     }
 
@@ -268,6 +272,19 @@ struct ContentView: View {
                         .help(model.projectURL?.path ?? "Создайте или откройте проект")
                 }
 
+                if model.humanReviewCheckpoint != nil {
+                    GroupBox("Требуется Human Review") {
+                        Button {
+                            selectedResultsTab = 2
+                        } label: {
+                            Label("Открыть редактор расшифровки", systemImage: "pencil.and.list.clipboard")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(6)
+                    }
+                }
+
                 GroupBox("Операции полного проекта") {
                     VStack(alignment: .leading) {
                         ForEach(WorkflowOperation.userSelectable) { operation in
@@ -292,15 +309,25 @@ struct ContentView: View {
                             }
                         }
                         Picker("Язык распознавания", selection: $model.whisperLanguage) {
-                            Text("Авто").tag("auto")
                             Text("RU").tag("ru")
+                            Text("Авто").tag("auto")
                             Text("EN").tag("en")
                         }
                         .pickerStyle(.segmented)
                         Toggle("Human Review исходной расшифровки", isOn: $model.sourceHumanReviewEnabled)
                             .disabled(model.isRunning || model.humanReviewCheckpoint != nil)
+                        Toggle("Анализировать слова-паразиты до Human Review", isOn: $model.fillerAnalysisBeforeReview)
+                            .disabled(model.isRunning || model.humanReviewCheckpoint != nil)
                         Toggle("Human Review перевода", isOn: $model.translationHumanReviewEnabled)
                             .disabled(model.isRunning || model.humanReviewCheckpoint != nil)
+                        if model.humanReviewCheckpoint == nil {
+                            Button {
+                                model.beginHumanReview()
+                            } label: {
+                                Label("Открыть расшифровку для Human Review", systemImage: "pencil.and.list.clipboard")
+                            }
+                            .disabled(!model.canBeginHumanReview)
+                        }
                     }
                     .textFieldStyle(.roundedBorder)
                     .padding(6)
@@ -486,36 +513,39 @@ struct ContentView: View {
 
                 GroupBox("Статический blur") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Picker("Источник", selection: $model.blurSource) {
-                            ForEach(SpeedSourceKind.allCases) { source in
-                                Text(source.title).tag(source)
+                        Toggle("Включить blur", isOn: $model.blurEnabled)
+                        if model.blurEnabled {
+                            Picker("Источник", selection: $model.blurSource) {
+                                ForEach(SpeedSourceKind.allCases) { source in
+                                    Text(source.title).tag(source)
+                                }
                             }
-                        }
-                        .pickerStyle(.segmented)
-                        BlurRegionSelector(mediaURL: model.mediaURL, region: $model.blurRegion)
-                            .frame(minHeight: 150)
-                            .aspectRatio(16 / 9, contentMode: .fit)
-                        HStack {
-                            Text("Интенсивность")
-                            Slider(value: $model.blurIntensity, in: 1...30, step: 1)
-                            Text("\(Int(model.blurIntensity))")
-                                .monospacedDigit()
-                                .frame(width: 24, alignment: .trailing)
-                        }
-                        Toggle("Ограничить по времени", isOn: $model.blurUsesTimeRange)
-                        if model.blurUsesTimeRange {
-                            HStack(alignment: .top, spacing: 12) {
-                                timecodeField("Начало", text: $model.blurStartText)
-                                timecodeField("Конец", text: $model.blurEndText)
+                            .pickerStyle(.segmented)
+                            BlurRegionSelector(mediaURL: model.mediaURL, region: $model.blurRegion)
+                                .frame(minHeight: 150)
+                                .aspectRatio(16 / 9, contentMode: .fit)
+                            HStack {
+                                Text("Интенсивность")
+                                Slider(value: $model.blurIntensity, in: 1...30, step: 1)
+                                Text("\(Int(model.blurIntensity))")
+                                    .monospacedDigit()
+                                    .frame(width: 24, alignment: .trailing)
                             }
+                            Toggle("Ограничить по времени", isOn: $model.blurUsesTimeRange)
+                            if model.blurUsesTimeRange {
+                                HStack(alignment: .top, spacing: 12) {
+                                    timecodeField("Начало", text: $model.blurStartText)
+                                    timecodeField("Конец", text: $model.blurEndText)
+                                }
+                            }
+                            Button {
+                                model.createBlurredVideo()
+                            } label: {
+                                Label("Создать файл", systemImage: "drop.halffull")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(model.projectURL == nil)
                         }
-                        Button {
-                            model.createBlurredVideo()
-                        } label: {
-                            Label("Создать файл", systemImage: "drop.halffull")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.projectURL == nil)
                     }
                     .padding(6)
                 }
@@ -630,6 +660,7 @@ struct ContentView: View {
                         if !model.fillerCandidates.isEmpty {
                             TextField("Поиск", text: $model.fillerSearch)
                             HStack {
+                                Button("Выбрать все") { model.selectAllFillers() }
                                 Button("Выбрать уверенные") { model.selectHighConfidenceFillers() }
                                 Button("Снять выбор") {
                                     for id in model.selectedFillerCandidateIDs { model.setFillerCandidate(id, selected: false) }
@@ -845,15 +876,19 @@ struct ContentView: View {
     }
 
     private var results: some View {
-        TabView {
+        TabView(selection: $selectedResultsTab) {
             projectResults
                 .tabItem { Label("Результаты", systemImage: "checklist") }
+                .tag(0)
             topicEditor
                 .tabItem { Label("Темы", systemImage: "list.bullet.rectangle") }
+                .tag(1)
             reviewTasksPanel
                 .tabItem { Label("Проверка (\(model.unresolvedReviewTasks.count))", systemImage: "exclamationmark.bubble") }
+                .tag(2)
             journal
                 .tabItem { Label("Журнал", systemImage: "text.alignleft") }
+                .tag(3)
         }
     }
 
@@ -1102,7 +1137,14 @@ struct ContentView: View {
             if model.humanReviewCheckpoint != nil {
                 EmptyView()
             } else if model.unresolvedReviewTasks.isEmpty {
-                ContentUnavailableView("Заданий нет", systemImage: "checkmark.circle")
+                ContentUnavailableView {
+                    Label("Заданий нет", systemImage: "checkmark.circle")
+                } actions: {
+                    Button("Начать Human Review") {
+                        model.beginHumanReview()
+                    }
+                    .disabled(!model.canBeginHumanReview)
+                }
             } else {
                 List(model.unresolvedReviewTasks) { task in
                     Button {
@@ -1287,6 +1329,7 @@ struct ContentView: View {
 
     private var reviewCueIDs: Set<Int> {
         Set(model.unresolvedReviewTasks.flatMap(\.cueIDs))
+            .union(model.fillerCandidates.map(\.cueID))
     }
 
     private var filteredReviewCues: [SubtitleCue] {

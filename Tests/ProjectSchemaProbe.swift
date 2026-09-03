@@ -37,7 +37,35 @@ struct ProjectSchemaProbe {
         try require(migrated.reviewTasks?.isEmpty == true, "review tasks не инициализированы")
         try require(migrated.humanReviewState?.sourceReviewEnabled == true, "source Human Review не включён по умолчанию")
         try require(migrated.humanReviewState?.translationReviewEnabled == false, "translation Human Review должен быть выключен по умолчанию")
+        try require(migrated.humanReviewState?.fillerAnalysisBeforeReview == true, "анализ слов-паразитов перед Human Review не включён")
         try require(migrated.humanReviewState?.pendingCheckpoint == nil, "legacy migration создала ложный checkpoint")
+        try require(SubtitleStyleSettings.standard.fontSize == 20, "размер субтитров по умолчанию должен быть 20")
+        let defaultSettings = WorkflowSettings(
+            mediaURL: nil,
+            projectURL: nil,
+            selectedOperations: [],
+            mode: .newProject,
+            rangeStart: 0,
+            rangeEnd: 1,
+            fragmentName: "",
+            burnFragmentSubtitles: false,
+            subtitleStyle: .standard,
+            selectedTopicID: nil,
+            whisperModelPath: "",
+            whisperLanguage: "ru"
+        )
+        try require(defaultSettings.fillerAnalysisBeforeReview, "анализ слов-паразитов должен быть включён в настройках по умолчанию")
+        try require(defaultSettings.fillerMode == .muteAll, "режим mute по умолчанию должен охватывать все найденные слова-паразиты")
+        let engine = WorkflowEngine(store: store)
+        let planned = engine.expanded([.topicTimecoding], includeFillerAnalysisBeforeReview: true)
+        try require(planned.contains(.detectFillerWords), "pre-review анализ слов-паразитов не добавлен в план")
+        try require(
+            planned.firstIndex(of: .assessTranscriptionQuality)! < planned.firstIndex(of: .detectFillerWords)!
+                && planned.firstIndex(of: .detectFillerWords)! < planned.firstIndex(of: .topicTimecoding)!,
+            "нарушен порядок quality -> filler analysis -> topics"
+        )
+        let plannedWithoutFillers = engine.expanded([.topicTimecoding], includeFillerAnalysisBeforeReview: false)
+        try require(!plannedWithoutFillers.contains(.detectFillerWords), "выключенный pre-review анализ остался в плане")
         try require(fileManager.fileExists(atPath: layout.legacyManifestBackupURL(schemaVersion: 3).path), "нет backup schema v3")
 
         var uniquePaths = Set<String>()

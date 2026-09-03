@@ -14,6 +14,45 @@ struct HumanReviewService {
         self.store = store
     }
 
+    func beginReview(
+        projectURL: URL,
+        language: ArtifactLanguage,
+        pendingOperations: [WorkflowOperation] = []
+    ) throws -> HumanReviewCheckpoint {
+        var created: HumanReviewCheckpoint?
+        try store.mutate(projectURL) { manifest in
+            var state = manifest.humanReviewState ?? .newProjectDefault
+            guard state.pendingCheckpoint == nil else {
+                throw WorkflowError.processFailed("Human Review уже выполняется.")
+            }
+            guard let revision = manifest.activeTranscriptRevision(for: language)
+                ?? manifest.transcriptRevisions?.last(where: { $0.language == language }) else {
+                throw WorkflowError.processFailed("Для выбранного языка нет расшифровки, доступной для Human Review.")
+            }
+            let sourceLanguage = manifest.languageProfile?.effective
+            let checkpoint = HumanReviewCheckpoint(
+                kind: sourceLanguage == language ? .sourceTranscript : .translatedTranscript,
+                language: language,
+                revisionID: revision.id,
+                pendingOperations: pendingOperations,
+                createdAt: Date()
+            )
+            if checkpoint.kind == .sourceTranscript {
+                state.sourceReviewEnabled = true
+            } else {
+                state.translationReviewEnabled = true
+            }
+            state.pendingCheckpoint = checkpoint
+            manifest.humanReviewState = state
+            manifest.workflow?.status = .awaitingReview
+            created = checkpoint
+        }
+        guard let created else {
+            throw WorkflowError.processFailed("Не удалось начать Human Review.")
+        }
+        return created
+    }
+
     func transitionAfterGeneration(
         projectURL: URL,
         kind: HumanReviewCheckpointKind,
