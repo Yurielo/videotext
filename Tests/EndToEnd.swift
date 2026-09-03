@@ -752,6 +752,19 @@ struct EndToEndTest {
         file.sourceSignature = ""
         file.status = .draft
         try TopicFileService().save(file, projectURL: projectURL)
+        let manifest = try ProjectStore().load(from: projectURL)
+        let language = manifest.languageProfile?.effective ?? .ru
+        for granularity in TopicGranularity.allCases {
+            var variant = file
+            variant.granularity = granularity
+            try TopicFileService().save(
+                variant,
+                projectURL: projectURL,
+                language: language,
+                granularity: granularity,
+                updateLegacyFiles: false
+            )
+        }
     }
 
     @MainActor
