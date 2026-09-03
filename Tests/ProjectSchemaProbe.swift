@@ -39,6 +39,9 @@ struct ProjectSchemaProbe {
         try require(migrated.humanReviewState?.translationReviewEnabled == false, "translation Human Review должен быть выключен по умолчанию")
         try require(migrated.humanReviewState?.fillerAnalysisBeforeReview == true, "анализ слов-паразитов перед Human Review не включён")
         try require(migrated.humanReviewState?.pendingCheckpoint == nil, "legacy migration создала ложный checkpoint")
+        try require(migrated.topicRevisions?.isEmpty == true, "topic revisions не инициализированы")
+        try require(migrated.topicReviewState?.enabled == true, "Human Review тем не включён по умолчанию")
+        try require(migrated.topicReviewState?.pendingCheckpoint == nil, "legacy migration создала ложный topic checkpoint")
         try require(SubtitleStyleSettings.standard.fontSize == 20, "размер субтитров по умолчанию должен быть 20")
         let defaultSettings = WorkflowSettings(
             mediaURL: nil,

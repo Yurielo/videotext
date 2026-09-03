@@ -55,6 +55,8 @@ final class WorkflowViewModel: ObservableObject {
     @Published var translationHumanReviewEnabled = false
     @Published var fillerAnalysisBeforeReview = true
     @Published var humanReviewCheckpoint: HumanReviewCheckpoint?
+    @Published var topicHumanReviewEnabled = true
+    @Published var topicReviewCheckpoint: TopicReviewCheckpoint?
     @Published var quoteCandidates: [QuoteRangeCandidate] = []
     @Published var selectedQuoteCandidateID = ""
     @Published var topics: [TopicSegment] = []
@@ -84,6 +86,7 @@ final class WorkflowViewModel: ObservableObject {
     private let resultSummaryService = ProjectResultSummaryService()
     private let reviewTaskService = ReviewTaskService()
     private let humanReviewService = HumanReviewService()
+    private let topicReviewService = TopicReviewService()
     private var clockTask: Task<Void, Never>?
     private var runTask: Task<Void, Never>?
     private var runStartedAt: Date?
@@ -130,6 +133,8 @@ final class WorkflowViewModel: ObservableObject {
             translationHumanReviewEnabled = false
             fillerAnalysisBeforeReview = true
             humanReviewCheckpoint = nil
+            topicHumanReviewEnabled = true
+            topicReviewCheckpoint = nil
             progress = .idle
             log.append("Создан новый проект: \(automaticProject.path)")
             status = "Готово"
@@ -165,6 +170,8 @@ final class WorkflowViewModel: ObservableObject {
             translationHumanReviewEnabled = manifest.humanReviewState?.translationReviewEnabled ?? false
             fillerAnalysisBeforeReview = manifest.humanReviewState?.fillerAnalysisBeforeReview ?? true
             humanReviewCheckpoint = manifest.humanReviewState?.pendingCheckpoint
+            topicHumanReviewEnabled = manifest.topicReviewState?.enabled ?? true
+            topicReviewCheckpoint = manifest.topicReviewState?.pendingCheckpoint
             progress = .idle
             status = manifest.workflow?.status.title ?? "Готово"
             selectedHistoryID = projectRoot.path
@@ -181,9 +188,9 @@ final class WorkflowViewModel: ObservableObject {
     }
 
     func run() {
-        if humanReviewCheckpoint != nil {
+        if humanReviewCheckpoint != nil || topicReviewCheckpoint != nil {
             status = "Ожидает проверки"
-            alert = AppAlert(title: "Требуется Human Review", message: "Завершите проверку расшифровки перед продолжением операций.")
+            alert = AppAlert(title: "Требуется Human Review", message: "Завершите текущую проверку перед продолжением операций.")
             return
         }
         startRun(operations: selectedOperations)
@@ -432,7 +439,7 @@ final class WorkflowViewModel: ObservableObject {
     }
 
     @discardableResult
-    func saveTopicEdits(title: String, startText: String, endText: String) -> Bool {
+    func saveTopicEdits(title: String, summary: String, startText: String, endText: String) -> Bool {
         guard let projectURL, let topic = selectedTopic else { return false }
         do {
             let start = try TimecodeParser.parse(startText)
@@ -441,8 +448,11 @@ final class WorkflowViewModel: ObservableObject {
                 projectURL: projectURL,
                 id: topic.id,
                 title: title,
+                summary: summary,
                 start: start,
-                end: end
+                end: end,
+                language: artifactLanguage,
+                granularity: topicGranularity
             )
             applyEditedTopics(file, preferredID: topic.id, logMessage: "Тема отредактирована: \(title).")
             return true
@@ -454,19 +464,34 @@ final class WorkflowViewModel: ObservableObject {
 
     func splitSelectedTopic() {
         editTopics("Тема разделена.") { service, projectURL, topic in
-            try service.split(projectURL: projectURL, id: topic.id)
+            try service.split(
+                projectURL: projectURL,
+                id: topic.id,
+                language: artifactLanguage,
+                granularity: topicGranularity
+            )
         }
     }
 
     func mergeSelectedTopicWithNext() {
         editTopics("Тема объединена со следующей.") { service, projectURL, topic in
-            try service.mergeWithNext(projectURL: projectURL, id: topic.id)
+            try service.mergeWithNext(
+                projectURL: projectURL,
+                id: topic.id,
+                language: artifactLanguage,
+                granularity: topicGranularity
+            )
         }
     }
 
     func removeSelectedTopicBoundary() {
         editTopics("Граница темы удалена; её реплики присоединены к соседней теме.") { service, projectURL, topic in
-            try service.removeBoundary(projectURL: projectURL, id: topic.id)
+            try service.removeBoundary(
+                projectURL: projectURL,
+                id: topic.id,
+                language: artifactLanguage,
+                granularity: topicGranularity
+            )
         }
     }
 
@@ -476,6 +501,7 @@ final class WorkflowViewModel: ObservableObject {
         let manifest = try? store.load(from: projectURL)
         reviewTasks = manifest?.reviewTasks ?? []
         humanReviewCheckpoint = manifest?.humanReviewState?.pendingCheckpoint
+        topicReviewCheckpoint = manifest?.topicReviewState?.pendingCheckpoint
         let layout = ProjectLayout(root: projectURL)
         let reviewURL: URL
         if let language = humanReviewCheckpoint?.language,
@@ -561,6 +587,39 @@ final class WorkflowViewModel: ObservableObject {
             runMode = .resumeProject
             refreshProjectResults(projectURL)
             log.append("Human Review завершён: утверждена ревизия \(approval.revision.id).")
+            if approval.pendingOperations.isEmpty {
+                status = "Завершено"
+            } else {
+                startRun(operations: Set(approval.pendingOperations))
+            }
+        } catch {
+            reportPreparationError(error)
+        }
+    }
+
+    func beginTopicReview() {
+        guard !isRunning, let projectURL else { return }
+        do {
+            topicReviewCheckpoint = try topicReviewService.beginReview(
+                projectURL: projectURL,
+                enabled: true,
+                force: true
+            )
+            topicHumanReviewEnabled = true
+            status = "Ожидает проверки тем"
+            log.append("Human Review тематического таймкодинга открыт вручную.")
+        } catch {
+            reportPreparationError(error)
+        }
+    }
+
+    func approveTopicReview() {
+        guard !isRunning, let projectURL else { return }
+        do {
+            let approval = try topicReviewService.approve(projectURL: projectURL)
+            topicReviewCheckpoint = nil
+            refreshProjectResults(projectURL)
+            log.append("Human Review тематического таймкодинга завершён: утверждено вариантов \(approval.revisions.count).")
             if approval.pendingOperations.isEmpty {
                 status = "Завершено"
             } else {
@@ -674,6 +733,11 @@ final class WorkflowViewModel: ObservableObject {
 
     private func startRun(operations: Set<WorkflowOperation>) {
         guard !isRunning else { return }
+        guard humanReviewCheckpoint == nil, topicReviewCheckpoint == nil else {
+            status = "Ожидает проверки"
+            alert = AppAlert(title: "Требуется Human Review", message: "Завершите текущую проверку перед созданием производных файлов.")
+            return
+        }
         guard let mediaURL else {
             reportPreparationError(WorkflowError.missingMedia)
             return
@@ -786,7 +850,8 @@ final class WorkflowViewModel: ObservableObject {
             dubbingMixMode: dubbingMixMode,
             sourceHumanReviewEnabled: sourceHumanReviewEnabled,
             translationHumanReviewEnabled: translationHumanReviewEnabled,
-            fillerAnalysisBeforeReview: fillerAnalysisBeforeReview
+            fillerAnalysisBeforeReview: fillerAnalysisBeforeReview,
+            topicHumanReviewEnabled: topicHumanReviewEnabled
         )
 
         runTask = Task { [weak self] in
@@ -816,7 +881,8 @@ final class WorkflowViewModel: ObservableObject {
                     self.clearTopicMetadata()
                 }
                 self.humanReviewCheckpoint = result.checkpoint
-                self.status = result.checkpoint == nil ? "Завершено" : "Ожидает проверки"
+                self.topicReviewCheckpoint = result.topicReviewCheckpoint
+                self.status = result.checkpoint == nil && result.topicReviewCheckpoint == nil ? "Завершено" : "Ожидает проверки"
                 self.runMode = .resumeProject
                 self.progress.elapsed = result.elapsed
                 self.progress.estimatedTotal = result.elapsed
@@ -826,6 +892,12 @@ final class WorkflowViewModel: ObservableObject {
                     self.alert = AppAlert(
                         title: "Требуется Human Review",
                         message: "Проверьте расшифровку \(checkpoint.language.rawValue.uppercased()). После утверждения обработка продолжится автоматически."
+                    )
+                } else if result.topicReviewCheckpoint != nil {
+                    NSSound.beep()
+                    self.alert = AppAlert(
+                        title: "Требуется Human Review тем",
+                        message: "Проверьте подробный, обычный и крупный таймкодинг. После утверждения обработка продолжится автоматически."
                     )
                 } else {
                     await self.notifications.notifySuccess(
@@ -895,6 +967,7 @@ struct WorkflowResult {
     var topics: [TopicSegment]
     var elapsed: TimeInterval
     var checkpoint: HumanReviewCheckpoint? = nil
+    var topicReviewCheckpoint: TopicReviewCheckpoint? = nil
 }
 
 final class WorkflowEngine: @unchecked Sendable {
@@ -912,6 +985,7 @@ final class WorkflowEngine: @unchecked Sendable {
     let ollamaMemory = OllamaMemoryManager()
     let transcriptionQuality = TranscriptionQualityService()
     let humanReview: HumanReviewService
+    let topicReview: TopicReviewService
     let translationAdapter: TranslationAdapter
     let localWhisperRetry: LocalWhisperRetryService
     let fillerWords = FillerWordService()
@@ -939,6 +1013,7 @@ final class WorkflowEngine: @unchecked Sendable {
         speechSynthesis = SpeechSynthesisAdapter(runner: runner)
         localWhisperRetry = LocalWhisperRetryService(runner: runner)
         humanReview = HumanReviewService(store: store)
+        topicReview = TopicReviewService(store: store)
     }
 
     func cancel() {
@@ -992,12 +1067,26 @@ final class WorkflowEngine: @unchecked Sendable {
                 checkpoint: checkpoint
             )
         }
+        if let checkpoint = manifest.topicReviewState?.pendingCheckpoint {
+            let discovered = detector.discover(in: projectURL)
+            log("Операции не запущены: ожидается Human Review тематического таймкодинга.")
+            return WorkflowResult(
+                projectURL: projectURL,
+                outputs: discovered,
+                topics: (try? Self.loadTopics(projectURL: projectURL).topics) ?? [],
+                elapsed: 0,
+                topicReviewCheckpoint: checkpoint
+            )
+        }
         try store.mutate(projectURL) { manifest in
             var state = manifest.humanReviewState ?? .newProjectDefault
             state.sourceReviewEnabled = settings.sourceHumanReviewEnabled
             state.translationReviewEnabled = settings.translationHumanReviewEnabled
             state.fillerAnalysisBeforeReview = settings.fillerAnalysisBeforeReview
             manifest.humanReviewState = state
+            var topicState = manifest.topicReviewState ?? .newProjectDefault
+            topicState.enabled = settings.topicHumanReviewEnabled
+            manifest.topicReviewState = topicState
         }
         try updateWorkflow(projectURL, status: .running, progress: 0, mode: settings.mode, error: nil)
 
@@ -1038,6 +1127,24 @@ final class WorkflowEngine: @unchecked Sendable {
                             topics: (try? Self.loadTopics(projectURL: projectURL).topics) ?? [],
                             elapsed: elapsed,
                             checkpoint: checkpoint
+                        )
+                    }
+                    if let topicCheckpoint = try topicCheckpointAfter(
+                        operation,
+                        settings: settings,
+                        projectURL: projectURL,
+                        pendingOperations: Array(operations.dropFirst(index + 1))
+                    ) {
+                        let progress = Double(index + 1) / Double(max(operations.count, 1))
+                        try updateWorkflow(projectURL, status: .awaitingReview, progress: progress, mode: .resumeProject, error: nil)
+                        let elapsed = Date().timeIntervalSince(startedAt)
+                        log("Восстановлена приостановка для Human Review тематического таймкодинга.")
+                        return WorkflowResult(
+                            projectURL: projectURL,
+                            outputs: detector.discover(in: projectURL),
+                            topics: (try? Self.loadTopics(projectURL: projectURL).topics) ?? [],
+                            elapsed: elapsed,
+                            topicReviewCheckpoint: topicCheckpoint
                         )
                     }
                     continue
@@ -1740,6 +1847,24 @@ final class WorkflowEngine: @unchecked Sendable {
                         checkpoint: checkpoint
                     )
                 }
+                if let topicCheckpoint = try topicCheckpointAfter(
+                    operation,
+                    settings: settings,
+                    projectURL: projectURL,
+                    pendingOperations: Array(operations.dropFirst(index + 1))
+                ) {
+                    let progress = Double(index + 1) / Double(max(operations.count, 1))
+                    try updateWorkflow(projectURL, status: .awaitingReview, progress: progress, mode: .resumeProject, error: nil)
+                    let elapsed = Date().timeIntervalSince(startedAt)
+                    log("Обработка приостановлена для Human Review тематического таймкодинга.")
+                    return WorkflowResult(
+                        projectURL: projectURL,
+                        outputs: detector.discover(in: projectURL),
+                        topics: (try? Self.loadTopics(projectURL: projectURL).topics) ?? [],
+                        elapsed: elapsed,
+                        topicReviewCheckpoint: topicCheckpoint
+                    )
+                }
             }
         } catch is CancellationError {
             cleanupPartialFiles(in: projectURL)
@@ -1842,6 +1967,20 @@ final class WorkflowEngine: @unchecked Sendable {
             pendingOperations: pendingOperations,
             sourceReviewEnabled: settings.sourceHumanReviewEnabled,
             translationReviewEnabled: settings.translationHumanReviewEnabled
+        )
+    }
+
+    private func topicCheckpointAfter(
+        _ operation: WorkflowOperation,
+        settings: WorkflowSettings,
+        projectURL: URL,
+        pendingOperations: [WorkflowOperation]
+    ) throws -> TopicReviewCheckpoint? {
+        guard operation == .topicTimecoding else { return nil }
+        return try topicReview.beginReview(
+            projectURL: projectURL,
+            pendingOperations: pendingOperations,
+            enabled: settings.topicHumanReviewEnabled
         )
     }
 

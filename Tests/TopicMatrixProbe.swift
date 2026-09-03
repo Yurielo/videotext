@@ -7,6 +7,16 @@ struct TopicMatrixProbe {
         let root = fm.temporaryDirectory.appendingPathComponent("videotext-topic-matrix-\(UUID().uuidString)", isDirectory: true)
         defer { try? fm.removeItem(at: root) }
         try ProjectLayout(root: root).createDirectories()
+        let media = root.appendingPathComponent("source.mp4")
+        try Data("media".utf8).write(to: media)
+        let store = ProjectStore(history: ProjectHistoryStore(indexURL: root.appendingPathComponent("history.json")))
+        var manifest = try store.ensureProject(at: root, mediaURL: media, mode: .newProject)
+        manifest.durationSeconds = 10
+        try store.save(manifest, to: root)
+        let timeline = [SubtitleCue(id: 1, start: 0, end: 10, text: "Topic review timeline.")]
+        for language in ArtifactLanguage.allCases {
+            try SRTService().writePreservingIDs(timeline, to: ProjectLayout(root: root).subtitlesURL(language: language))
+        }
         let service = TopicFileService()
         var expectedTitles: [String: String] = [:]
 
@@ -65,6 +75,60 @@ struct TopicMatrixProbe {
         }
         let legacy = try WorkflowEngine.loadTopics(projectURL: root)
         try require(legacy.granularity == .normal && legacy.topics.first?.title == "Topic ru-normal", "legacy-файл не указывает на выбранный набор")
+
+        let reviewService = TopicReviewService(store: store)
+        let checkpoint = try reviewService.beginReview(
+            projectURL: root,
+            pendingOperations: [.discoverResults],
+            enabled: true
+        )
+        try require(checkpoint?.revisionIDs.count == 6, "topic review не сохранил шесть вариантов")
+        _ = try service.update(
+            projectURL: root,
+            id: "topic-1",
+            title: "Reviewed RU detailed",
+            start: 0,
+            end: 10,
+            language: .ru,
+            granularity: .detailed
+        )
+        let approval = try reviewService.approve(projectURL: root)
+        try require(approval.revisions.count == 6, "утверждены не все topic-варианты")
+        try require(approval.pendingOperations == [.discoverResults], "topic review потерял очередь продолжения")
+        let reviewedManifest = try store.load(from: root)
+        try require(reviewedManifest.topicReviewState?.pendingCheckpoint == nil, "topic checkpoint не закрыт")
+        try require(reviewedManifest.topicReviewState?.activeRevisionIDs.count == 6, "активированы не все topic-ревизии")
+        let reviewedDetailed = try WorkflowEngine.loadTopics(projectURL: root, language: .ru, granularity: .detailed)
+        try require(reviewedDetailed.topics.first?.title == "Reviewed RU detailed", "редактор изменил не выбранный topic-вариант")
+
+        let repeated = try reviewService.beginReview(projectURL: root, enabled: true)
+        try require(repeated == nil, "неизменённые утверждённые темы повторно открыли checkpoint")
+        let manual = try reviewService.beginReview(projectURL: root, enabled: true, force: true)
+        try require(manual?.revisionIDs.count == 6, "ручной topic review не открылся")
+        var invalidDetailed = reviewedDetailed
+        invalidDetailed.topics[0].end = 9
+        invalidDetailed.topics[0].duration = 9
+        try service.save(
+            invalidDetailed,
+            projectURL: root,
+            language: .ru,
+            granularity: .detailed,
+            updateLegacyFiles: false
+        )
+        do {
+            _ = try reviewService.approve(projectURL: root)
+            throw ProbeFailure(message: "topic review утвердил нарушенную cue-границу")
+        } catch WorkflowError.invalidTopics {
+            // Expected strict rejection.
+        }
+        try service.save(
+            reviewedDetailed,
+            projectURL: root,
+            language: .ru,
+            granularity: .detailed,
+            updateLegacyFiles: false
+        )
+        _ = try reviewService.approve(projectURL: root)
 
         let layout = ProjectLayout(root: root)
         let localizedCues = [SubtitleCue(id: 1, start: 0, end: 2, text: "Локализованный источник тем.")]

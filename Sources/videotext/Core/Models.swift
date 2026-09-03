@@ -270,6 +270,8 @@ struct ProjectManifest: Codable {
     var transcriptRevisions: [TranscriptRevision]?
     var reviewTasks: [ReviewTask]?
     var humanReviewState: HumanReviewState? = nil
+    var topicRevisions: [TopicRevision]? = nil
+    var topicReviewState: TopicReviewState? = nil
     var blurAdjustments: [BlurAdjustmentRecord]? = nil
     var watermarkAdjustments: [WatermarkAdjustmentRecord]? = nil
     var fillerMuteRecords: [FillerMuteRecord]? = nil
@@ -634,6 +636,7 @@ struct WorkflowSettings {
     var sourceHumanReviewEnabled: Bool = true
     var translationHumanReviewEnabled: Bool = false
     var fillerAnalysisBeforeReview: Bool = true
+    var topicHumanReviewEnabled: Bool = false
 }
 
 struct AppAlert: Identifiable {

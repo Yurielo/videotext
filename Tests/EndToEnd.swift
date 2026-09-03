@@ -43,7 +43,8 @@ struct EndToEndTest {
                 subtitleStyle: .standard,
                 selectedTopicID: nil,
                 whisperModelPath: "",
-                whisperLanguage: "auto"
+                whisperLanguage: "auto",
+                topicHumanReviewEnabled: true
             )
 
             var initialProgress: [WorkflowProgress] = []
@@ -79,19 +80,49 @@ struct EndToEndTest {
                 selectedTopicID: nil,
                 whisperModelPath: modelPath,
                 whisperLanguage: "auto",
-                sourceHumanReviewEnabled: true
+                sourceHumanReviewEnabled: true,
+                topicHumanReviewEnabled: true
             )
             var resumedProgress: [WorkflowProgress] = []
-            let initialResult = try await initialEngine.run(
+            let topicPausedResult = try await initialEngine.run(
                 settings: resumedSettings,
                 onLog: { print($0) },
                 onProgress: { resumedProgress.append($0) }
             )
-            try require(initialResult.checkpoint == nil, "Утверждённая ревизия повторно открыла Human Review")
+            try require(topicPausedResult.checkpoint == nil, "Утверждённая ревизия повторно открыла Human Review расшифровки")
+            guard let topicCheckpoint = topicPausedResult.topicReviewCheckpoint else {
+                throw EndToEndError.failed("Тематический таймкодинг не остановился для Human Review")
+            }
+            try require(topicCheckpoint.revisionIDs.count >= 3, "Topic Human Review потерял варианты детализации")
+            let topicApproval = try TopicReviewService().approve(projectURL: topicPausedResult.projectURL)
+            try require(topicApproval.pendingOperations == topicCheckpoint.pendingOperations, "Topic Human Review изменил очередь продолжения")
+            let finalSettings = WorkflowSettings(
+                mediaURL: mediaURL,
+                projectURL: topicPausedResult.projectURL,
+                selectedOperations: Set(topicApproval.pendingOperations),
+                mode: .resumeProject,
+                rangeStart: 1,
+                rangeEnd: 6,
+                fragmentName: "",
+                burnFragmentSubtitles: false,
+                subtitleStyle: .standard,
+                selectedTopicID: nil,
+                whisperModelPath: modelPath,
+                whisperLanguage: "auto",
+                sourceHumanReviewEnabled: true,
+                topicHumanReviewEnabled: true
+            )
+            var finalProgress: [WorkflowProgress] = []
+            let initialResult = try await initialEngine.run(
+                settings: finalSettings,
+                onLog: { print($0) },
+                onProgress: { finalProgress.append($0) }
+            )
+            try require(initialResult.checkpoint == nil && initialResult.topicReviewCheckpoint == nil, "Утверждённый проект повторно открыл Human Review")
             try validateInitialProject(
                 initialResult,
                 mediaURL: mediaURL,
-                progress: resumedProgress,
+                progress: finalProgress,
                 requireWhisperProgress: false
             )
             try validateHybridTopics(initialResult.projectURL)

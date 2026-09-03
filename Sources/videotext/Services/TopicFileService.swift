@@ -39,14 +39,17 @@ struct TopicFileService {
         projectURL: URL,
         id: String,
         title: String,
+        summary: String? = nil,
         start: TimeInterval,
-        end: TimeInterval
+        end: TimeInterval,
+        language: ArtifactLanguage? = nil,
+        granularity: TopicGranularity? = nil
     ) throws -> TopicsFile {
-        var file = try WorkflowEngine.loadTopics(projectURL: projectURL)
+        var file = try load(projectURL: projectURL, language: language, granularity: granularity)
         guard let index = file.topics.firstIndex(where: { $0.id == id }) else { throw WorkflowError.missingTopics }
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanTitle.isEmpty, end > start else { throw WorkflowError.invalidRange }
-        let cues = try meaningfulCues(projectURL)
+        let cues = try meaningfulCues(projectURL, language: language)
         let cuePositions = Dictionary(uniqueKeysWithValues: cues.enumerated().map { ($0.element.id, $0.offset) })
         guard let currentStart = cuePositions[file.topics[index].sourceCueStart],
               let currentEnd = cuePositions[file.topics[index].sourceCueEnd] else {
@@ -99,18 +102,26 @@ struct TopicFileService {
             file.topics[index + 1].boundaryReason = "Граница изменена пользователем."
         }
         file.topics[index].title = cleanTitle
+        if let summary {
+            file.topics[index].summary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         file.topics[index].boundaryReason = index == 0
             ? file.topics[index].boundaryReason
             : "Граница изменена пользователем."
         file.createdAt = Date()
-        return try validateAndSave(file, projectURL: projectURL)
+        return try validateAndSave(file, projectURL: projectURL, language: language, granularity: granularity)
     }
 
-    func split(projectURL: URL, id: String) throws -> TopicsFile {
-        var file = try WorkflowEngine.loadTopics(projectURL: projectURL)
+    func split(
+        projectURL: URL,
+        id: String,
+        language: ArtifactLanguage? = nil,
+        granularity: TopicGranularity? = nil
+    ) throws -> TopicsFile {
+        var file = try load(projectURL: projectURL, language: language, granularity: granularity)
         guard let index = file.topics.firstIndex(where: { $0.id == id }) else { throw WorkflowError.missingTopics }
         let original = file.topics[index]
-        let cueMap = try cueMap(projectURL)
+        let cueMap = try cueMap(projectURL, language: language)
         let cues = original.cueIds.compactMap { cueMap[$0] }.sorted { $0.start < $1.start }
         guard cues.count >= 2 else {
             throw WorkflowError.invalidTopics("в теме недостаточно реплик для разделения.")
@@ -148,22 +159,32 @@ struct TopicFileService {
         )
         file.topics.replaceSubrange(index...index, with: [left, right])
         normalizeIDs(&file)
-        return try validateAndSave(file, projectURL: projectURL)
+        return try validateAndSave(file, projectURL: projectURL, language: language, granularity: granularity)
     }
 
-    func mergeWithNext(projectURL: URL, id: String) throws -> TopicsFile {
-        var file = try WorkflowEngine.loadTopics(projectURL: projectURL)
+    func mergeWithNext(
+        projectURL: URL,
+        id: String,
+        language: ArtifactLanguage? = nil,
+        granularity: TopicGranularity? = nil
+    ) throws -> TopicsFile {
+        var file = try load(projectURL: projectURL, language: language, granularity: granularity)
         guard let index = file.topics.firstIndex(where: { $0.id == id }), index + 1 < file.topics.count else {
             throw WorkflowError.invalidTopics("после выбранной темы нет раздела для объединения.")
         }
         file.topics[index] = merged(file.topics[index], file.topics[index + 1])
         file.topics.remove(at: index + 1)
         normalizeIDs(&file)
-        return try validateAndSave(file, projectURL: projectURL)
+        return try validateAndSave(file, projectURL: projectURL, language: language, granularity: granularity)
     }
 
-    func removeBoundary(projectURL: URL, id: String) throws -> TopicsFile {
-        var file = try WorkflowEngine.loadTopics(projectURL: projectURL)
+    func removeBoundary(
+        projectURL: URL,
+        id: String,
+        language: ArtifactLanguage? = nil,
+        granularity: TopicGranularity? = nil
+    ) throws -> TopicsFile {
+        var file = try load(projectURL: projectURL, language: language, granularity: granularity)
         guard file.topics.count > 1,
               let index = file.topics.firstIndex(where: { $0.id == id }) else {
             throw WorkflowError.invalidTopics("единственную тему удалить нельзя.")
@@ -176,20 +197,32 @@ struct TopicFileService {
             file.topics.remove(at: 0)
         }
         normalizeIDs(&file)
-        return try validateAndSave(file, projectURL: projectURL)
+        return try validateAndSave(file, projectURL: projectURL, language: language, granularity: granularity)
     }
 
-    private func validateAndSave(_ file: TopicsFile, projectURL: URL) throws -> TopicsFile {
-        let cues = try meaningfulCues(projectURL)
+    private func validateAndSave(
+        _ file: TopicsFile,
+        projectURL: URL,
+        language: ArtifactLanguage?,
+        granularity: TopicGranularity?
+    ) throws -> TopicsFile {
+        let cues = try meaningfulCues(projectURL, language: language)
         let duration = (try? ProjectStore().load(from: projectURL))?.durationSeconds
         let issues = validator.validate(file, expectedCues: cues, mediaDuration: duration)
         guard issues.isEmpty else { throw WorkflowError.invalidTopics(issues.joined(separator: " ")) }
-        try save(file, projectURL: projectURL)
+        if let language, let granularity {
+            try save(file, projectURL: projectURL, language: language, granularity: granularity, updateLegacyFiles: true)
+        } else {
+            try save(file, projectURL: projectURL)
+        }
         return file
     }
 
-    private func meaningfulCues(_ projectURL: URL) throws -> [SubtitleCue] {
-        let cues = try srt.load(from: ProjectLayout(root: projectURL).fullSRTURL)
+    private func meaningfulCues(_ projectURL: URL, language: ArtifactLanguage?) throws -> [SubtitleCue] {
+        let layout = ProjectLayout(root: projectURL)
+        let localized = language.map { layout.subtitlesURL(language: $0) }
+        let source = localized.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil } ?? layout.fullSRTURL
+        let cues = try srt.load(from: source)
         let meaningfulIDs = Set(TopicTextPreprocessor().prepare(cues).flatMap(\.cueIDs))
         return cues
             .filter { meaningfulIDs.contains($0.id) }
@@ -217,9 +250,23 @@ struct TopicFileService {
         topic.duration = topic.end - topic.start
     }
 
-    private func cueMap(_ projectURL: URL) throws -> [Int: SubtitleCue] {
-        let cues = try srt.load(from: ProjectLayout(root: projectURL).fullSRTURL)
+    private func cueMap(_ projectURL: URL, language: ArtifactLanguage?) throws -> [Int: SubtitleCue] {
+        let layout = ProjectLayout(root: projectURL)
+        let localized = language.map { layout.subtitlesURL(language: $0) }
+        let source = localized.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil } ?? layout.fullSRTURL
+        let cues = try srt.load(from: source)
         return Dictionary(uniqueKeysWithValues: cues.map { ($0.id, $0) })
+    }
+
+    private func load(
+        projectURL: URL,
+        language: ArtifactLanguage?,
+        granularity: TopicGranularity?
+    ) throws -> TopicsFile {
+        guard let language, let granularity else {
+            return try WorkflowEngine.loadTopics(projectURL: projectURL)
+        }
+        return try WorkflowEngine.loadTopics(projectURL: projectURL, language: language, granularity: granularity)
     }
 
     private func merged(_ left: TopicSegment, _ right: TopicSegment, preferRightTitle: Bool = false) -> TopicSegment {

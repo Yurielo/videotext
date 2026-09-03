@@ -2,7 +2,7 @@ import Foundation
 
 enum ProjectSchema {
     static let minimumSupportedVersion = 1
-    static let currentVersion = 5
+    static let currentVersion = 6
 }
 
 enum ArtifactLanguage: String, CaseIterable, Codable, Identifiable, Equatable {
@@ -151,6 +151,44 @@ struct HumanReviewState: Codable, Equatable {
     func activeRevisionID(for language: ArtifactLanguage) -> String? {
         activeRevisionIDs[language.rawValue]
     }
+}
+
+enum TopicRevisionStatus: String, Codable, Equatable {
+    case pending
+    case approved
+    case superseded
+}
+
+struct TopicRevision: Codable, Equatable, Identifiable {
+    var id: String
+    var language: ArtifactLanguage
+    var granularity: TopicGranularity
+    var parentRevisionID: String?
+    var jsonPath: String
+    var textPath: String
+    var contentHash: String
+    var status: TopicRevisionStatus
+    var createdAt: Date
+
+    var variantKey: String { "\(language.rawValue).\(granularity.rawValue)" }
+}
+
+struct TopicReviewCheckpoint: Codable, Equatable {
+    var revisionIDs: [String: String]
+    var pendingOperations: [WorkflowOperation]
+    var createdAt: Date
+}
+
+struct TopicReviewState: Codable, Equatable {
+    var enabled: Bool
+    var activeRevisionIDs: [String: String]
+    var pendingCheckpoint: TopicReviewCheckpoint?
+
+    static let newProjectDefault = TopicReviewState(
+        enabled: true,
+        activeRevisionIDs: [:],
+        pendingCheckpoint: nil
+    )
 }
 
 extension ProjectManifest {

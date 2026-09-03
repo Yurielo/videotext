@@ -55,8 +55,8 @@ struct ContentView: View {
             }
         }
         .sheet(item: $editingTopic) { topic in
-            TopicEditView(topic: topic) { title, start, end in
-                model.saveTopicEdits(title: title, startText: start, endText: end)
+            TopicEditView(topic: topic) { title, summary, start, end in
+                model.saveTopicEdits(title: title, summary: summary, startText: start, endText: end)
             }
         }
         .sheet(item: $editingReviewTask) { task in
@@ -85,6 +85,9 @@ struct ContentView: View {
         }
         .onChange(of: model.humanReviewCheckpoint) { _, checkpoint in
             if checkpoint != nil { selectedResultsTab = 2 }
+        }
+        .onChange(of: model.topicReviewCheckpoint) { _, checkpoint in
+            if checkpoint != nil { selectedResultsTab = 1 }
         }
     }
 
@@ -163,7 +166,10 @@ struct ContentView: View {
             } label: {
                 Label(model.isRunning ? "Выполняется..." : "Запустить", systemImage: model.isRunning ? "hourglass" : "play.fill")
             }
-            .disabled(model.isRunning || model.projectURL == nil || model.selectedOperations.isEmpty || model.humanReviewCheckpoint != nil)
+            .disabled(
+                model.isRunning || model.projectURL == nil || model.selectedOperations.isEmpty
+                    || model.humanReviewCheckpoint != nil || model.topicReviewCheckpoint != nil
+            )
             .keyboardShortcut(.return, modifiers: .command)
             Button(role: .destructive) {
                 model.stop()
@@ -371,6 +377,16 @@ struct ContentView: View {
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
+                        Toggle("Human Review тематического таймкодинга", isOn: $model.topicHumanReviewEnabled)
+                            .disabled(model.isRunning || model.topicReviewCheckpoint != nil)
+                        if model.topicReviewCheckpoint == nil {
+                            Button {
+                                model.beginTopicReview()
+                            } label: {
+                                Label("Открыть темы для Human Review", systemImage: "list.bullet.clipboard")
+                            }
+                            .disabled(model.projectURL == nil || model.topics.isEmpty)
+                        }
                         HStack {
                             Text(model.artifactLanguage == detectedSourceLanguage ? "Оригинал" : "Перевод")
                                 .foregroundStyle(.secondary)
@@ -971,6 +987,23 @@ struct ContentView: View {
                             .foregroundStyle(status == .ready ? Color.green : Color.orange)
                     }
                     Spacer()
+                    if model.topicReviewCheckpoint != nil {
+                        Button {
+                            model.approveTopicReview()
+                        } label: {
+                            Label("Завершить проверку", systemImage: "checkmark.seal.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.isRunning)
+                    }
+                }
+                if model.topicReviewCheckpoint != nil {
+                    Label(
+                        "Проверьте каждый язык и уровень детализации. Изменения привязываются к существующим cue.",
+                        systemImage: "pause.circle.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
                 }
                 HStack(spacing: 8) {
                     Spacer()
@@ -1625,16 +1658,18 @@ private struct TranscriptCueEditView: View {
 
 private struct TopicEditView: View {
     let topic: TopicSegment
-    let onSave: (String, String, String) -> Bool
+    let onSave: (String, String, String, String) -> Bool
     @Environment(\.dismiss) private var dismiss
     @State private var title: String
+    @State private var summary: String
     @State private var startText: String
     @State private var endText: String
 
-    init(topic: TopicSegment, onSave: @escaping (String, String, String) -> Bool) {
+    init(topic: TopicSegment, onSave: @escaping (String, String, String, String) -> Bool) {
         self.topic = topic
         self.onSave = onSave
         _title = State(initialValue: topic.title)
+        _summary = State(initialValue: topic.summary)
         _startText = State(initialValue: TimecodeParser.display(topic.start))
         _endText = State(initialValue: TimecodeParser.display(topic.end))
     }
@@ -1644,6 +1679,8 @@ private struct TopicEditView: View {
             Text("Изменить тему")
                 .font(.headline)
             TextField("Название", text: $title)
+            TextField("Описание", text: $summary, axis: .vertical)
+                .lineLimit(2...5)
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Начало").font(.caption.bold())
@@ -1658,7 +1695,7 @@ private struct TopicEditView: View {
                 Spacer()
                 Button("Отмена") { dismiss() }
                 Button("Сохранить") {
-                    if onSave(title, startText, endText) { dismiss() }
+                    if onSave(title, summary, startText, endText) { dismiss() }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

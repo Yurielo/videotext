@@ -13,6 +13,7 @@ struct ProjectLayout {
     var subtitlesDirectory: URL { textsDirectory.appendingPathComponent("Subtitles", isDirectory: true) }
     var subtitleRevisionsDirectory: URL { subtitlesDirectory.appendingPathComponent("Revisions", isDirectory: true) }
     var topicsDirectory: URL { textsDirectory.appendingPathComponent("Topics", isDirectory: true) }
+    var topicRevisionsDirectory: URL { topicsDirectory.appendingPathComponent("Revisions", isDirectory: true) }
     var reviewDirectory: URL { textsDirectory.appendingPathComponent("Review", isDirectory: true) }
     var languageDirectory: URL { supportDirectory.appendingPathComponent("Language", isDirectory: true) }
     var qualityDirectory: URL { supportDirectory.appendingPathComponent("Quality", isDirectory: true) }
@@ -169,6 +170,14 @@ struct ProjectLayout {
             .appendingPathComponent("\(granularity.rawValue).txt")
     }
 
+    func topicRevisionJSONURL(id: String) -> URL {
+        topicRevisionsDirectory.appendingPathComponent("\(safeComponent(id)).json")
+    }
+
+    func topicRevisionTextURL(id: String) -> URL {
+        topicRevisionsDirectory.appendingPathComponent("\(safeComponent(id)).txt")
+    }
+
     func topicCacheDirectory(language: ArtifactLanguage, granularity: TopicGranularity) -> URL {
         topicCacheDirectory
             .appendingPathComponent(language.rawValue, isDirectory: true)
@@ -226,6 +235,7 @@ struct ProjectLayout {
             subtitlesDirectory,
             subtitleRevisionsDirectory,
             topicsDirectory,
+            topicRevisionsDirectory,
             reviewDirectory,
             languageDirectory,
             qualityDirectory,

@@ -88,6 +88,8 @@ struct ProjectStore {
             } else if manifest.humanReviewState?.fillerAnalysisBeforeReview == nil {
                 manifest.humanReviewState?.fillerAnalysisBeforeReview = true
             }
+            if manifest.topicRevisions == nil { manifest.topicRevisions = [] }
+            if manifest.topicReviewState == nil { manifest.topicReviewState = .newProjectDefault }
             if manifest.blurAdjustments == nil { manifest.blurAdjustments = [] }
             if manifest.watermarkAdjustments == nil { manifest.watermarkAdjustments = [] }
             if manifest.fillerMuteRecords == nil { manifest.fillerMuteRecords = [] }
@@ -118,6 +120,8 @@ struct ProjectStore {
             transcriptRevisions: [],
             reviewTasks: [],
             humanReviewState: .newProjectDefault,
+            topicRevisions: [],
+            topicReviewState: .newProjectDefault,
             blurAdjustments: [],
             watermarkAdjustments: [],
             fillerMuteRecords: [],
