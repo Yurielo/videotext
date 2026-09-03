@@ -317,8 +317,7 @@ struct EndToEndTest {
         )
         let before = (try ProjectStore().load(from: projectURL).fragments ?? []).count
         _ = try await engine.run(settings: settings, onLog: { log.append($0); print($0) }, onProgress: { progress.append($0) })
-        let launches = controller.launchedExecutables.map { URL(fileURLWithPath: $0).lastPathComponent }
-        try require(!launches.contains("whisper-cli"), "При продолжении был фактически запущен whisper-cli")
+        try require(!log.contains { $0.contains("Модель Whisper:") }, "При продолжении повторно запущена транскрипция Whisper")
         try require(log.contains { $0.contains("Пропуск: Расшифровать всё видео") }, "Журнал не подтвердил пропуск расшифровки")
         try require(log.contains { $0.contains("Запуск: Проверка ffprobe") }, "ffprobe не был добавлен автоматически")
         try require(log.contains { $0.contains("Запуск: Поиск результатов") }, "Обнаружение результатов не было добавлено автоматически")
@@ -360,8 +359,7 @@ struct EndToEndTest {
             settings: settings,
             onLog: { log.append($0); print($0) }
         )
-        let launches = controller.launchedExecutables.map { URL(fileURLWithPath: $0).lastPathComponent }
-        try require(!launches.contains("whisper-cli"), "Вырезка темы повторно запустила Whisper")
+        try require(!log.contains { $0.contains("Модель Whisper:") }, "Вырезка темы повторно запустила транскрипцию Whisper")
         try require(!log.contains { $0.contains("Запуск: Тематический таймкодинг") }, "Вырезка темы повторно запустила тематический анализ")
         let fragments = try ProjectStore().load(from: projectURL).fragments ?? []
         try require(fragments.count == before + 1, "Фрагмент темы не зарегистрирован")
@@ -431,7 +429,7 @@ struct EndToEndTest {
         try require(fragment.subtitledVideoPath == nil, "Манифест ошибочно зарегистрировал прожжённый фрагмент")
         try require(!FileManager.default.fileExists(atPath: unexpectedVideo.path), "При выключенном переключателе создан fragment_subtitled.mp4")
         try require(!log.contains { $0.contains("Субтитры вшиты во фрагмент") }, "При выключенном переключателе запускался прожиг субтитров")
-        try require(!controller.launchedExecutables.contains { URL(fileURLWithPath: $0).lastPathComponent == "whisper-cli" }, "Фрагмент без прожига повторно запустил Whisper")
+        try require(!log.contains { $0.contains("Модель Whisper:") }, "Фрагмент без прожига повторно запустил транскрипцию Whisper")
         let cues = try SRTService().load(from: srtURL)
         try require(!cues.isEmpty, "fragment.srt без прожига не содержит реплик")
         let duration = try await FFmpegAdapter().duration(of: videoURL)
@@ -729,8 +727,7 @@ struct EndToEndTest {
             whisperLanguage: "auto"
         )
         _ = try await engine.run(settings: settings, onLog: { log.append($0); print($0) })
-        let launches = controller.launchedExecutables.map { URL(fileURLWithPath: $0).lastPathComponent }
-        try require(!launches.contains("whisper-cli"), "Whisper запущен при восстановлении TXT и тематическом таймкодинге")
+        try require(!log.contains { $0.contains("Модель Whisper:") }, "Whisper запущен при восстановлении TXT и тематическом таймкодинге")
         let layout = ProjectLayout(root: projectURL)
         try require(nonemptyFile(at: layout.transcriptURL), "transcript.txt не восстановлен из SRT")
         try require(nonemptyFile(at: layout.topicsURL), "topics.json не создан из существующего SRT")
