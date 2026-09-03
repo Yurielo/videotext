@@ -204,10 +204,12 @@ struct ProjectResultSummaryService {
     }
 
     private func fragmentsSummary(outputs: [ProjectOutput]) -> ProjectArtifactSummary {
-        let videos = outputs.filter { $0.kind == "fragment-video" }.count
-        let subtitled = outputs.filter { $0.kind == "fragment-subtitled-video" }.count
+        let videos = outputs.filter {
+            $0.kind == "fragment-video" || $0.kind == "processed-fragment-video"
+        }.count
+        let processed = outputs.filter { $0.kind == "processed-fragment-video" }.count
         guard videos > 0 else { return summary(.fragments, .missing, "Фрагментов: 0") }
-        return summary(.fragments, .ready, "Фрагментов: \(videos), с субтитрами: \(subtitled)")
+        return summary(.fragments, .ready, "Фрагментов: \(videos), обработанных вариантов: \(processed)")
     }
 
     private func diagnosticsSummary(layout: ProjectLayout) -> ProjectArtifactSummary {

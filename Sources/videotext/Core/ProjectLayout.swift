@@ -223,6 +223,24 @@ struct ProjectLayout {
             .appendingPathComponent("ffprobe.txt")
     }
 
+    func processedFragmentVideoURL(kind: String) -> URL {
+        videoFragmentsDirectory
+            .appendingPathComponent(kind, isDirectory: true)
+            .appendingPathComponent("fragment_processed.mp4")
+    }
+
+    func processedFragmentSRTURL(kind: String) -> URL {
+        textFragmentsDirectory
+            .appendingPathComponent(kind, isDirectory: true)
+            .appendingPathComponent("fragment_processed.srt")
+    }
+
+    func processedFragmentRecipeURL(kind: String) -> URL {
+        supportFragmentsDirectory
+            .appendingPathComponent(kind, isDirectory: true)
+            .appendingPathComponent("processing_recipe.json")
+    }
+
     func createDirectories() throws {
         let directories = [
             root,

@@ -212,15 +212,21 @@ struct EndToEndTest {
                 modelPath: modelPath,
                 useTopic: true
             )
+            let processedFragment = try await resumeWithProcessedFragment(
+                mediaURL: mediaURL,
+                projectURL: initialResult.projectURL,
+                modelPath: modelPath
+            )
+            try await validateProcessedFragment(processedFragment, projectURL: initialResult.projectURL)
 
             let finalManifest = try ProjectStore().load(from: initialResult.projectURL)
-            try require(finalManifest.fragments?.count == 5, "Манифест не сохранил пять фрагментов")
+            try require(finalManifest.fragments?.count == 6, "Манифест не сохранил шесть фрагментов")
             try require(finalManifest.subtitleStyle == cyan, "Стиль субтитров не восстановится после перезапуска")
             try require(finalManifest.workflow?.operations[WorkflowOperation.transcribe.rawValue]?.outputPaths.isEmpty == false, "Операция расшифровки не сохранила выходные файлы")
             let fullSRTAfter = try Data(contentsOf: ProjectLayout(root: initialResult.projectURL).fullSRTURL)
             try require(fullSRTAfter == fullSRTBefore, "Продолжение изменило full.srt")
             try require(modificationDate(ProjectLayout(root: initialResult.projectURL).fullSRTURL) == srtDateBefore, "Продолжение повторно записало full.srt")
-            try validateResultSummary(initialResult.projectURL, expectedFragments: 5, expectedTopics: .ready)
+            try validateResultSummary(initialResult.projectURL, expectedFragments: 6, expectedTopics: .ready)
             try validateSourceMismatch(projectURL: initialResult.projectURL, parent: mediaURL.deletingLastPathComponent())
 
             try await validateCancellation(mediaURL: mediaURL, modelPath: modelPath, projectParent: mediaURL.deletingLastPathComponent())
@@ -231,7 +237,7 @@ struct EndToEndTest {
             try require(finalHistory.contains { $0.projectPath == initialResult.projectURL.path && $0.status == .completed }, "История не обновилась после продолжения")
             try require(noActiveTools(), "После E2E остались активные videotext/whisper-cli/ffmpeg/ffprobe")
 
-            print("E2E PASS: гибридные темы, фрагменты с прожигом и без него, 2 диапазона, ffprobe, кэш и остановка проверены")
+            print("E2E PASS: Human Review, гибридные темы, обычные и обработанный фрагменты, ffprobe, кэш и остановка проверены")
             print("QA_PROJECT=\(initialResult.projectURL.path)")
         } catch {
             fputs("E2E FAIL: \(error.localizedDescription)\n", stderr)
@@ -465,6 +471,73 @@ struct EndToEndTest {
         try require(!cues.isEmpty, "fragment.srt без прожига не содержит реплик")
         let duration = try await FFmpegAdapter().duration(of: videoURL)
         try require(duration.map { abs($0 - (fragment.end - fragment.start)) <= 0.25 } == true, "ffprobe выявил неверную длительность фрагмента без прожига")
+    }
+
+    private static func resumeWithProcessedFragment(
+        mediaURL: URL,
+        projectURL: URL,
+        modelPath: String
+    ) async throws -> FragmentRecord {
+        let layout = ProjectLayout(root: projectURL)
+        let fillerReport = try? FillerWordService().load(from: layout.fillerWordsURL)
+        let hasFillerInRange = fillerReport?.candidates.contains { $0.end > 1 && $0.start < 6 } == true
+        let settings = WorkflowSettings(
+            mediaURL: mediaURL,
+            projectURL: projectURL,
+            selectedOperations: [.renderFragment],
+            mode: .resumeProject,
+            rangeStart: 1,
+            rangeEnd: 6,
+            fragmentName: "Итоговый вариант E2E",
+            burnFragmentSubtitles: true,
+            subtitleStyle: .standard,
+            selectedTopicID: nil,
+            whisperModelPath: modelPath,
+            whisperLanguage: "auto",
+            speedFactor: 1.1,
+            blurRegion: NormalizedVideoRect(x: 0.65, y: 0.05, width: 0.25, height: 0.2),
+            blurIntensity: 6,
+            fillerMode: .muteAll,
+            sourceHumanReviewEnabled: true,
+            topicHumanReviewEnabled: true,
+            fragmentMuteFillerWords: hasFillerInRange,
+            fragmentAdjustSpeed: true,
+            fragmentApplyBlur: true
+        )
+        let before = (try ProjectStore().load(from: projectURL).fragments ?? []).count
+        var log: [String] = []
+        _ = try await WorkflowEngine().run(
+            settings: settings,
+            onLog: { log.append($0); print($0) }
+        )
+        try require(!log.contains { $0.contains("Модель Whisper:") }, "Итоговый вариант повторно запустил Whisper")
+        let fragments = try ProjectStore().load(from: projectURL).fragments ?? []
+        try require(fragments.count == before + 1, "Обработанный фрагмент не зарегистрирован")
+        guard let fragment = fragments.first else { throw EndToEndError.failed("Обработанный фрагмент не найден") }
+        try require(fragment.processingRecipe?.muteFillerWords == hasFillerInRange, "Рецепт неверно сохранил режим mute")
+        return fragment
+    }
+
+    private static func validateProcessedFragment(
+        _ fragment: FragmentRecord,
+        projectURL: URL
+    ) async throws {
+        guard let outputPath = fragment.processedVideoPath,
+              let recipe = fragment.processingRecipe else {
+            throw EndToEndError.failed("Нет итогового файла или рецепта обработанного фрагмента")
+        }
+        let outputURL = URL(fileURLWithPath: outputPath)
+        try require(nonemptyFile(at: outputURL), "Обработанный видеофрагмент пуст")
+        try require(fragment.videoPath == outputPath, "Технический cut остался основным видео фрагмента")
+        try require(recipe.adjustSpeed && recipe.applyBlur && recipe.burnSubtitles, "Рецепт потерял выбранные эффекты")
+        try require(abs(recipe.speedFactor - 1.1) < 0.001, "Рецепт сохранил неверную скорость")
+        let expectedDuration = (fragment.end - fragment.start) / recipe.speedFactor
+        let duration = try await FFmpegAdapter().duration(of: outputURL)
+        try require(duration.map { abs($0 - expectedDuration) <= 0.25 } == true, "Обработанный фрагмент имеет неверную длительность")
+        let layout = ProjectLayout(root: projectURL)
+        try require(nonemptyFile(at: layout.processedFragmentSRTURL(kind: fragment.id)), "Нет SRT обработанного фрагмента")
+        try require(nonemptyFile(at: layout.processedFragmentRecipeURL(kind: fragment.id)), "Нет JSON-рецепта обработанного фрагмента")
+        try require(!FileManager.default.fileExists(atPath: layout.fragmentVideoURL(kind: fragment.id).path), "После успеха остался технический cut")
     }
 
     private enum ExpectedColor: Equatable { case yellow, cyan }

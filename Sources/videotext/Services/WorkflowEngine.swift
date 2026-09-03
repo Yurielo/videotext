@@ -11,6 +11,9 @@ final class WorkflowViewModel: ObservableObject {
     @Published var rangeEndText = "00:01:00.000"
     @Published var fragmentName = ""
     @Published var burnFragmentSubtitles = true
+    @Published var fragmentMuteFillerWords = false
+    @Published var fragmentAdjustSpeed = false
+    @Published var fragmentApplyBlur = false
     @Published var subtitleStyle = SubtitleStyleSettings.standard
     @Published var whisperModelPath = ""
     @Published var whisperLanguage = "ru"
@@ -128,6 +131,9 @@ final class WorkflowViewModel: ObservableObject {
             subtitleStyle = .standard
             whisperLanguage = "ru"
             blurEnabled = false
+            fragmentMuteFillerWords = false
+            fragmentAdjustSpeed = false
+            fragmentApplyBlur = false
             fillerMode = .muteAll
             sourceHumanReviewEnabled = true
             translationHumanReviewEnabled = false
@@ -165,6 +171,9 @@ final class WorkflowViewModel: ObservableObject {
             }
             subtitleStyle = manifest.subtitleStyle ?? .standard
             blurEnabled = false
+            fragmentMuteFillerWords = false
+            fragmentAdjustSpeed = false
+            fragmentApplyBlur = false
             fillerMode = .muteAll
             sourceHumanReviewEnabled = manifest.humanReviewState?.sourceReviewEnabled ?? true
             translationHumanReviewEnabled = manifest.humanReviewState?.translationReviewEnabled ?? false
@@ -206,6 +215,34 @@ final class WorkflowViewModel: ObservableObject {
     func createTopicFragment() {
         useQuoteProvenance = false
         startRun(operations: [.cutTopic])
+    }
+
+    func createProcessedFragment(selectionMode: FragmentSelectionMode) {
+        useQuoteProvenance = false
+        switch selectionMode {
+        case .timecode:
+            guard isRangeValid else {
+                reportPreparationError(WorkflowError.invalidRange)
+                return
+            }
+        case .topic:
+            guard let topic = selectedTopic else {
+                reportPreparationError(WorkflowError.missingTopics)
+                return
+            }
+            rangeStartText = TimecodeParser.display(topic.start)
+            rangeEndText = TimecodeParser.display(topic.end)
+            selectedTopicID = topic.id
+        case .quote:
+            guard let candidate = selectedQuoteCandidate else {
+                reportPreparationError(WorkflowError.processFailed("Выберите найденный диапазон цитат."))
+                return
+            }
+            rangeStartText = TimecodeParser.display(candidate.start)
+            rangeEndText = TimecodeParser.display(candidate.end)
+            useQuoteProvenance = true
+        }
+        startRun(operations: [.renderFragment])
     }
 
     func createSpeedAdjustedVideo() {
@@ -720,7 +757,12 @@ final class WorkflowViewModel: ObservableObject {
         guard let projectURL else { return }
         do {
             let preferred = outputs
-                .filter { $0.kind == "fragment-subtitled-video" || $0.kind == "subtitled-video" || $0.kind == "fragment-video" }
+                .filter {
+                    $0.kind == "processed-fragment-video"
+                        || $0.kind == "fragment-subtitled-video"
+                        || $0.kind == "subtitled-video"
+                        || $0.kind == "fragment-video"
+                }
                 .sorted { $0.createdAt > $1.createdAt }
                 .first
                 .map { URL(fileURLWithPath: $0.path) }
@@ -731,7 +773,11 @@ final class WorkflowViewModel: ObservableObject {
         }
     }
 
-    private func startRun(operations: Set<WorkflowOperation>) {
+    private func startRun(operations requestedOperations: Set<WorkflowOperation>) {
+        var operations = requestedOperations
+        if operations.contains(.renderFragment), fragmentMuteFillerWords {
+            operations.insert(.detectFillerWords)
+        }
         guard !isRunning else { return }
         guard humanReviewCheckpoint == nil, topicReviewCheckpoint == nil else {
             status = "Ожидает проверки"
@@ -749,7 +795,7 @@ final class WorkflowViewModel: ObservableObject {
 
         var start: TimeInterval = 0
         var end: TimeInterval = 1
-        if operations.contains(.cutRange) || operations.contains(.burnFragmentSubtitles) {
+        if operations.contains(.cutRange) || operations.contains(.burnFragmentSubtitles) || operations.contains(.renderFragment) {
             do {
                 start = try TimecodeParser.parse(rangeStartText)
                 end = try TimecodeParser.parse(rangeEndText)
@@ -772,7 +818,7 @@ final class WorkflowViewModel: ObservableObject {
         useQuoteProvenance = false
         let blurStart: TimeInterval?
         let blurEnd: TimeInterval?
-        if operations.contains(.applyBlur), blurUsesTimeRange {
+        if (operations.contains(.applyBlur) || (operations.contains(.renderFragment) && fragmentApplyBlur)), blurUsesTimeRange {
             do {
                 blurStart = try TimecodeParser.parse(blurStartText)
                 blurEnd = try TimecodeParser.parse(blurEndText)
@@ -851,7 +897,10 @@ final class WorkflowViewModel: ObservableObject {
             sourceHumanReviewEnabled: sourceHumanReviewEnabled,
             translationHumanReviewEnabled: translationHumanReviewEnabled,
             fillerAnalysisBeforeReview: fillerAnalysisBeforeReview,
-            topicHumanReviewEnabled: topicHumanReviewEnabled
+            topicHumanReviewEnabled: topicHumanReviewEnabled,
+            fragmentMuteFillerWords: fragmentMuteFillerWords,
+            fragmentAdjustSpeed: fragmentAdjustSpeed,
+            fragmentApplyBlur: fragmentApplyBlur
         )
 
         runTask = Task { [weak self] in
@@ -1469,6 +1518,43 @@ final class WorkflowEngine: @unchecked Sendable {
                         )
                         activeFragment = fragment
                     }
+
+                case .renderFragment:
+                    let language = settings.artifactLanguage
+                        ?? manifest.languageProfile?.effective
+                        ?? .ru
+                    let topic = settings.selectedTopicID.flatMap { id in
+                        try? Self.selectTopic(
+                            projectURL: projectURL,
+                            id: id,
+                            language: language,
+                            granularity: settings.topicGranularity
+                        )
+                    }
+                    var fragment = try await createFragment(
+                        mediaURL: mediaURL,
+                        projectURL: projectURL,
+                        start: settings.rangeStart,
+                        end: settings.rangeEnd,
+                        name: settings.fragmentName.isEmpty ? (topic?.title ?? "Фрагмент") : settings.fragmentName,
+                        style: settings.subtitleStyle,
+                        subtitleLanguage: language,
+                        topicGranularity: topic == nil ? nil : settings.topicGranularity,
+                        topicID: topic?.id,
+                        quoteStart: settings.quoteStart,
+                        quoteEnd: settings.quoteEnd,
+                        onProgress: { tracker.update(operation, fraction: $0 * 0.2) },
+                        log: log
+                    )
+                    fragment = try await renderProcessedFragment(
+                        fragment,
+                        projectURL: projectURL,
+                        settings: settings,
+                        removeSourceAfterSuccess: true,
+                        onProgress: { tracker.update(operation, fraction: 0.2 + $0 * 0.8) },
+                        log: log
+                    )
+                    activeFragment = fragment
 
                 case .burnSubtitles:
                     let subtitleLanguage = settings.artifactLanguage
@@ -2096,6 +2182,202 @@ final class WorkflowEngine: @unchecked Sendable {
         return updated
     }
 
+    func renderProcessedFragment(
+        _ fragment: FragmentRecord,
+        projectURL: URL,
+        settings: WorkflowSettings,
+        removeSourceAfterSuccess: Bool = false,
+        onProgress: @escaping (Double) -> Void,
+        log: (String) -> Void
+    ) async throws -> FragmentRecord {
+        let layout = ProjectLayout(root: projectURL)
+        let fileManager = FileManager.default
+        let outputURL = layout.processedFragmentVideoURL(kind: fragment.id)
+        let outputSRT = layout.processedFragmentSRTURL(kind: fragment.id)
+        let recipeURL = layout.processedFragmentRecipeURL(kind: fragment.id)
+        let stageDirectory = layout.supportFragmentsDirectory
+            .appendingPathComponent(fragment.id, isDirectory: true)
+            .appendingPathComponent("Processing", isDirectory: true)
+        try fileManager.createDirectory(at: stageDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: stageDirectory) }
+
+        var currentMedia = URL(fileURLWithPath: fragment.videoPath)
+        var currentDuration = fragment.end - fragment.start
+        var cues = try srt.load(from: URL(fileURLWithPath: fragment.subtitlePath))
+        var filterGraphs: [String] = []
+        var mutedCandidateIDs: [String] = []
+        let enabledStages = 1
+            + (settings.fragmentMuteFillerWords ? 1 : 0)
+            + (settings.fragmentAdjustSpeed ? 1 : 0)
+            + (settings.fragmentApplyBlur ? 1 : 0)
+            + (settings.burnFragmentSubtitles ? 1 : 0)
+        var completedStages = 0
+
+        func stageProgress(_ fraction: Double) {
+            onProgress((Double(completedStages) + fraction) / Double(enabledStages))
+        }
+
+        if settings.fragmentMuteFillerWords {
+            let report = try fillerWords.load(from: layout.fillerWordsURL)
+            let selectedIDs: Set<String>
+            switch settings.fillerMode {
+            case .detectOnly:
+                throw WorkflowError.processFailed("Для mute выберите режим «Все», «Выбранные» или «Уверенные».")
+            case .muteAll:
+                selectedIDs = Set(report.candidates.map(\.id))
+            case .muteSelected:
+                selectedIDs = settings.selectedFillerCandidateIDs
+            case .muteHighConfidence:
+                selectedIDs = Set(report.candidates.filter(\.highConfidence).map(\.id))
+            }
+            let selected = report.candidates.filter {
+                selectedIDs.contains($0.id) && $0.end > fragment.start && $0.start < fragment.end
+            }
+            guard !selected.isEmpty else {
+                throw WorkflowError.processFailed("В выбранном фрагменте нет слов-паразитов для mute.")
+            }
+            let intervals = selected.map {
+                ClosedRangeRecord(
+                    start: max($0.start, fragment.start) - fragment.start,
+                    end: min($0.end, fragment.end) - fragment.start
+                )
+            }
+            let mutedAudio = stageDirectory.appendingPathComponent("muted.m4a")
+            let mutedVideo = stageDirectory.appendingPathComponent("muted.mp4")
+            let graph = try await ffmpeg.muteAudioIntervals(
+                mediaURL: currentMedia,
+                outputAudioURL: mutedAudio,
+                outputVideoURL: mutedVideo,
+                intervals: intervals,
+                mediaDuration: currentDuration,
+                onProgress: stageProgress
+            )
+            filterGraphs.append("mute: \(graph)")
+            mutedCandidateIDs = selected.map(\.id)
+            currentMedia = mutedVideo
+            completedStages += 1
+        }
+
+        if settings.fragmentAdjustSpeed {
+            guard settings.speedFactor >= 0.5, settings.speedFactor <= 2 else {
+                throw WorkflowError.processFailed("Коэффициент скорости должен быть от 0.5 до 2.0.")
+            }
+            let speedVideo = stageDirectory.appendingPathComponent("speed.mp4")
+            let graph = try await ffmpeg.adjustSpeed(
+                mediaURL: currentMedia,
+                outputURL: speedVideo,
+                speedFactor: settings.speedFactor,
+                mediaDuration: currentDuration,
+                onProgress: stageProgress
+            )
+            filterGraphs.append("speed: \(graph)")
+            cues = try srt.cues(cues, adjustedForSpeed: settings.speedFactor)
+            currentDuration /= settings.speedFactor
+            currentMedia = speedVideo
+            completedStages += 1
+        }
+
+        var appliedBlurStart: TimeInterval?
+        var appliedBlurEnd: TimeInterval?
+        if settings.fragmentApplyBlur {
+            if let sourceStart = settings.blurStart, let sourceEnd = settings.blurEnd {
+                let clippedStart = max(sourceStart, fragment.start)
+                let clippedEnd = min(sourceEnd, fragment.end)
+                guard clippedEnd > clippedStart else {
+                    throw WorkflowError.processFailed("Диапазон blur не пересекается с выбранным фрагментом.")
+                }
+                let speed = settings.fragmentAdjustSpeed ? settings.speedFactor : 1
+                appliedBlurStart = (clippedStart - fragment.start) / speed
+                appliedBlurEnd = (clippedEnd - fragment.start) / speed
+            }
+            let blurVideo = stageDirectory.appendingPathComponent("blur.mp4")
+            let graph = try await ffmpeg.applyStaticBlur(
+                mediaURL: currentMedia,
+                outputURL: blurVideo,
+                region: settings.blurRegion,
+                intensity: settings.blurIntensity,
+                start: appliedBlurStart,
+                end: appliedBlurEnd,
+                mediaDuration: currentDuration,
+                onProgress: stageProgress
+            )
+            filterGraphs.append("blur: \(graph)")
+            currentMedia = blurVideo
+            completedStages += 1
+        }
+
+        try fileManager.createDirectory(at: outputSRT.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try srt.write(cues, to: outputSRT)
+        if settings.burnFragmentSubtitles {
+            _ = try await ffmpeg.burnSubtitles(
+                mediaURL: currentMedia,
+                srtURL: outputSRT,
+                outputURL: outputURL,
+                mediaDuration: currentDuration,
+                style: settings.subtitleStyle,
+                onProgress: stageProgress
+            )
+            completedStages += 1
+        } else {
+            try? fileManager.removeItem(at: outputURL)
+            try fileManager.copyItem(at: currentMedia, to: outputURL)
+        }
+
+        let validation = try await ffmpeg.strictValidationReport(
+            mediaURL: outputURL,
+            expectedDuration: currentDuration
+        )
+        let reportURL = layout.fragmentFFprobeURL(kind: fragment.id)
+        let existing = (try? String(contentsOf: reportURL, encoding: .utf8)) ?? ""
+        try (existing + "\n## fragment_processed.mp4\n" + validation)
+            .write(to: reportURL, atomically: true, encoding: .utf8)
+        completedStages += 1
+        stageProgress(0)
+
+        let recipe = FragmentProcessingRecipe(
+            burnSubtitles: settings.burnFragmentSubtitles,
+            muteFillerWords: settings.fragmentMuteFillerWords,
+            fillerMode: settings.fillerMode,
+            fillerCandidateIDs: mutedCandidateIDs,
+            adjustSpeed: settings.fragmentAdjustSpeed,
+            speedFactor: settings.fragmentAdjustSpeed ? settings.speedFactor : 1,
+            applyBlur: settings.fragmentApplyBlur,
+            blurRegion: settings.blurRegion,
+            blurIntensity: settings.blurIntensity,
+            blurStart: appliedBlurStart,
+            blurEnd: appliedBlurEnd,
+            filterGraphs: filterGraphs
+        )
+        try encoderForDerivedTimeline().encode(recipe).write(to: recipeURL, options: .atomic)
+        var updated = fragment
+        if removeSourceAfterSuccess {
+            try? fileManager.removeItem(at: URL(fileURLWithPath: fragment.videoPath))
+            try? fileManager.removeItem(at: URL(fileURLWithPath: fragment.subtitlePath))
+            try store.mutate(projectURL) { manifest in
+                manifest.outputs.removeAll { output in
+                    output.path == fragment.videoPath || output.path == fragment.subtitlePath
+                }
+            }
+        }
+        updated.videoPath = outputURL.path
+        updated.processedVideoPath = outputURL.path
+        updated.processingRecipe = recipe
+        updated.subtitlePath = outputSRT.path
+        updated.ffprobeReportPath = reportURL.path
+        try store.registerOutput(kind: "processed-fragment-video", url: outputURL, in: projectURL)
+        try store.registerOutput(kind: "processed-fragment-srt", url: outputSRT, in: projectURL)
+        try store.registerOutput(kind: "processed-fragment-recipe", url: recipeURL, in: projectURL)
+        try store.registerFragment(updated, in: projectURL)
+        onProgress(1)
+        var appliedStages = ["вырезка"]
+        if recipe.muteFillerWords { appliedStages.append("mute") }
+        if recipe.adjustSpeed { appliedStages.append("скорость") }
+        if recipe.applyBlur { appliedStages.append("blur") }
+        if recipe.burnSubtitles { appliedStages.append("субтитры") }
+        log("Создан обработанный фрагмент \(fragment.id): \(appliedStages.joined(separator: " → ")).")
+        return updated
+    }
+
     private func validateTimeline(mediaURL: URL, layout: ProjectLayout, projectURL: URL, log: (String) -> Void) async throws {
         guard FileManager.default.fileExists(atPath: layout.fullSRTURL.path) else { throw WorkflowError.missingFullSRT }
         let parsed = try srt.loadWithReport(from: layout.fullSRTURL)
@@ -2249,7 +2531,7 @@ final class WorkflowEngine: @unchecked Sendable {
             return report.transcriptRevisionID == revision.id
         case .analyzeAudio:
             return settings.mode != .newProject && isAtLeastAsNew(layout.audioAnalysisURL, as: mediaURL)
-        case .discoverResults, .cutRange, .burnFragmentSubtitles, .cutTopic, .burnSubtitles, .adjustSpeed, .applyBlur, .applyWatermark, .muteFillerWords, .enhanceAudio, .createDubbing, .ffprobeValidate:
+        case .discoverResults, .cutRange, .burnFragmentSubtitles, .cutTopic, .renderFragment, .burnSubtitles, .adjustSpeed, .applyBlur, .applyWatermark, .muteFillerWords, .enhanceAudio, .createDubbing, .ffprobeValidate:
             return false
         }
     }
@@ -2321,6 +2603,9 @@ final class WorkflowEngine: @unchecked Sendable {
             return [fragment.videoPath, fragment.subtitlePath] + [fragment.ffprobeReportPath].compactMap { $0 }
         case .burnFragmentSubtitles:
             return manifest?.fragments?.first?.subtitledVideoPath.map { [$0] } ?? []
+        case .renderFragment:
+            guard let fragment = manifest?.fragments?.first else { return [] }
+            return [fragment.processedVideoPath, fragment.subtitlePath].compactMap { $0 }
         case .burnSubtitles:
             let localized = ArtifactLanguage.allCases.map { layout.subtitledVideoURL(language: $0) }
             return ([layout.subtitledVideoURL] + localized).filter { nonemptyFile($0) }.map(\.path)
@@ -2388,7 +2673,7 @@ final class WorkflowEngine: @unchecked Sendable {
         if includeFillerAnalysisBeforeReview && !selected.isDisjoint(with: transcriptConsumers) {
             automatic.insert(.detectFillerWords)
         }
-        let videoOperations: Set<WorkflowOperation> = [.cutRange, .burnFragmentSubtitles, .cutTopic, .burnSubtitles, .adjustSpeed, .applyBlur, .applyWatermark, .muteFillerWords, .enhanceAudio, .createDubbing]
+        let videoOperations: Set<WorkflowOperation> = [.cutRange, .burnFragmentSubtitles, .cutTopic, .renderFragment, .burnSubtitles, .adjustSpeed, .applyBlur, .applyWatermark, .muteFillerWords, .enhanceAudio, .createDubbing]
         if !selected.isDisjoint(with: videoOperations) {
             automatic.insert(.ffprobeValidate)
         }

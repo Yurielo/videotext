@@ -472,6 +472,54 @@ struct ContentView: View {
                         Toggle("Вшить субтитры во фрагмент", isOn: $model.burnFragmentSubtitles)
                             .help("Создать fragment.srt из полной расшифровки и вшить его в готовый фрагмент")
 
+                        Divider()
+                        Text("Обработка итогового файла")
+                            .font(.headline)
+                        Toggle("Mute слов-паразитов", isOn: $model.fragmentMuteFillerWords)
+                            .help("Заглушить найденные слова-паразиты в выбранном диапазоне; режим задаётся в панели анализа")
+                        Toggle("Изменить скорость", isOn: $model.fragmentAdjustSpeed)
+                        if model.fragmentAdjustSpeed {
+                            HStack {
+                                Slider(value: $model.speedFactor, in: 0.5...2, step: 0.05)
+                                Text("\(model.speedFactor, specifier: "%.2f")x")
+                                    .monospacedDigit()
+                                    .frame(width: 48, alignment: .trailing)
+                            }
+                        }
+                        Toggle("Добавить статический blur", isOn: $model.fragmentApplyBlur)
+                        if model.fragmentApplyBlur {
+                            BlurRegionSelector(mediaURL: model.mediaURL, region: $model.blurRegion)
+                                .frame(minHeight: 140)
+                                .aspectRatio(16 / 9, contentMode: .fit)
+                            HStack {
+                                Text("Интенсивность")
+                                Slider(value: $model.blurIntensity, in: 1...30, step: 1)
+                                Text("\(Int(model.blurIntensity))")
+                                    .monospacedDigit()
+                                    .frame(width: 24, alignment: .trailing)
+                            }
+                            Toggle("Ограничить blur по времени исходного видео", isOn: $model.blurUsesTimeRange)
+                            if model.blurUsesTimeRange {
+                                HStack(alignment: .top, spacing: 12) {
+                                    timecodeField("Начало blur", text: $model.blurStartText)
+                                    timecodeField("Конец blur", text: $model.blurEndText)
+                                }
+                            }
+                        }
+
+                        Button {
+                            model.createProcessedFragment(selectionMode: fragmentSelectionMode)
+                        } label: {
+                            Label("Создать итоговый вариант", systemImage: "wand.and.stars")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(
+                            model.projectURL == nil
+                                || (fragmentSelectionMode == .timecode && !model.isRangeValid)
+                                || (fragmentSelectionMode == .topic && model.topics.isEmpty)
+                                || (fragmentSelectionMode == .quote && model.selectedQuoteCandidate == nil)
+                        )
+
                         if fragmentSelectionMode == .timecode {
                             Button {
                                 model.createFragment()
@@ -1418,22 +1466,6 @@ struct ContentView: View {
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = ["png", "jpg", "jpeg", "webp"].compactMap { UTType(filenameExtension: $0) }
         return panel.runModal() == .OK ? panel.url : nil
-    }
-}
-
-private enum FragmentSelectionMode: String, CaseIterable, Identifiable {
-    case timecode
-    case topic
-    case quote
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .timecode: return "По таймкоду"
-        case .topic: return "По теме"
-        case .quote: return "По цитатам"
-        }
     }
 }
 

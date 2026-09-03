@@ -29,7 +29,10 @@ struct ResultsDetector {
         switch url.lastPathComponent {
         case "fragment.mp4": return "fragment-video"
         case "fragment_subtitled.mp4": return "fragment-subtitled-video"
+        case "fragment_processed.mp4": return "processed-fragment-video"
         case "fragment.srt": return "fragment-srt"
+        case "fragment_processed.srt": return "processed-fragment-srt"
+        case "processing_recipe.json": return "processed-fragment-recipe"
         case "subtitled.mp4", "subtitled.ru.mp4", "subtitled.en.mp4": return "subtitled-video"
         case "full.srt": return "full-srt"
         case "transcript.txt": return "transcript"

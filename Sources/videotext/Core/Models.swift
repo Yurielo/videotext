@@ -19,6 +19,7 @@ enum WorkflowOperation: String, CaseIterable, Identifiable, Codable {
     case cutRange
     case burnFragmentSubtitles
     case cutTopic
+    case renderFragment
     case burnSubtitles
     case adjustSpeed
     case applyBlur
@@ -45,6 +46,7 @@ enum WorkflowOperation: String, CaseIterable, Identifiable, Codable {
         case .discoverResults: return "Поиск результатов"
         case .cutRange: return "Создать точный фрагмент"
         case .cutTopic: return "Вырезать выбранную тему"
+        case .renderFragment: return "Создать обработанный фрагмент"
         case .burnFragmentSubtitles: return "Вшить субтитры во фрагмент"
         case .burnSubtitles: return "Вшить субтитры в полное видео"
         case .adjustSpeed: return "Изменить скорость видео"
@@ -79,6 +81,7 @@ enum WorkflowOperation: String, CaseIterable, Identifiable, Codable {
         case .discoverResults: return [.createManifest]
         case .cutRange: return [.validateTimeline]
         case .cutTopic: return [.validateTimeline]
+        case .renderFragment: return [.validateTimeline]
         case .burnFragmentSubtitles: return [.cutRange]
         case .burnSubtitles: return [.validateTimeline]
         case .adjustSpeed: return [.createManifest]
@@ -106,6 +109,7 @@ enum WorkflowOperation: String, CaseIterable, Identifiable, Codable {
         case .discoverResults: return 1
         case .cutRange: return 12
         case .cutTopic: return 10
+        case .renderFragment: return 35
         case .burnFragmentSubtitles: return 12
         case .burnSubtitles: return 15
         case .adjustSpeed: return 15
@@ -131,6 +135,22 @@ enum SpeedSourceKind: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .fullVideo: return "Полное видео"
         case .latestFragment: return "Последний фрагмент"
+        }
+    }
+}
+
+enum FragmentSelectionMode: String, CaseIterable, Codable, Identifiable {
+    case timecode
+    case topic
+    case quote
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .timecode: return "По таймкоду"
+        case .topic: return "По теме"
+        case .quote: return "По цитатам"
         }
     }
 }
@@ -245,6 +265,23 @@ struct FragmentRecord: Codable, Identifiable {
     var topicID: String? = nil
     var quoteStart: String? = nil
     var quoteEnd: String? = nil
+    var processedVideoPath: String? = nil
+    var processingRecipe: FragmentProcessingRecipe? = nil
+}
+
+struct FragmentProcessingRecipe: Codable, Equatable {
+    var burnSubtitles: Bool
+    var muteFillerWords: Bool
+    var fillerMode: FillerProcessingMode
+    var fillerCandidateIDs: [String]
+    var adjustSpeed: Bool
+    var speedFactor: Double
+    var applyBlur: Bool
+    var blurRegion: NormalizedVideoRect
+    var blurIntensity: Double
+    var blurStart: TimeInterval?
+    var blurEnd: TimeInterval?
+    var filterGraphs: [String]
 }
 
 struct ProjectManifest: Codable {
@@ -319,6 +356,9 @@ struct ProjectOutput: Codable, Identifiable {
         case "fragment-video": return "Видеофрагмент"
         case "fragment-srt": return "Субтитры фрагмента"
         case "fragment-subtitled-video": return "Фрагмент с субтитрами"
+        case "processed-fragment-video": return "Обработанный фрагмент"
+        case "processed-fragment-srt": return "Субтитры обработанного фрагмента"
+        case "processed-fragment-recipe": return "Рецепт обработанного фрагмента"
         case "subtitled-video": return "Полное видео с субтитрами"
         case "speed-adjusted-video": return "Видео с изменённой скоростью"
         case "speed-adjusted-subtitles": return "Субтитры для изменённой скорости"
@@ -637,6 +677,9 @@ struct WorkflowSettings {
     var translationHumanReviewEnabled: Bool = false
     var fillerAnalysisBeforeReview: Bool = true
     var topicHumanReviewEnabled: Bool = false
+    var fragmentMuteFillerWords: Bool = false
+    var fragmentAdjustSpeed: Bool = false
+    var fragmentApplyBlur: Bool = false
 }
 
 struct AppAlert: Identifiable {
