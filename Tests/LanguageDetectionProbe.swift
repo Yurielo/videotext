@@ -2,7 +2,7 @@ import Foundation
 
 @main
 struct LanguageDetectionProbe {
-    static func main() throws {
+    static func main() async throws {
         let parser = WhisperLanguageDetectionParser()
         let russian = parser.parse("whisper_lang_auto_detect_with_state: detected language: ru (p = 0.982145)")
         try require(russian?.languageCode == "ru", "не разобран русский язык")
@@ -38,7 +38,43 @@ struct LanguageDetectionProbe {
         ])
         try require(unsupported.detected == .uncertain && unsupported.effective == nil, "неподдерживаемый язык принят")
 
+        try await validateMissingAudioError()
+
         print("LANGUAGE_DETECTION_PROBE_PASS")
+    }
+
+    private static func validateMissingAudioError() async throws {
+        let runner = ToolRunner()
+        guard let ffmpeg = runner.resolve("ffmpeg") else { throw ProbeFailure(message: "ffmpeg не найден") }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("videotext-language-no-audio-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let mediaURL = root.appendingPathComponent("silent.mp4")
+        let generated = try await runner.run(ffmpeg, [
+            "-y", "-f", "lavfi", "-i", "color=c=black:s=320x240:d=1",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", mediaURL.path
+        ])
+        try require(generated.exitCode == 0, "не создано видео без аудио")
+        do {
+            _ = try await LanguageDetectionService(runner: runner).detect(
+                mediaURL: mediaURL,
+                projectURL: root.appendingPathComponent("project", isDirectory: true),
+                mediaDuration: 1,
+                modelPath: "",
+                requestedLanguage: "auto",
+                onProgress: { _ in },
+                onLog: { _ in }
+            )
+            throw ProbeFailure(message: "видео без аудио принято языковым анализом")
+        } catch let error as ProbeFailure {
+            throw error
+        } catch {
+            try require(
+                error.localizedDescription.contains("отсутствует аудиодорожка"),
+                "для видео без аудио возвращена нестабильная ошибка"
+            )
+        }
     }
 
     private static func candidate(

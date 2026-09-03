@@ -58,10 +58,24 @@ struct LanguageDetectionService {
             )
         }
 
-        guard let ffmpeg = runner.resolve("ffmpeg") else { throw WorkflowError.missingTool("ffmpeg") }
-        guard let whisper = runner.resolve("whisper-cli") else { throw WorkflowError.missingTool("whisper-cli") }
         let layout = ProjectLayout(root: projectURL)
         try layout.createDirectories()
+        guard let ffmpeg = runner.resolve("ffmpeg") else { throw WorkflowError.missingTool("ffmpeg") }
+        guard let ffprobe = runner.resolve("ffprobe") else { throw WorkflowError.missingTool("ffprobe") }
+        let audioProbe = try await runner.run(ffprobe, [
+            "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=index",
+            "-of", "csv=p=0",
+            mediaURL.path
+        ], currentDirectory: projectURL)
+        guard audioProbe.exitCode == 0 else {
+            throw WorkflowError.processFailed("Не удалось проверить аудиодорожку: \(audioProbe.stderr)")
+        }
+        guard !audioProbe.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw WorkflowError.processFailed("В выбранном медиафайле отсутствует аудиодорожка.")
+        }
+        guard let whisper = runner.resolve("whisper-cli") else { throw WorkflowError.missingTool("whisper-cli") }
         let ranges = sampleRanges(mediaDuration: mediaDuration)
         var candidates: [LanguageDetectionCandidate] = []
 
