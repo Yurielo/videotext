@@ -156,12 +156,19 @@ struct ProjectResultSummaryService {
             guard TopicAlgorithmIdentity.recognizes(file) else {
                 return summary(.topics, .partial, "Устаревший алгоритм \(file.adapter); выполните таймкодинг повторно")
             }
-            if nonemptyFile(layout.fullSRTURL), !isAtLeastAsNew(layout.topicsURL, as: layout.fullSRTURL) {
-                return summary(.topics, .partial, "\(topicDescription(topics.count)); SRT изменён позднее")
+            let sourceCandidates = [layout.fullSRTURL] + ArtifactLanguage.allCases.map {
+                layout.subtitlesURL(language: $0)
             }
-            if let source = try? String(contentsOf: layout.fullSRTURL, encoding: .utf8),
-               file.sourceSignature != StableTopicHash.string(source) {
+            let matchingSource = sourceCandidates.first { sourceURL in
+                guard nonemptyFile(sourceURL),
+                      let source = try? String(contentsOf: sourceURL, encoding: .utf8) else { return false }
+                return file.sourceSignature == StableTopicHash.string(source)
+            }
+            guard let matchingSource else {
                 return summary(.topics, .partial, "\(topicDescription(topics.count)); содержимое SRT изменилось")
+            }
+            if !isAtLeastAsNew(layout.topicsURL, as: matchingSource) {
+                return summary(.topics, .partial, "\(topicDescription(topics.count)); SRT изменён позднее")
             }
             if file.status == .draft {
                 return summary(.topics, .partial, "\(topicDescription(topics.count)); черновой режим")
