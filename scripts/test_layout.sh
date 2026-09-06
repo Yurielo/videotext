@@ -12,9 +12,11 @@ SWIFT_SOURCES=()
 
 rm -rf "${TEST_APP}" "${TEST_STATE}"
 mkdir -p "$(dirname "${TEST_BINARY}")" "$(dirname "${OUTPUT_IMAGE}")" "${TEST_STATE}"
+mkdir -p "${TEST_APP}/Contents/Resources"
 export VIDEOTEXT_HISTORY_PATH="${TEST_STATE}/history.json"
 export VIDEOTEXT_ETA_HISTORY_PATH="${TEST_STATE}/eta-history.json"
 cp "${ROOT}/Resources/Info.plist" "${TEST_APP}/Contents/Info.plist"
+cp "${ROOT}/Resources/AppIcon.icns" "${TEST_APP}/Contents/Resources/AppIcon.icns"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable videotext-layout-probe' "${TEST_APP}/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.codex.videotext.layout-probe' "${TEST_APP}/Contents/Info.plist"
 while IFS= read -r source; do

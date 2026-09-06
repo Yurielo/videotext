@@ -16,6 +16,9 @@ done < <(find "${ROOT}/Sources/videotext" -name '*.swift' | sort)
 rm -rf "${APP}"
 mkdir -p "${MACOS}" "${RESOURCES}"
 cp "${ROOT}/Resources/Info.plist" "${CONTENTS}/Info.plist"
+cp "${ROOT}/Resources/AppIcon.icns" "${RESOURCES}/AppIcon.icns"
+mkdir -p "${RESOURCES}/Branding"
+cp "${ROOT}/Resources/Branding/VideoTextLogo.png" "${RESOURCES}/Branding/VideoTextLogo.png"
 
 swiftc \
   -O \

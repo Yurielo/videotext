@@ -116,12 +116,19 @@ struct ContentView: View {
     }
 
     private var appIdentity: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("videotext")
-                .font(.title2.bold())
-            Text("Версия \(BuildInfo.version) / сборка \(BuildInfo.build)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        HStack(spacing: 9) {
+            Image(nsImage: NSApplication.shared.applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 38, height: 38)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("videotext")
+                    .font(.title2.bold())
+                Text("Версия \(BuildInfo.version) / сборка \(BuildInfo.build)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .fixedSize(horizontal: true, vertical: false)
     }

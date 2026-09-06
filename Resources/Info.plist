@@ -6,8 +6,10 @@
 	<string>ru</string>
     <key>CFBundleExecutable</key>
     <string>videotext</string>
-    <key>CFBundleIdentifier</key>
-    <string>local.codex.videotext.v3</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.codex.videotext.v3</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
@@ -15,9 +17,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-	<string>0.6.0</string>
+	<string>0.6.1</string>
     <key>CFBundleVersion</key>
-	<string>2026.09.04.1</string>
+	<string>2026.09.06.1</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHumanReadableCopyright</key>
