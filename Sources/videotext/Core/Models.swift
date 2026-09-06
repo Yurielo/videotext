@@ -2,8 +2,8 @@ import Foundation
 
 enum BuildInfo {
     static let name = "videotext"
-    static let version = "0.6.1"
-    static let build = "2026.09.06.1"
+    static let version = "0.6.2"
+    static let build = "2026.09.06.2"
 }
 
 enum WorkflowOperation: String, CaseIterable, Identifiable, Codable {

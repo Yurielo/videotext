@@ -2,6 +2,8 @@ import SwiftUI
 
 @main
 struct VideoTextApp: App {
+    @NSApplicationDelegateAdaptor(VideoTextAppDelegate.self) private var appDelegate
+
     var body: some Scene {
         WindowGroup {
             ContentView()
