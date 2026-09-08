@@ -1,6 +1,7 @@
 import Foundation
 
 struct OllamaTopicProvider: TopicAIProvider {
+    static let chatTimeoutSeconds: TimeInterval = 120
     let embeddingModel = "embeddinggemma:latest"
     let primaryLanguageModel = "qwen2.5:7b"
     let fallbackLanguageModel = "gemma3:4b"
@@ -162,7 +163,7 @@ struct OllamaTopicProvider: TopicAIProvider {
             messages: [ChatMessage(role: "user", content: prompt)],
             options: ChatOptions(temperature: 0.05, numPredict: 1_200)
         )
-        let data = try await post(path: "api/chat", body: payload, timeout: 360)
+        let data = try await post(path: "api/chat", body: payload, timeout: Self.chatTimeoutSeconds)
         guard let response = try? JSONDecoder().decode(ChatResponse.self, from: data) else {
             throw WorkflowError.invalidTopics("повреждён ответ модели \(model).")
         }

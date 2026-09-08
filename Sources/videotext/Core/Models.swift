@@ -2,8 +2,8 @@ import Foundation
 
 enum BuildInfo {
     static let name = "videotext"
-    static let version = "0.6.2"
-    static let build = "2026.09.06.2"
+    static let version = "0.6.3"
+    static let build = "2026.09.08.1"
 }
 
 enum WorkflowOperation: String, CaseIterable, Identifiable, Codable {
@@ -471,7 +471,7 @@ enum TopicAnalysisMode: String, CaseIterable, Identifiable, Codable {
 enum TopicAlgorithmIdentity {
     static let schemaVersion = 2
     static let hybridAdapter = "HybridTopicAdapter"
-    static let hybridVersion = "hybrid-cue-review-v7"
+    static let hybridVersion = "hybrid-cue-review-v9"
     static let draftAdapter = "DraftTopicAdapter"
     static let draftVersion = "draft-keyword-v2"
 

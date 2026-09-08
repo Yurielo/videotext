@@ -18,6 +18,10 @@ final class FakeTopicAIProvider: TopicAIProvider {
     var responseDelay: UInt64 = 0
     var failPrimary = false
     var shortTitles = false
+    var duplicateTitles = false
+    var permanentlyInvalidDescriptions = false
+    var keepAllBoundaries = false
+    var descriptionModels: [String] = []
 
     func availableLanguageModels() async throws -> [String] {
         [primaryLanguageModel, fallbackLanguageModel]
@@ -43,7 +47,7 @@ final class FakeTopicAIProvider: TopicAIProvider {
         return TopicBoundaryReview(decisions: request.focusAfterCueIds.map { cueID in
             TopicBoundaryDecision(
                 afterCueId: cueID,
-                keep: cueID == 12,
+                keep: keepAllBoundaries || cueID == 12,
                 confidence: cueID == 12 ? 0.96 : 0.88,
                 reason: cueID == 12 ? "Начинается самостоятельная тема приготовления супа." : "Продолжается прежняя тема."
             )
@@ -56,6 +60,7 @@ final class FakeTopicAIProvider: TopicAIProvider {
         correction: String?
     ) async throws -> TopicReviewResponse {
         descriptionCalls += 1
+        descriptionModels.append(model)
         if responseDelay > 0 { try await Task.sleep(nanoseconds: responseDelay) }
         if failPrimary, model == primaryLanguageModel {
             return TopicReviewResponse(topics: [])
@@ -63,13 +68,17 @@ final class FakeTopicAIProvider: TopicAIProvider {
         return TopicReviewResponse(topics: request.blocks.map { block in
             let astronomy = block.cues.contains { $0.text.contains("звёзд") }
             return TopicReviewItem(
-                title: shortTitles
-                    ? (astronomy ? "Наблюдение звёзд" : "Приготовление супа")
-                    : (astronomy ? "Наблюдение далёких звёзд телескопом" : "Приготовление овощного супа дома"),
+                title: duplicateTitles
+                    ? "Обсуждение нового раздела семинара"
+                    : (shortTitles
+                        ? (astronomy ? "Наблюдение звёзд" : "Приготовление супа")
+                        : (astronomy ? "Наблюдение далёких звёзд телескопом" : "Приготовление овощного супа дома")),
                 summary: astronomy
                     ? "Астрономы обсуждают наблюдение звёзд и настройку телескопа."
                     : "Обсуждается приготовление овощного супа и выбор ингредиентов.",
-                keywords: astronomy ? ["звёзды", "телескоп", "астрономия"] : ["суп", "овощи", "рецепт"],
+                keywords: permanentlyInvalidDescriptions
+                    ? []
+                    : (astronomy ? ["звёзды", "телескоп", "астрономия"] : ["суп", "овощи", "рецепт"]),
                 startCueId: block.startCueId,
                 endCueId: block.endCueId,
                 confidence: astronomy ? 0.94 : 0.91,
@@ -93,6 +102,9 @@ struct TopicAnalysisProbe {
             defer { try? FileManager.default.removeItem(at: root) }
             try validatePreprocessing()
             try await validateShortTitleRepair(parent: root)
+            try await validateDuplicateTitleRepair(parent: root)
+            try await validateBoundedInvalidDescriptions(parent: root)
+            try await validateAllGranularitiesComplete(parent: root)
             let cues = syntheticCues()
             let sourceSRT = root.appendingPathComponent("source.srt")
             try SRTService().write(cues, to: sourceSRT)
@@ -184,6 +196,98 @@ struct TopicAnalysisProbe {
         }, "короткое название LLM не исправлено детерминированно")
         try require(file.topics[0].title.contains("звёзд"), "исправление потеряло смысл первого названия")
         try require(file.topics[1].title.contains("суп"), "исправление потеряло смысл второго названия")
+    }
+
+    private static func validateDuplicateTitleRepair(parent: URL) async throws {
+        let provider = FakeTopicAIProvider()
+        provider.duplicateTitles = true
+        let cues = syntheticCues()
+        let root = parent.appendingPathComponent("duplicate-title-repair", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let sourceSRT = root.appendingPathComponent("source.srt")
+        try SRTService().write(cues, to: sourceSRT)
+        let file = try await HybridTopicAdapter(provider: provider).buildTopics(
+            from: cues,
+            sourceSRT: sourceSRT,
+            context: TopicBuildContext(projectURL: root, mediaDuration: 720, granularity: .normal),
+            onProgress: { _ in },
+            onLog: { _ in }
+        )
+        try require(file.topics.count == 2, "ремонт названий изменил количество тем")
+        try require(file.topics[0].title != file.topics[1].title, "повторное название не исправлено детерминированно")
+        try require(file.topics[1].title.contains("суп"), "исправленное название потеряло различимый термин")
+    }
+
+    private static func validateBoundedInvalidDescriptions(parent: URL) async throws {
+        let provider = FakeTopicAIProvider()
+        provider.duplicateTitles = true
+        provider.permanentlyInvalidDescriptions = true
+        provider.keepAllBoundaries = true
+        let cues = (0..<13).map { index in
+            SubtitleCue(
+                id: index + 1,
+                start: Double(index) * 600,
+                end: Double(index) * 600 + 590,
+                text: index.isMultiple(of: 2)
+                    ? "Исследование далёких звёзд оптическим телескопом."
+                    : "Приготовление овощного супа по домашнему рецепту."
+            )
+        }
+        let root = parent.appendingPathComponent("bounded-coarse-fallback", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let sourceSRT = root.appendingPathComponent("source.srt")
+        try SRTService().write(cues, to: sourceSRT)
+        var logs: [String] = []
+        let adapter = HybridTopicAdapter(provider: provider)
+        let file = try await adapter.buildTopics(
+            from: cues,
+            sourceSRT: sourceSRT,
+            context: TopicBuildContext(projectURL: root, mediaDuration: 7_790, granularity: .coarse),
+            onProgress: { _ in },
+            onLog: { logs.append($0) }
+        )
+        try require(file.topics.count == 13, "крупный набор не сохранил 13 подтверждённых диапазонов")
+        try require(provider.descriptionCalls == 14, "невалидные описания вызвали неограниченное число запросов: \(provider.descriptionCalls)")
+        try require(
+            provider.descriptionModels == Array(repeating: [provider.primaryLanguageModel, provider.fallbackLanguageModel], count: 7).flatMap { $0 },
+            "порядок ограниченного fallback между моделями нарушен"
+        )
+        try require(
+            file.languageModel?.contains(HybridTopicAdapter.deterministicFallbackModel) == true,
+            "после исчерпания моделей не использован детерминированный fallback"
+        )
+        try require(logs.contains(where: { $0.contains("fake-primary") && $0.contains("попытка 1/1") }), "в журнале нет лимита основной модели")
+        try require(logs.contains(where: { $0.contains("fake-fallback") && $0.contains("отклонена") }), "в журнале нет причины fallback-модели")
+        try require(logs.contains(where: { $0.contains("попытки исчерпаны") && $0.contains("диапазоны") }), "в журнале нет терминального fallback")
+
+        let callsAfterFallback = provider.descriptionCalls
+        _ = try await adapter.buildTopics(
+            from: cues,
+            sourceSRT: sourceSRT,
+            context: TopicBuildContext(projectURL: root, mediaDuration: 7_790, granularity: .coarse),
+            onProgress: { _ in },
+            onLog: { _ in }
+        )
+        try require(provider.descriptionCalls == callsAfterFallback, "детерминированный fallback не восстановлен из кэша")
+    }
+
+    private static func validateAllGranularitiesComplete(parent: URL) async throws {
+        let cues = syntheticCues()
+        for granularity in TopicGranularity.allCases {
+            let root = parent.appendingPathComponent("granularity-\(granularity.rawValue)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let sourceSRT = root.appendingPathComponent("source.srt")
+            try SRTService().write(cues, to: sourceSRT)
+            let file = try await HybridTopicAdapter(provider: FakeTopicAIProvider()).buildTopics(
+                from: cues,
+                sourceSRT: sourceSRT,
+                context: TopicBuildContext(projectURL: root, mediaDuration: 720, granularity: granularity),
+                onProgress: { _ in },
+                onLog: { _ in }
+            )
+            try require(file.status == .ready, "набор \(granularity.rawValue) не завершился")
+            try require(!file.topics.isEmpty, "набор \(granularity.rawValue) не содержит тем")
+        }
     }
 
     private static func validateStrictFailure(file: TopicsFile, cues: [SubtitleCue]) throws {

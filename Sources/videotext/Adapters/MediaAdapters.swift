@@ -31,6 +31,21 @@ struct WhisperCLITranscriber {
         let audioURL = try await prepareAudio(mediaURL: mediaURL, projectURL: projectURL, mediaDuration: mediaDuration) { fraction in
             onProgress(fraction * 0.08)
         }
+        if WhisperChunkPlanner.shouldSegment(duration: mediaDuration) {
+            return try await SegmentedWhisperTranscriber(
+                runner: runner,
+                vadModelLocator: vadModelLocator
+            ).transcribe(
+                audioURL: audioURL,
+                mediaURL: mediaURL,
+                projectURL: projectURL,
+                mediaDuration: mediaDuration,
+                modelPath: modelPath,
+                language: language,
+                onProgress: onProgress,
+                onLog: onLog
+            )
+        }
         let outputBase = layout.textsDirectory.appendingPathComponent("full.partial")
         let partialSRT = layout.textsDirectory.appendingPathComponent("full.partial.srt")
         let partialJSON = layout.textsDirectory.appendingPathComponent("full.partial.json")

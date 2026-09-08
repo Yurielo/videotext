@@ -102,16 +102,32 @@ protocol TopicAIProvider {
     ) async throws -> TopicReviewResponse
 }
 
+struct TopicRetryPolicy {
+    var boundaryAttemptsPerModel: Int
+    var descriptionAttemptsPerModel: Int
+
+    static let production = TopicRetryPolicy(
+        boundaryAttemptsPerModel: 2,
+        descriptionAttemptsPerModel: 1
+    )
+}
+
 struct HybridTopicAdapter: TopicAdapter {
     static let algorithmVersion = TopicAlgorithmIdentity.hybridVersion
+    static let deterministicFallbackModel = "deterministic-transcript-fallback"
     let name = TopicAlgorithmIdentity.hybridAdapter
     private let provider: TopicAIProvider
+    private let retryPolicy: TopicRetryPolicy
     private let preprocessor = TopicTextPreprocessor()
     private let detector = TopicBoundaryDetector()
     private let validator = TopicValidator()
 
-    init(provider: TopicAIProvider = OllamaTopicProvider()) {
+    init(
+        provider: TopicAIProvider = OllamaTopicProvider(),
+        retryPolicy: TopicRetryPolicy = .production
+    ) {
         self.provider = provider
+        self.retryPolicy = retryPolicy
     }
 
     func buildTopics(
@@ -230,7 +246,7 @@ struct HybridTopicAdapter: TopicAdapter {
                languageModels.contains(cached.model) {
                 result = cached
             } else {
-                result = try await reviewBoundaries(window, models: languageModels)
+                result = try await reviewBoundaries(window, models: languageModels, onLog: onLog)
                 analysisCache.boundaryWindows[cacheKey] = result
                 try analysisCache.save(to: labelCacheURL)
             }
@@ -267,10 +283,10 @@ struct HybridTopicAdapter: TopicAdapter {
             let result: CachedTopicReview
             if let cached,
                validator.topicReviewIssues(cached.review, request: request).isEmpty,
-               languageModels.contains(cached.model) {
+               languageModels.contains(cached.model) || cached.model == Self.deterministicFallbackModel {
                 result = cached
             } else {
-                result = try await describeTopics(request, models: languageModels)
+                result = try await describeTopics(request, models: languageModels, onLog: onLog)
                 analysisCache.descriptions[cacheKey] = result
                 try analysisCache.save(to: labelCacheURL)
             }
@@ -317,24 +333,28 @@ struct HybridTopicAdapter: TopicAdapter {
 
     private func reviewBoundaries(
         _ request: TopicBoundaryReviewRequest,
-        models: [String]
+        models: [String],
+        onLog: (String) -> Void
     ) async throws -> CachedBoundaryReview {
         var failures: [String] = []
         for model in models {
             var correction: String?
-            for _ in 0..<2 {
+            for attempt in 1...max(retryPolicy.boundaryAttemptsPerModel, 1) {
                 try Task.checkCancellation()
+                onLog("Проверка границ \(request.id): модель \(model), попытка \(attempt)/\(max(retryPolicy.boundaryAttemptsPerModel, 1)).")
                 do {
                     let review = try await provider.reviewBoundaries(request, model: model, correction: correction)
                     let issues = validator.boundaryReviewIssues(review, request: request)
                     if issues.isEmpty { return CachedBoundaryReview(model: model, review: review) }
                     correction = issues.joined(separator: " ")
                     failures.append("\(model): \(correction!)")
+                    onLog("Проверка границ \(request.id): модель \(model), попытка \(attempt) отклонена: \(correction!)")
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
                     correction = error.localizedDescription
                     failures.append("\(model): \(error.localizedDescription)")
+                    onLog("Проверка границ \(request.id): модель \(model), попытка \(attempt) завершилась ошибкой: \(error.localizedDescription)")
                 }
             }
         }
@@ -343,29 +363,85 @@ struct HybridTopicAdapter: TopicAdapter {
 
     private func describeTopics(
         _ request: TopicDescriptionRequest,
-        models: [String]
+        models: [String],
+        onLog: (String) -> Void
     ) async throws -> CachedTopicReview {
         var failures: [String] = []
         for model in models {
             var correction: String?
-            for _ in 0..<2 {
+            let attemptLimit = max(retryPolicy.descriptionAttemptsPerModel, 1)
+            for attempt in 1...attemptLimit {
                 try Task.checkCancellation()
+                onLog("Описание \(request.id): модель \(model), попытка \(attempt)/\(attemptLimit), диапазоны \(descriptionRanges(request)).")
                 do {
                     let rawReview = try await provider.describeTopics(request, model: model, correction: correction)
-                    let review = repairingShortTitles(in: rawReview, language: request.language)
+                    let shortTitleReview = repairingShortTitles(in: rawReview, language: request.language)
+                    let review = repairingDuplicateTitles(in: shortTitleReview, request: request)
                     let issues = validator.topicReviewIssues(review, request: request)
                     if issues.isEmpty { return CachedTopicReview(model: model, review: review) }
                     correction = issues.joined(separator: " ")
                     failures.append("\(model): \(correction!)")
+                    onLog("Описание \(request.id): модель \(model), попытка \(attempt) отклонена: \(correction!)")
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
                     correction = error.localizedDescription
                     failures.append("\(model): \(error.localizedDescription)")
+                    onLog("Описание \(request.id): модель \(model), попытка \(attempt) завершилась ошибкой: \(error.localizedDescription)")
                 }
             }
         }
-        throw WorkflowError.invalidTopics("LLM не описала диапазоны \(request.id): \(failures.joined(separator: " | "))")
+        let fallback = deterministicDescription(for: request)
+        let fallbackIssues = validator.topicReviewIssues(fallback, request: request)
+        guard fallbackIssues.isEmpty else {
+            throw WorkflowError.invalidTopics(
+                "LLM не описала диапазоны \(request.id), а резервное описание не прошло проверку: " +
+                "\(fallbackIssues.joined(separator: " ")) Исходные ошибки: \(failures.joined(separator: " | "))"
+            )
+        }
+        onLog(
+            "Описание \(request.id): попытки исчерпаны для моделей \(models.joined(separator: ", ")); " +
+            "диапазоны \(descriptionRanges(request)); причины: \(failures.joined(separator: " | ")). " +
+            "Сохранено детерминированное описание из расшифровки."
+        )
+        return CachedTopicReview(model: Self.deterministicFallbackModel, review: fallback)
+    }
+
+    private func deterministicDescription(for request: TopicDescriptionRequest) -> TopicReviewResponse {
+        let topics = request.blocks.map { block -> TopicReviewItem in
+            let text = block.cues.map(\.text).joined(separator: " ")
+            var terms: [String] = []
+            for word in TopicLexicon.meaningfulWords(in: text) where !terms.contains(word) {
+                terms.append(word)
+                if terms.count == 6 { break }
+            }
+            let defaults = request.language == .ru
+                ? ["содержание", "раздел", "материал"]
+                : ["content", "section", "material"]
+            for word in defaults where terms.count < 3 && !terms.contains(word) { terms.append(word) }
+            let titlePrefix = request.language == .ru ? "Раздел" : "Section"
+            let title = ([titlePrefix] + Array(terms.prefix(2)) + [String(block.startCueId)]).joined(separator: " ")
+            let summary = request.language == .ru
+                ? "Описание диапазона \(block.startCueId)-\(block.endCueId) сформировано из текста расшифровки и требует проверки."
+                : "The description for range \(block.startCueId)-\(block.endCueId) was derived from the transcript and requires review."
+            let reason = request.language == .ru
+                ? "Сохранены подтверждённые границы смыслового диапазона."
+                : "The confirmed boundaries of the semantic range were preserved."
+            return TopicReviewItem(
+                title: title,
+                summary: summary,
+                keywords: Array(terms.prefix(6)),
+                startCueId: block.startCueId,
+                endCueId: block.endCueId,
+                confidence: 0.35,
+                boundaryReason: reason
+            )
+        }
+        return TopicReviewResponse(topics: topics)
+    }
+
+    private func descriptionRanges(_ request: TopicDescriptionRequest) -> String {
+        request.blocks.map { "\($0.startCueId)-\($0.endCueId)" }.joined(separator: ", ")
     }
 
     private func repairingShortTitles(
@@ -395,6 +471,45 @@ struct HybridTopicAdapter: TopicAdapter {
             return repaired
         }
         return TopicReviewResponse(topics: topics)
+    }
+
+    private func repairingDuplicateTitles(
+        in review: TopicReviewResponse,
+        request: TopicDescriptionRequest
+    ) -> TopicReviewResponse {
+        var previous = Set(request.previousTitles.map(normalizedTitle))
+        let sorted = review.topics.sorted(by: { $0.startCueId < $1.startCueId }).map { item -> TopicReviewItem in
+            var repaired = item
+            defer { previous.insert(normalizedTitle(repaired.title)) }
+            guard previous.contains(normalizedTitle(item.title)) else { return repaired }
+
+            let titleWords = item.title
+                .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+                .map(String.init)
+            let titleTokens = Set(titleWords.map { $0.lowercased() })
+            let additions = (item.keywords + [item.summary])
+                .flatMap { $0.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init) }
+                .filter { !titleTokens.contains($0.lowercased()) }
+            for addition in additions {
+                var words = Array(titleWords.prefix(7))
+                words.append(addition)
+                let candidate = words.joined(separator: " ")
+                if (3...8).contains(words.count), !previous.contains(normalizedTitle(candidate)) {
+                    repaired.title = candidate
+                    return repaired
+                }
+            }
+            return repaired
+        }
+        let byStart = Dictionary(uniqueKeysWithValues: sorted.map { ($0.startCueId, $0) })
+        return TopicReviewResponse(topics: review.topics.compactMap { byStart[$0.startCueId] })
+    }
+
+    private func normalizedTitle(_ value: String) -> String {
+        value.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     private func makeTopic(

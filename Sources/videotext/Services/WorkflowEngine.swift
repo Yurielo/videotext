@@ -1331,9 +1331,13 @@ final class WorkflowEngine: @unchecked Sendable {
                     try store.registerOutput(kind: "transcription-quality", url: layout.transcriptionQualityURL, in: projectURL)
                     try store.registerOutput(kind: "review-tasks", url: layout.reviewTasksURL, in: projectURL)
                     try store.registerOutput(kind: "transcript-review", url: layout.transcriptReviewHTMLURL, in: projectURL)
-                    log(assessment.tasks.isEmpty
-                        ? "Качество расшифровки: замечаний не найдено."
-                        : "Качество расшифровки: создано заданий ручной проверки — \(assessment.tasks.count). Pipeline продолжен.")
+                    if let issue = assessment.catastrophicIssue {
+                        log("Качество расшифровки: обнаружена \(issue.message). Тематический анализ заблокирован до автоматической повторной расшифровки.")
+                    } else {
+                        log(assessment.tasks.isEmpty
+                            ? "Качество расшифровки: замечаний не найдено."
+                            : "Качество расшифровки: создано заданий ручной проверки — \(assessment.tasks.count). Pipeline продолжен.")
+                    }
 
                 case .translateTranscript:
                     let current = try store.load(from: projectURL)
@@ -1384,6 +1388,16 @@ final class WorkflowEngine: @unchecked Sendable {
                     try await validateTimeline(mediaURL: mediaURL, layout: layout, projectURL: projectURL, log: log)
 
                 case .topicTimecoding:
+                    if nonemptyFile(layout.transcriptionQualityURL),
+                       let report = try? store.decoder.decode(
+                        TranscriptionQualityReport.self,
+                        from: Data(contentsOf: layout.transcriptionQualityURL)
+                       ), report.status == .invalid {
+                        throw WorkflowError.processFailed(
+                            "Тематический таймкодинг не запущен: расшифровка имеет критический статус invalid. " +
+                            "Повторно запустите расшифровку; VideoText автоматически обработает длинное видео сегментами."
+                        )
+                    }
                     let adapter = settings.topicAnalysisMode == .hybrid ? hybridTopicAdapter : draftTopicAdapter
                     let currentManifest = try store.load(from: projectURL)
                     let languages = availableTopicLanguages(manifest: currentManifest, layout: layout)
@@ -1396,21 +1410,36 @@ final class WorkflowEngine: @unchecked Sendable {
                         let srtURL = layout.subtitlesURL(language: language)
                         guard nonemptyFile(srtURL) else { throw WorkflowError.missingFullSRT }
                         log("Тематический набор: \(language.rawValue.uppercased()), \(granularity.title.lowercased()).")
-                        let topics = try await adapter.buildTopics(
-                            from: try srt.load(from: srtURL),
-                            sourceSRT: srtURL,
-                            context: TopicBuildContext(
-                                projectURL: projectURL,
-                                mediaDuration: mediaDuration,
-                                granularity: granularity,
-                                language: language
-                            ),
-                            onProgress: { localFraction in
-                                let overall = (Double(combinationIndex) + localFraction) / Double(max(combinations.count, 1))
-                                tracker.update(operation, fraction: overall)
-                            },
-                            onLog: log
+                        let cues = try srt.load(from: srtURL)
+                        let context = TopicBuildContext(
+                            projectURL: projectURL,
+                            mediaDuration: mediaDuration,
+                            granularity: granularity,
+                            language: language
                         )
+                        let progress: (Double) -> Void = { localFraction in
+                            let overall = (Double(combinationIndex) + localFraction) / Double(max(combinations.count, 1))
+                            tracker.update(operation, fraction: overall)
+                        }
+                        let topics: TopicsFile
+                        do {
+                            topics = try await adapter.buildTopics(
+                                from: cues,
+                                sourceSRT: srtURL,
+                                context: context,
+                                onProgress: progress,
+                                onLog: log
+                            )
+                        } catch WorkflowError.invalidTopics(let reason) where settings.topicAnalysisMode == .hybrid {
+                            log("Качественное описание не прошло строгую проверку: \(reason) Сохраняется проверяемый черновик с исходными cueId.")
+                            topics = try await draftTopicAdapter.buildTopics(
+                                from: cues,
+                                sourceSRT: srtURL,
+                                context: context,
+                                onProgress: progress,
+                                onLog: log
+                            )
+                        }
                         let activeLanguage = settings.artifactLanguage
                             ?? currentManifest.languageProfile?.effective
                             ?? language
@@ -2455,6 +2484,10 @@ final class WorkflowEngine: @unchecked Sendable {
             let warnings = srt.validateTimeline(parsed.cues, mediaDuration: try await ffmpeg.duration(of: mediaURL))
             guard warnings.isEmpty else {
                 log("Существующий full.srt не прошёл проверку; потребуется новая расшифровка.")
+                return false
+            }
+            if let issue = transcriptionQuality.catastrophicIssue(cues: parsed.cues) {
+                log("Существующий full.srt содержит \(issue.message). Будет выполнена автоматическая сегментированная расшифровка.")
                 return false
             }
             try store.registerOutput(kind: "full-srt", url: layout.fullSRTURL, in: projectURL)

@@ -71,6 +71,35 @@ struct TranscriptionQualityProbe {
         try require(assessment.report.warnings.contains { $0.contains("Pipeline продолжен") }, "нет неблокирующего предупреждения")
         try require(assessment.html.contains("class=\"needs-review\""), "нет красной review-разметки")
         try require(assessment.html.contains("Low confidence phrase."), "текст потерян в HTML")
+        var catastrophicCues: [SubtitleCue] = []
+        for index in 0..<110 {
+            let text = index < 10 ? "Содержательная реплика номер \(index)." : "Нередианная почка."
+            catastrophicCues.append(SubtitleCue(
+                id: index + 1,
+                start: Double(index) * 2,
+                end: Double(index + 1) * 2,
+                text: text
+            ))
+        }
+        let catastrophic = service.assess(
+            cues: catastrophicCues,
+            skippedZeroDurationCount: 0,
+            whisperJSONURL: nil,
+            language: .ru,
+            transcriptRevisionID: "catastrophic-fixture",
+            mediaDuration: 220
+        )
+        try require(catastrophic.report.status == ArtifactValidationStatus.invalid, "массовая петля Whisper не получила статус invalid")
+        try require(catastrophic.catastrophicIssue?.start == 20, "не найдена граница начала массовой петли")
+        try require(catastrophic.report.metrics["catastrophicRepetitionCueCount"] == 100, "не сохранён размер петли")
+        try require(
+            catastrophic.tasks.contains {
+                $0.reasonCodes.contains("catastrophic-repetition-loop") && $0.cueIDs.count == 100
+            },
+            "массовая петля не собрана в один диапазонный review task"
+        )
+        try require(catastrophic.tasks.count == 1, "массовая петля создала тысячи отдельных review task")
+        try require(catastrophic.report.warnings.contains { $0.contains("автоматическая повторная расшифровка") }, "нет инструкции восстановления")
         let retry = LocalWhisperRetryService()
         try require(
             retry.isImprovement("A corrected English phrase.", over: "Low confidence phrase.", language: .en),
