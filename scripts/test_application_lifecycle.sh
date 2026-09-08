@@ -9,6 +9,7 @@ mkdir -p "${WORK_ROOT}"
 swiftc \
   -framework AppKit \
   -o "${TEST_BINARY}" \
+  "${ROOT}/Sources/videotext/Core/ApplicationTerminationHandling.swift" \
   "${ROOT}/Sources/videotext/App/ApplicationLifecycle.swift" \
   "${ROOT}/Tests/ApplicationLifecycleProbe.swift"
 

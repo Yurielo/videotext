@@ -5,7 +5,7 @@ import AVFoundation
 import UniformTypeIdentifiers
 
 struct ContentView: View {
-    @StateObject private var model = WorkflowViewModel()
+    @ObservedObject var model: WorkflowViewModel
     @State private var fragmentSelectionMode = FragmentSelectionMode.timecode
     @State private var showServiceResults = false
     @State private var previewTopic: TopicSegment?

@@ -22,7 +22,7 @@ struct LayoutProbe {
             let rootView = ZStack {
                 Color(nsColor: .windowBackgroundColor)
                     .ignoresSafeArea()
-                ContentView()
+                ContentView(model: WorkflowViewModel())
             }
             let hostingView = NSHostingView(rootView: rootView)
             hostingView.appearance = NSAppearance(named: .aqua)

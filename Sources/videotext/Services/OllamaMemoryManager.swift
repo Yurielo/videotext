@@ -1,26 +1,48 @@
 import Foundation
 
 struct OllamaMemoryManager {
-    private let baseURL = URL(string: "http://127.0.0.1:11434")!
-    private let topicModelPrefixes = ["embeddinggemma", "qwen2.5", "gemma3"]
+    private let baseURL: URL
+    private let session: URLSession
+    private let videoTextModelPrefixes = ["embeddinggemma", "qwen2.5", "qwen3", "gemma3"]
 
-    func unloadTopicModels() async -> [String] {
+    init(
+        baseURL: URL = URL(string: "http://127.0.0.1:11434")!,
+        session: URLSession = .shared
+    ) {
+        self.baseURL = baseURL
+        self.session = session
+    }
+
+    func unloadVideoTextModels() async -> [String] {
         guard let loaded = await loadedModelNames() else { return [] }
         let targets = loaded.filter { name in
-            topicModelPrefixes.contains { prefix in
+            videoTextModelPrefixes.contains { prefix in
                 name == prefix || name.hasPrefix(prefix + ":")
             }
         }
-        var unloaded: [String] = []
-        for model in targets {
-            guard !Task.isCancelled else { break }
-            var request = URLRequest(url: baseURL.appendingPathComponent("api/generate"), timeoutInterval: 15)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try? JSONEncoder().encode(UnloadRequest(model: model, stream: false, keepAlive: 0))
-            guard let (_, response) = try? await URLSession.shared.data(for: request),
-                  (response as? HTTPURLResponse)?.statusCode == 200 else { continue }
-            unloaded.append(model)
+        let unloaded = await withTaskGroup(of: String?.self, returning: [String].self) { group in
+            for model in targets {
+                group.addTask {
+                    guard !Task.isCancelled else { return nil }
+                    var request = URLRequest(
+                        url: baseURL.appendingPathComponent("api/generate"),
+                        timeoutInterval: 4
+                    )
+                    request.httpMethod = "POST"
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.httpBody = try? JSONEncoder().encode(
+                        UnloadRequest(model: model, stream: false, keepAlive: 0)
+                    )
+                    guard let (_, response) = try? await session.data(for: request),
+                          (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+                    return model
+                }
+            }
+            var completed: [String] = []
+            for await model in group {
+                if let model { completed.append(model) }
+            }
+            return completed.sorted()
         }
         if !unloaded.isEmpty {
             for _ in 0..<20 {
@@ -33,9 +55,13 @@ struct OllamaMemoryManager {
         return unloaded
     }
 
+    func unloadTopicModels() async -> [String] {
+        await unloadVideoTextModels()
+    }
+
     private func loadedModelNames() async -> [String]? {
-        let request = URLRequest(url: baseURL.appendingPathComponent("api/ps"), timeoutInterval: 4)
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        let request = URLRequest(url: baseURL.appendingPathComponent("api/ps"), timeoutInterval: 1)
+        guard let (data, response) = try? await session.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200,
               let payload = try? JSONDecoder().decode(ProcessResponse.self, from: data) else { return nil }
         return payload.models.map(\.name)

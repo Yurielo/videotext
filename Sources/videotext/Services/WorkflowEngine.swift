@@ -430,6 +430,20 @@ final class WorkflowViewModel: ObservableObject {
         runTask?.cancel()
     }
 
+    func cancelForApplicationTermination() {
+        runTask?.cancel()
+        clockTask?.cancel()
+        fillerPreviewStopTask?.cancel()
+        fillerPreviewPlayer?.pause()
+        engine.cancel()
+    }
+
+    func prepareForApplicationTermination() async {
+        cancelForApplicationTermination()
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        _ = await engine.shutdownServices()
+    }
+
     func loadDetectedResults() {
         guard let projectURL else { return }
         refreshProjectResults(projectURL)
@@ -1010,6 +1024,8 @@ final class WorkflowViewModel: ObservableObject {
     }
 }
 
+extension WorkflowViewModel: ApplicationTerminationHandling {}
+
 struct WorkflowResult {
     var projectURL: URL
     var outputs: [ProjectOutput]
@@ -1067,6 +1083,11 @@ final class WorkflowEngine: @unchecked Sendable {
 
     func cancel() {
         controller.cancelCurrentProcess()
+    }
+
+    func shutdownServices() async -> [String] {
+        controller.cancelCurrentProcess(gracePeriod: 1)
+        return await ollamaMemory.unloadVideoTextModels()
     }
 
     func run(
