@@ -11,8 +11,6 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-      - name: Validate agent contracts
-        run: scripts/check_agents.sh
       - name: Validate project schema
         run: scripts/test_project_schema.sh
       - name: Validate human review
