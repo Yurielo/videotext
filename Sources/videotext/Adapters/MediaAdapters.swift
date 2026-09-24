@@ -304,6 +304,7 @@ struct FFmpegAdapter {
         ]
         arguments += copyAudio ? ["-c:a", "copy"] : ["-c:a", "aac", "-b:a", "192k"]
         arguments += [
+            "-map_chapters", "-1",
             "-movflags", "+faststart",
             "-progress", "pipe:1",
             "-nostats",
