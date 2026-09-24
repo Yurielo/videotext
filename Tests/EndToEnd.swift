@@ -367,6 +367,10 @@ struct EndToEndTest {
         manifest.topicReviewState = .newProjectDefault
         manifest.artifacts = manifest.artifacts?.filter { $0.kind != .topics }
         try store.save(manifest, to: failureProject)
+        // The copied completed project has compatibility aliases for the selected
+        // topic set. Remove them too, otherwise this negative test sees old output.
+        try? FileManager.default.removeItem(at: layout.topicsURL)
+        try? FileManager.default.removeItem(at: layout.topicsTextURL)
         for language in ArtifactLanguage.allCases {
             for granularity in TopicGranularity.allCases {
                 try? FileManager.default.removeItem(at: layout.topicsURL(language: language, granularity: granularity))
