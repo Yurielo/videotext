@@ -159,6 +159,7 @@ struct OllamaTopicProvider: TopicAIProvider {
         let payload = ChatRequest(
             model: model,
             stream: false,
+            think: false,
             format: schema.node,
             messages: [ChatMessage(role: "user", content: prompt)],
             options: ChatOptions(temperature: 0.05, numPredict: 1_200)
@@ -232,6 +233,8 @@ struct OllamaTopicProvider: TopicAIProvider {
     private struct ChatRequest: Encodable {
         var model: String
         var stream: Bool
+        // qwen3 otherwise may spend the response budget in hidden reasoning and leave content empty.
+        var think: Bool
         var format: TopicSchemaNode
         var messages: [ChatMessage]
         var options: ChatOptions
