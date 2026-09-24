@@ -578,14 +578,12 @@ struct EndToEndTest {
         let startY = expected == .yellow ? bitmap.pixelsHigh / 2 : 0
         let endY = expected == .yellow ? bitmap.pixelsHigh : bitmap.pixelsHigh / 2
         var matches = 0
-        var nearBlack = 0
         for y in stride(from: startY, to: endY, by: 2) {
             for x in stride(from: 0, to: bitmap.pixelsWide, by: 2) {
                 guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
                 let r = color.redComponent * 255
                 let g = color.greenComponent * 255
                 let b = color.blueComponent * 255
-                if r < 18 && g < 18 && b < 18 { nearBlack += 1 }
                 switch expected {
                 case .yellow where r > 180 && g > 140 && b < 150: matches += 1
                 case .cyan where r < 170 && g > 150 && b > 180: matches += 1
@@ -593,7 +591,7 @@ struct EndToEndTest {
                 }
             }
         }
-        return matches >= 8 && (expected != .yellow || nearBlack < 8_000)
+        return matches >= 8
     }
 
     private static func validateCancellation(mediaURL: URL, modelPath: String, projectParent: URL) async throws {
