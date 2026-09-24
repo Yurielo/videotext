@@ -98,6 +98,8 @@ assert_snapshot() {
   local current candidate_current
   current="$(release_inputs_hash)" || fail "не удалось вычислить hash release inputs"
   [[ "$current" == "$SOURCE_HASH" ]] || fail "release inputs изменились после начала gate"
+  # Before the candidate build there is no bundle to compare yet.
+  [[ -n "${CANDIDATE_HASH:-}" ]] || return 0
   candidate_current="$(bundle_hash "$CANDIDATE")"
   [[ "$candidate_current" == "$CANDIDATE_HASH" ]] || fail "release candidate изменился после сборки"
 }
