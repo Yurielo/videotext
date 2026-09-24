@@ -43,7 +43,7 @@ struct EndToEndTest {
             try require(WhisperModelLocator().bestModelPath() == modelPath, "Автопоиск выбрал неверную модель Whisper")
             try validateTimecodes()
             try validateZeroDurationSubtitles()
-            try validateUserOperationSurface()
+            try await validateUserOperationSurface()
 
             let initialController = ProcessController()
             let initialEngine = WorkflowEngine(controller: initialController)
@@ -885,7 +885,8 @@ struct EndToEndTest {
         } catch is WorkflowError {}
     }
 
-    private static func validateUserOperationSurface() throws {
+    @MainActor
+    private static func validateUserOperationSurface() async throws {
         try require(
             WorkflowOperation.userSelectable == [.transcribe, .translateTranscript, .topicTimecoding, .burnSubtitles],
             "В пользовательском меню присутствуют служебные операции"
