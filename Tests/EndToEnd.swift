@@ -12,6 +12,38 @@ enum EndToEndError: LocalizedError {
     }
 }
 
+final class FailingHybridTopicAdapter: TopicAdapter {
+    let name = "FailingHybridTopicAdapter"
+    private(set) var calls = 0
+
+    func buildTopics(
+        from cues: [SubtitleCue],
+        sourceSRT: URL,
+        context: TopicBuildContext,
+        onProgress: @escaping (Double) -> Void,
+        onLog: @escaping (String) -> Void
+    ) async throws -> TopicsFile {
+        calls += 1
+        throw WorkflowError.invalidTopics("Контрольная ошибка Hybrid Topic Engine.")
+    }
+}
+
+final class ForbiddenDraftTopicAdapter: TopicAdapter {
+    let name = "ForbiddenDraftTopicAdapter"
+    private(set) var calls = 0
+
+    func buildTopics(
+        from cues: [SubtitleCue],
+        sourceSRT: URL,
+        context: TopicBuildContext,
+        onProgress: @escaping (Double) -> Void,
+        onLog: @escaping (String) -> Void
+    ) async throws -> TopicsFile {
+        calls += 1
+        throw EndToEndError.failed("Черновой адаптер не должен запускаться в качественном режиме.")
+    }
+}
+
 @main
 struct EndToEndTest {
     static func main() async {
@@ -126,6 +158,11 @@ struct EndToEndTest {
                 requireWhisperProgress: false
             )
             try validateHybridTopics(initialResult.projectURL)
+            try await validateHybridFailureDoesNotCreateDraft(
+                mediaURL: mediaURL,
+                projectURL: initialResult.projectURL,
+                modelPath: modelPath
+            )
             try validateProjectLocator(projectURL: initialResult.projectURL, parent: mediaURL.deletingLastPathComponent())
             try require(initialController.launchedExecutables.contains { URL(fileURLWithPath: $0).lastPathComponent == "whisper-cli" }, "Первичная расшифровка не запускала Whisper")
             try validateResultSummary(initialResult.projectURL, expectedFragments: 0, expectedTopics: .ready)
@@ -309,6 +346,70 @@ struct EndToEndTest {
             mediaDuration: (try ProjectStore().load(from: projectURL)).durationSeconds
         )
         try require(issues.isEmpty, "topics.json не прошёл точную сверку с SRT: \(issues.joined(separator: " "))")
+    }
+
+    private static func validateHybridFailureDoesNotCreateDraft(
+        mediaURL: URL,
+        projectURL: URL,
+        modelPath: String
+    ) async throws {
+        let failureProject = projectURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("Контрольный отказ тематического анализа", isDirectory: true)
+        try? FileManager.default.removeItem(at: failureProject)
+        try FileManager.default.copyItem(at: projectURL, to: failureProject)
+        defer { try? FileManager.default.removeItem(at: failureProject) }
+
+        let store = ProjectStore()
+        let layout = ProjectLayout(root: failureProject)
+        var manifest = try store.ensureProject(at: failureProject, mediaURL: mediaURL, mode: .resumeProject)
+        manifest.topicRevisions = []
+        manifest.topicReviewState = .newProjectDefault
+        manifest.artifacts = manifest.artifacts?.filter { $0.kind != .topics }
+        try store.save(manifest, to: failureProject)
+        for language in ArtifactLanguage.allCases {
+            for granularity in TopicGranularity.allCases {
+                try? FileManager.default.removeItem(at: layout.topicsURL(language: language, granularity: granularity))
+                try? FileManager.default.removeItem(at: layout.topicsTextURL(language: language, granularity: granularity))
+            }
+        }
+
+        let hybrid = FailingHybridTopicAdapter()
+        let draft = ForbiddenDraftTopicAdapter()
+        let settings = WorkflowSettings(
+            mediaURL: mediaURL,
+            projectURL: failureProject,
+            selectedOperations: [.topicTimecoding],
+            mode: .resumeProject,
+            rangeStart: 0,
+            rangeEnd: 1,
+            fragmentName: "",
+            burnFragmentSubtitles: false,
+            subtitleStyle: .standard,
+            selectedTopicID: nil,
+            whisperModelPath: modelPath,
+            whisperLanguage: "auto",
+            sourceHumanReviewEnabled: false,
+            fillerAnalysisBeforeReview: false,
+            topicHumanReviewEnabled: true
+        )
+        do {
+            _ = try await WorkflowEngine(
+                store: store,
+                hybridTopicAdapter: hybrid,
+                draftTopicAdapter: draft
+            ).run(settings: settings, onLog: { _ in })
+            throw EndToEndError.failed("Сбой Hybrid Topic Engine ошибочно признан успешной обработкой")
+        } catch WorkflowError.invalidTopics(let message) {
+            try require(message.contains("Контрольная ошибка"), "Workflow потерял исходную ошибку Hybrid Topic Engine")
+        }
+
+        let failed = try store.load(from: failureProject)
+        try require(hybrid.calls == 1, "Hybrid Topic Engine не был вызван ровно один раз")
+        try require(draft.calls == 0, "Workflow скрытно подменил Hybrid Topic Engine черновым адаптером")
+        try require(failed.workflow?.status == .failed, "Сбой тематического анализа не получил статус ошибки")
+        try require(failed.topicReviewState?.pendingCheckpoint == nil, "Неуспешный тематический анализ открыл Human Review")
+        try require(!FileManager.default.fileExists(atPath: layout.topicsURL.path), "Неуспешный Hybrid-анализ создал topics.json")
     }
 
     private static func validateProjectLocator(projectURL: URL, parent: URL) throws {

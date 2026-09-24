@@ -1,9 +1,9 @@
 import Foundation
 
 struct OllamaTopicProvider: TopicAIProvider {
-    static let chatTimeoutSeconds: TimeInterval = 120
+    static let chatTimeoutSeconds: TimeInterval = 360
     let embeddingModel = "embeddinggemma:latest"
-    let primaryLanguageModel = "qwen2.5:7b"
+    let primaryLanguageModel = "qwen3:8b"
     let fallbackLanguageModel = "gemma3:4b"
     private let baseURL = URL(string: "http://127.0.0.1:11434")!
 

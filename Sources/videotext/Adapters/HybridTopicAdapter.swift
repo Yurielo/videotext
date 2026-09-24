@@ -108,13 +108,12 @@ struct TopicRetryPolicy {
 
     static let production = TopicRetryPolicy(
         boundaryAttemptsPerModel: 2,
-        descriptionAttemptsPerModel: 1
+        descriptionAttemptsPerModel: 2
     )
 }
 
 struct HybridTopicAdapter: TopicAdapter {
     static let algorithmVersion = TopicAlgorithmIdentity.hybridVersion
-    static let deterministicFallbackModel = "deterministic-transcript-fallback"
     let name = TopicAlgorithmIdentity.hybridAdapter
     private let provider: TopicAIProvider
     private let retryPolicy: TopicRetryPolicy
@@ -283,7 +282,7 @@ struct HybridTopicAdapter: TopicAdapter {
             let result: CachedTopicReview
             if let cached,
                validator.topicReviewIssues(cached.review, request: request).isEmpty,
-               languageModels.contains(cached.model) || cached.model == Self.deterministicFallbackModel {
+               languageModels.contains(cached.model) {
                 result = cached
             } else {
                 result = try await describeTopics(request, models: languageModels, onLog: onLog)
@@ -391,53 +390,9 @@ struct HybridTopicAdapter: TopicAdapter {
                 }
             }
         }
-        let fallback = deterministicDescription(for: request)
-        let fallbackIssues = validator.topicReviewIssues(fallback, request: request)
-        guard fallbackIssues.isEmpty else {
-            throw WorkflowError.invalidTopics(
-                "LLM не описала диапазоны \(request.id), а резервное описание не прошло проверку: " +
-                "\(fallbackIssues.joined(separator: " ")) Исходные ошибки: \(failures.joined(separator: " | "))"
-            )
-        }
-        onLog(
-            "Описание \(request.id): попытки исчерпаны для моделей \(models.joined(separator: ", ")); " +
-            "диапазоны \(descriptionRanges(request)); причины: \(failures.joined(separator: " | ")). " +
-            "Сохранено детерминированное описание из расшифровки."
+        throw WorkflowError.invalidTopics(
+            "LLM не описала диапазоны \(request.id): \(failures.joined(separator: " | "))"
         )
-        return CachedTopicReview(model: Self.deterministicFallbackModel, review: fallback)
-    }
-
-    private func deterministicDescription(for request: TopicDescriptionRequest) -> TopicReviewResponse {
-        let topics = request.blocks.map { block -> TopicReviewItem in
-            let text = block.cues.map(\.text).joined(separator: " ")
-            var terms: [String] = []
-            for word in TopicLexicon.meaningfulWords(in: text) where !terms.contains(word) {
-                terms.append(word)
-                if terms.count == 6 { break }
-            }
-            let defaults = request.language == .ru
-                ? ["содержание", "раздел", "материал"]
-                : ["content", "section", "material"]
-            for word in defaults where terms.count < 3 && !terms.contains(word) { terms.append(word) }
-            let titlePrefix = request.language == .ru ? "Раздел" : "Section"
-            let title = ([titlePrefix] + Array(terms.prefix(2)) + [String(block.startCueId)]).joined(separator: " ")
-            let summary = request.language == .ru
-                ? "Описание диапазона \(block.startCueId)-\(block.endCueId) сформировано из текста расшифровки и требует проверки."
-                : "The description for range \(block.startCueId)-\(block.endCueId) was derived from the transcript and requires review."
-            let reason = request.language == .ru
-                ? "Сохранены подтверждённые границы смыслового диапазона."
-                : "The confirmed boundaries of the semantic range were preserved."
-            return TopicReviewItem(
-                title: title,
-                summary: summary,
-                keywords: Array(terms.prefix(6)),
-                startCueId: block.startCueId,
-                endCueId: block.endCueId,
-                confidence: 0.35,
-                boundaryReason: reason
-            )
-        }
-        return TopicReviewResponse(topics: topics)
     }
 
     private func descriptionRanges(_ request: TopicDescriptionRequest) -> String {

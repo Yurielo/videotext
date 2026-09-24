@@ -61,8 +61,20 @@ release_files() {
   printf '%s\n' \
     "$ROOT/scripts/build_app.sh" \
     "$ROOT/scripts/test_e2e.sh" \
+    "$ROOT/scripts/test_project_schema.sh" \
+    "$ROOT/scripts/test_human_review.sh" \
+    "$ROOT/scripts/test_topics.sh" \
+    "$ROOT/scripts/test_topic_matrix.sh" \
+    "$ROOT/scripts/test_ollama_topics.sh" \
+    "$ROOT/scripts/test_tool_runner.sh" \
     "$ROOT/scripts/release_gate.sh" \
-    "$ROOT/Tests/EndToEnd.swift"
+    "$ROOT/Tests/EndToEnd.swift" \
+    "$ROOT/Tests/ProjectSchemaProbe.swift" \
+    "$ROOT/Tests/HumanReviewProbe.swift" \
+    "$ROOT/Tests/TopicAnalysisProbe.swift" \
+    "$ROOT/Tests/TopicMatrixProbe.swift" \
+    "$ROOT/Tests/OllamaTopicProbe.swift" \
+    "$ROOT/Tests/ToolRunnerProbe.swift"
 }
 
 release_inputs_hash() {
@@ -125,6 +137,31 @@ record whisper_version "$(whisper-cli --version 2>&1 | sed -n '1p')"
 require_no_active_tools
 SOURCE_HASH="$(release_inputs_hash)" || fail "не удалось вычислить hash release inputs"
 record release_inputs_sha256 "$SOURCE_HASH"
+
+for focused in \
+  test_project_schema.sh \
+  test_human_review.sh \
+  test_topics.sh \
+  test_topic_matrix.sh \
+  test_ollama_topics.sh; do
+  log="$RUN_DIR/$focused.log"
+  if ! "$ROOT/scripts/$focused" > "$log" 2>&1; then
+    record "${focused%.sh}_exit_status" 1
+    record "${focused%.sh}_log" "$log"
+    fail "focused-проверка $focused завершилась ошибкой"
+  fi
+  record "${focused%.sh}_exit_status" 0
+  record "${focused%.sh}_log" "$log"
+done
+log="$RUN_DIR/test_tool_runner.sh.log"
+if ! "$ROOT/scripts/test_tool_runner.sh" "$VIDEO_PATH" > "$log" 2>&1; then
+  record test_tool_runner_exit_status 1
+  record test_tool_runner_log "$log"
+  fail "focused-проверка test_tool_runner.sh завершилась ошибкой"
+fi
+record test_tool_runner_exit_status 0
+record test_tool_runner_log "$log"
+assert_snapshot
 
 if ! VIDEOTEXT_APP_PATH="$CANDIDATE" "$ROOT/scripts/build_app.sh" > "$RUN_DIR/build.log" 2>&1; then
   record build_command "VIDEOTEXT_APP_PATH=$CANDIDATE $ROOT/scripts/build_app.sh"

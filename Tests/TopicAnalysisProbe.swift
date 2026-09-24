@@ -103,7 +103,7 @@ struct TopicAnalysisProbe {
             try validatePreprocessing()
             try await validateShortTitleRepair(parent: root)
             try await validateDuplicateTitleRepair(parent: root)
-            try await validateBoundedInvalidDescriptions(parent: root)
+            try await validateInvalidDescriptionsFail(parent: root)
             try await validateAllGranularitiesComplete(parent: root)
             let cues = syntheticCues()
             let sourceSRT = root.appendingPathComponent("source.srt")
@@ -218,7 +218,7 @@ struct TopicAnalysisProbe {
         try require(file.topics[1].title.contains("суп"), "исправленное название потеряло различимый термин")
     }
 
-    private static func validateBoundedInvalidDescriptions(parent: URL) async throws {
+    private static func validateInvalidDescriptionsFail(parent: URL) async throws {
         let provider = FakeTopicAIProvider()
         provider.duplicateTitles = true
         provider.permanentlyInvalidDescriptions = true
@@ -237,38 +237,25 @@ struct TopicAnalysisProbe {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let sourceSRT = root.appendingPathComponent("source.srt")
         try SRTService().write(cues, to: sourceSRT)
-        var logs: [String] = []
         let adapter = HybridTopicAdapter(provider: provider)
-        let file = try await adapter.buildTopics(
-            from: cues,
-            sourceSRT: sourceSRT,
-            context: TopicBuildContext(projectURL: root, mediaDuration: 7_790, granularity: .coarse),
-            onProgress: { _ in },
-            onLog: { logs.append($0) }
-        )
-        try require(file.topics.count == 13, "крупный набор не сохранил 13 подтверждённых диапазонов")
-        try require(provider.descriptionCalls == 14, "невалидные описания вызвали неограниченное число запросов: \(provider.descriptionCalls)")
+        do {
+            _ = try await adapter.buildTopics(
+                from: cues,
+                sourceSRT: sourceSRT,
+                context: TopicBuildContext(projectURL: root, mediaDuration: 7_790, granularity: .coarse),
+                onProgress: { _ in },
+                onLog: { _ in }
+            )
+            throw TopicProbeError.failed("невалидные описания были выданы как готовый тематический результат")
+        } catch is WorkflowError {}
+        try require(provider.descriptionCalls == 4, "невалидные описания вызвали неверное число запросов: \(provider.descriptionCalls)")
         try require(
-            provider.descriptionModels == Array(repeating: [provider.primaryLanguageModel, provider.fallbackLanguageModel], count: 7).flatMap { $0 },
+            provider.descriptionModels == [
+                provider.primaryLanguageModel, provider.primaryLanguageModel,
+                provider.fallbackLanguageModel, provider.fallbackLanguageModel
+            ],
             "порядок ограниченного fallback между моделями нарушен"
         )
-        try require(
-            file.languageModel?.contains(HybridTopicAdapter.deterministicFallbackModel) == true,
-            "после исчерпания моделей не использован детерминированный fallback"
-        )
-        try require(logs.contains(where: { $0.contains("fake-primary") && $0.contains("попытка 1/1") }), "в журнале нет лимита основной модели")
-        try require(logs.contains(where: { $0.contains("fake-fallback") && $0.contains("отклонена") }), "в журнале нет причины fallback-модели")
-        try require(logs.contains(where: { $0.contains("попытки исчерпаны") && $0.contains("диапазоны") }), "в журнале нет терминального fallback")
-
-        let callsAfterFallback = provider.descriptionCalls
-        _ = try await adapter.buildTopics(
-            from: cues,
-            sourceSRT: sourceSRT,
-            context: TopicBuildContext(projectURL: root, mediaDuration: 7_790, granularity: .coarse),
-            onProgress: { _ in },
-            onLog: { _ in }
-        )
-        try require(provider.descriptionCalls == callsAfterFallback, "детерминированный fallback не восстановлен из кэша")
     }
 
     private static func validateAllGranularitiesComplete(parent: URL) async throws {

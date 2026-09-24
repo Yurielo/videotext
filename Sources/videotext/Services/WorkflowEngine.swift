@@ -951,18 +951,19 @@ final class WorkflowViewModel: ObservableObject {
                 self.progress.estimatedTotal = result.elapsed
                 self.progress.remaining = 0
                 if let checkpoint = result.checkpoint {
-                    NSSound.beep()
+                    self.signalWorkflowStop()
                     self.alert = AppAlert(
                         title: "Требуется Human Review",
                         message: "Проверьте расшифровку \(checkpoint.language.rawValue.uppercased()). После утверждения обработка продолжится автоматически."
                     )
                 } else if result.topicReviewCheckpoint != nil {
-                    NSSound.beep()
+                    self.signalWorkflowStop()
                     self.alert = AppAlert(
                         title: "Требуется Human Review тем",
                         message: "Проверьте подробный, обычный и крупный таймкодинг. После утверждения обработка продолжится автоматически."
                     )
                 } else {
+                    self.signalWorkflowStop()
                     await self.notifications.notifySuccess(
                         mediaName: mediaURL.lastPathComponent,
                         elapsed: result.elapsed,
@@ -975,10 +976,12 @@ final class WorkflowViewModel: ObservableObject {
                 }
             } catch is CancellationError {
                 self.status = "Остановлено"
+                self.signalWorkflowStop()
                 self.alert = AppAlert(title: "Обработка остановлена", message: "Задание можно продолжить из истории проектов.")
             } catch {
                 self.status = "Ошибка"
                 self.log.append(error.localizedDescription)
+                self.signalWorkflowStop()
                 await self.notifications.notifyFailure(message: error.localizedDescription, projectURL: self.projectURL)
                 self.alert = AppAlert(title: "Ошибка обработки", message: error.localizedDescription)
             }
@@ -1020,7 +1023,12 @@ final class WorkflowViewModel: ObservableObject {
     private func reportPreparationError(_ error: Error) {
         status = "Ошибка"
         log.append(error.localizedDescription)
+        signalWorkflowStop()
         alert = AppAlert(title: "Ошибка", message: error.localizedDescription)
+    }
+
+    private func signalWorkflowStop() {
+        NSSound.beep()
     }
 }
 
@@ -1443,25 +1451,13 @@ final class WorkflowEngine: @unchecked Sendable {
                             let overall = (Double(combinationIndex) + localFraction) / Double(max(combinations.count, 1))
                             tracker.update(operation, fraction: overall)
                         }
-                        let topics: TopicsFile
-                        do {
-                            topics = try await adapter.buildTopics(
-                                from: cues,
-                                sourceSRT: srtURL,
-                                context: context,
-                                onProgress: progress,
-                                onLog: log
-                            )
-                        } catch WorkflowError.invalidTopics(let reason) where settings.topicAnalysisMode == .hybrid {
-                            log("Качественное описание не прошло строгую проверку: \(reason) Сохраняется проверяемый черновик с исходными cueId.")
-                            topics = try await draftTopicAdapter.buildTopics(
-                                from: cues,
-                                sourceSRT: srtURL,
-                                context: context,
-                                onProgress: progress,
-                                onLog: log
-                            )
-                        }
+                        let topics = try await adapter.buildTopics(
+                            from: cues,
+                            sourceSRT: srtURL,
+                            context: context,
+                            onProgress: progress,
+                            onLog: log
+                        )
                         let activeLanguage = settings.artifactLanguage
                             ?? currentManifest.languageProfile?.effective
                             ?? language

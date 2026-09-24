@@ -1,0 +1,23 @@
+name: Topic Regression
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  topic-regression:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate agent contracts
+        run: scripts/check_agents.sh
+      - name: Validate project schema
+        run: scripts/test_project_schema.sh
+      - name: Validate human review
+        run: scripts/test_human_review.sh
+      - name: Validate topic analysis
+        run: scripts/test_topics.sh
+      - name: Validate topic review matrix
+        run: scripts/test_topic_matrix.sh
