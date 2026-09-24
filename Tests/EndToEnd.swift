@@ -28,22 +28,6 @@ final class FailingHybridTopicAdapter: TopicAdapter {
     }
 }
 
-final class ForbiddenDraftTopicAdapter: TopicAdapter {
-    let name = "ForbiddenDraftTopicAdapter"
-    private(set) var calls = 0
-
-    func buildTopics(
-        from cues: [SubtitleCue],
-        sourceSRT: URL,
-        context: TopicBuildContext,
-        onProgress: @escaping (Double) -> Void,
-        onLog: @escaping (String) -> Void
-    ) async throws -> TopicsFile {
-        calls += 1
-        throw EndToEndError.failed("Черновой адаптер не должен запускаться в качественном режиме.")
-    }
-}
-
 @main
 struct EndToEndTest {
     static func main() async {
@@ -379,7 +363,6 @@ struct EndToEndTest {
         }
 
         let hybrid = FailingHybridTopicAdapter()
-        let draft = ForbiddenDraftTopicAdapter()
         let settings = WorkflowSettings(
             mediaURL: mediaURL,
             projectURL: failureProject,
@@ -400,8 +383,7 @@ struct EndToEndTest {
         do {
             _ = try await WorkflowEngine(
                 store: store,
-                hybridTopicAdapter: hybrid,
-                draftTopicAdapter: draft
+                hybridTopicAdapter: hybrid
             ).run(settings: settings, onLog: { _ in })
             throw EndToEndError.failed("Сбой Hybrid Topic Engine ошибочно признан успешной обработкой")
         } catch WorkflowError.invalidTopics(let message) {
@@ -410,7 +392,6 @@ struct EndToEndTest {
 
         let failed = try store.load(from: failureProject)
         try require(hybrid.calls == 1, "Hybrid Topic Engine не был вызван ровно один раз")
-        try require(draft.calls == 0, "Workflow скрытно подменил Hybrid Topic Engine черновым адаптером")
         try require(failed.workflow?.status == .failed, "Сбой тематического анализа не получил статус ошибки")
         try require(failed.topicReviewState?.pendingCheckpoint == nil, "Неуспешный тематический анализ открыл Human Review")
         try require(!FileManager.default.fileExists(atPath: layout.topicsURL.path), "Неуспешный Hybrid-анализ создал topics.json")
@@ -910,6 +891,10 @@ struct EndToEndTest {
             "В пользовательском меню присутствуют служебные операции"
         )
         try require(WorkflowOperation.transcribe.title == "Расшифровать всё видео", "Операция расшифровки не переименована")
+        try require(
+            WorkflowViewModel().topicGranularity == .normal,
+            "Новый проект не использует обычную детализацию тем по умолчанию"
+        )
     }
 
     private static func validateTopicResume(
@@ -981,7 +966,6 @@ struct EndToEndTest {
         model.openProject(projectURL)
         try require(model.topics.isEmpty, "Устаревшие темы доступны в рабочем интерфейсе")
         try require(model.selectedTopic == nil, "Устаревшая тема доступна для вырезки")
-        try require(model.topicAnalysisMode == .hybrid, "Для устаревшего результата не выбран качественный пересчёт")
         try require(
             model.resultSummary.artifact(.topics)?.availability == .partial,
             "Устаревший таймкодинг не помечен как требующий пересчёта"

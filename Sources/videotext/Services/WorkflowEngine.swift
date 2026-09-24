@@ -19,7 +19,6 @@ final class WorkflowViewModel: ObservableObject {
     @Published var whisperLanguage = "ru"
     @Published var topicGranularity = TopicGranularity.normal
     @Published var artifactLanguage = ArtifactLanguage.ru
-    @Published var topicAnalysisMode = TopicAnalysisMode.hybrid
     @Published var selectedTopicID = ""
     @Published var quoteStartText = ""
     @Published var quoteEndText = ""
@@ -728,13 +727,11 @@ final class WorkflowViewModel: ObservableObject {
             topics = []
             topicsFileStatus = nil
             selectedTopicID = ""
-            topicAnalysisMode = .hybrid
             clearTopicMetadata()
             return
         }
         topics = file.topics
         topicsFileStatus = file.status
-        topicAnalysisMode = file.status == .ready ? .hybrid : .draft
         topicsEmbeddingModel = file.embeddingModel ?? ""
         topicsLanguageModel = file.languageModel ?? ""
         topicsAlgorithmVersion = file.algorithmVersion
@@ -880,7 +877,6 @@ final class WorkflowViewModel: ObservableObject {
             whisperModelPath: whisperModelPath,
             whisperLanguage: whisperLanguage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "auto" : whisperLanguage,
             topicGranularity: topicGranularity,
-            topicAnalysisMode: topicAnalysisMode,
             artifactLanguage: artifactLanguage,
             quoteStart: quoteProvenance ? quoteStartText : nil,
             quoteEnd: quoteProvenance ? quoteEndText : nil,
@@ -1053,7 +1049,6 @@ final class WorkflowEngine: @unchecked Sendable {
     let transcriber: WhisperCLITranscriber
     let ffmpeg: FFmpegAdapter
     let hybridTopicAdapter: TopicAdapter
-    let draftTopicAdapter: TopicAdapter
     let detector = ResultsDetector()
     let ollamaMemory = OllamaMemoryManager()
     let transcriptionQuality = TranscriptionQualityService()
@@ -1069,13 +1064,11 @@ final class WorkflowEngine: @unchecked Sendable {
         store: ProjectStore = ProjectStore(),
         controller: ProcessController = ProcessController(),
         hybridTopicAdapter: TopicAdapter = HybridTopicAdapter(),
-        draftTopicAdapter: TopicAdapter = DraftTopicAdapter(),
         translationAdapter: TranslationAdapter = TranslationAdapter()
     ) {
         self.store = store
         self.controller = controller
         self.hybridTopicAdapter = hybridTopicAdapter
-        self.draftTopicAdapter = draftTopicAdapter
         self.translationAdapter = translationAdapter
         runner = ToolRunner(controller: controller)
         diagnostics = DiagnosticsService(runner: runner)
@@ -1428,7 +1421,7 @@ final class WorkflowEngine: @unchecked Sendable {
                             "Повторно запустите расшифровку; VideoText автоматически обработает длинное видео сегментами."
                         )
                     }
-                    let adapter = settings.topicAnalysisMode == .hybrid ? hybridTopicAdapter : draftTopicAdapter
+                    let adapter = hybridTopicAdapter
                     let currentManifest = try store.load(from: projectURL)
                     let languages = availableTopicLanguages(manifest: currentManifest, layout: layout)
                     let combinations = languages.flatMap { language in
@@ -1488,8 +1481,7 @@ final class WorkflowEngine: @unchecked Sendable {
                             url: layout.topicsTextURL(language: language, granularity: granularity),
                             in: projectURL
                         )
-                        let status = topics.status == .ready ? "готов" : "черновой"
-                        log("Набор сохранён. Тем: \(topics.topics.count), статус: \(status).")
+                        log("Набор сохранён. Тем: \(topics.topics.count), статус: готов.")
                     }
 
                 case .discoverResults:
@@ -2563,7 +2555,6 @@ final class WorkflowEngine: @unchecked Sendable {
                           !topics.topics.isEmpty,
                           TopicAlgorithmIdentity.isCurrent(
                             topics,
-                            mode: settings.topicAnalysisMode,
                             granularity: granularity,
                             sourceSignature: sourceSignature
                           ) else {

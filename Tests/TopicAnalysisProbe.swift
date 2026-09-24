@@ -140,7 +140,6 @@ struct TopicAnalysisProbe {
             try require(provider.aiCalls == aiCalls, "решения LLM не восстановлены из кэша")
 
             try validateStrictFailure(file: file, cues: cues)
-            try await validateDraft(cues: cues, sourceSRT: sourceSRT, root: root)
             try await validateCancellationResume(cues: cues, sourceSRT: sourceSRT, parent: root)
             try validateBrokenModelJSON()
             try validateUnknownCueAndTemporalJSON(cues: cues)
@@ -292,7 +291,7 @@ struct TopicAnalysisProbe {
     private static func validateAlgorithmCompatibility(file: TopicsFile, sourceSRT: URL) throws {
         let signature = StableTopicHash.string(try String(contentsOf: sourceSRT, encoding: .utf8))
         try require(
-            TopicAlgorithmIdentity.isCurrent(file, mode: .hybrid, granularity: .normal, sourceSignature: signature),
+            TopicAlgorithmIdentity.isCurrent(file, granularity: .normal, sourceSignature: signature),
             "актуальный гибридный результат не распознан"
         )
         var legacy = file
@@ -302,25 +301,17 @@ struct TopicAnalysisProbe {
         legacy.status = .draft
         legacy.sourceSignature = ""
         try require(!TopicAlgorithmIdentity.recognizes(legacy), "устаревший KeywordTopicAdapter признан актуальным")
+        var legacyDraft = file
+        legacyDraft.status = .draft
+        try require(!TopicAlgorithmIdentity.recognizes(legacyDraft), "черновой topics.json признан актуальным")
         try require(
-            !TopicAlgorithmIdentity.isCurrent(legacy, mode: .draft, granularity: .normal, sourceSignature: signature),
+            !TopicAlgorithmIdentity.isCurrent(legacy, granularity: .normal, sourceSignature: signature),
             "устаревший topics.json разрешил пропуск пересчёта"
         )
         try require(
-            !TopicAlgorithmIdentity.isCurrent(file, mode: .hybrid, granularity: .normal, sourceSignature: "other-srt"),
+            !TopicAlgorithmIdentity.isCurrent(file, granularity: .normal, sourceSignature: "other-srt"),
             "таймкодинг от другого SRT признан актуальным"
         )
-    }
-
-    private static func validateDraft(cues: [SubtitleCue], sourceSRT: URL, root: URL) async throws {
-        let draft = try await DraftTopicAdapter().buildTopics(
-            from: cues,
-            sourceSRT: sourceSRT,
-            context: TopicBuildContext(projectURL: root, mediaDuration: 720, granularity: .normal),
-            onProgress: { _ in },
-            onLog: { _ in }
-        )
-        try require(draft.status == .draft && draft.adapter == "DraftTopicAdapter", "резервный результат не обозначен как черновой")
     }
 
     private static func validateCancellationResume(cues: [SubtitleCue], sourceSRT: URL, parent: URL) async throws {

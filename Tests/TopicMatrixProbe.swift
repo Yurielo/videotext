@@ -27,12 +27,12 @@ struct TopicMatrixProbe {
                 expectedTitles[key] = title
                 let file = TopicsFile(
                     schemaVersion: TopicAlgorithmIdentity.schemaVersion,
-                    algorithmVersion: TopicAlgorithmIdentity.draftVersion,
-                    adapter: TopicAlgorithmIdentity.draftAdapter,
+                    algorithmVersion: TopicAlgorithmIdentity.hybridVersion,
+                    adapter: TopicAlgorithmIdentity.hybridAdapter,
                     createdAt: Date(),
                     sourceSRT: "\(language.rawValue).srt",
                     sourceSignature: "signature-\(language.rawValue)",
-                    status: .draft,
+                    status: .ready,
                     granularity: granularity,
                     topics: [TopicSegment(
                         id: "topic-1",

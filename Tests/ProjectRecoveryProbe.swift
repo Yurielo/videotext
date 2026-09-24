@@ -44,7 +44,6 @@ struct ProjectRecoveryProbe {
                 whisperModelPath: modelPath,
                 whisperLanguage: manifest.languageProfile?.effective?.rawValue ?? "ru",
                 topicGranularity: .normal,
-                topicAnalysisMode: .hybrid,
                 sourceHumanReviewEnabled: false,
                 translationHumanReviewEnabled: false,
                 fillerAnalysisBeforeReview: false,

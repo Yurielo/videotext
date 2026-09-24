@@ -374,16 +374,6 @@ struct ContentView: View {
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
-                        Text("Режим")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Picker("Режим", selection: $model.topicAnalysisMode) {
-                            ForEach(TopicAnalysisMode.allCases) { value in
-                                Text(value.title).tag(value)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
                         Toggle("Human Review тематического таймкодинга", isOn: $model.topicHumanReviewEnabled)
                             .disabled(model.isRunning || model.topicReviewCheckpoint != nil)
                         if model.topicReviewCheckpoint == nil {
@@ -398,7 +388,7 @@ struct ContentView: View {
                             Text(model.artifactLanguage == detectedSourceLanguage ? "Оригинал" : "Перевод")
                                 .foregroundStyle(.secondary)
                             Spacer()
-                            Text(model.topicAnalysisMode == .hybrid ? "embeddinggemma + qwen2.5" : "не используются")
+                            Text("Качественный: embeddinggemma + qwen3:8b / gemma3:4b")
                                 .foregroundStyle(.secondary)
                         }
                         .font(.caption)
