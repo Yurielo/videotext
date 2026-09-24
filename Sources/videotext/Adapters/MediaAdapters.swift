@@ -366,6 +366,7 @@ struct FFmpegAdapter {
             ]
         }
         arguments += [
+            "-map_chapters", "-1",
             "-movflags", "+faststart",
             "-progress", "pipe:1",
             "-nostats",
