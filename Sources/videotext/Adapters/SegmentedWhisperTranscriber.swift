@@ -109,7 +109,7 @@ struct SegmentedWhisperTranscriber {
         guard timelineIssues.isEmpty else {
             throw WorkflowError.invalidSRT("ошибка объединения сегментов: \(timelineIssues.joined(separator: " "))")
         }
-        if let issue = quality.catastrophicIssue(cues: merged) {
+        if let issue = quality.recoveryIssue(cues: merged) {
             throw WorkflowError.processFailed("Автоматическое восстановление не устранило \(issue.message).")
         }
         try srt.write(merged, to: partialSRT)
@@ -189,7 +189,7 @@ struct SegmentedWhisperTranscriber {
                 continue
             }
             let cues = try srt.load(from: attemptSRT)
-            if let issue = quality.catastrophicIssue(cues: cues) {
+            if let issue = quality.recoveryIssue(cues: cues) {
                 failures.append("попытка \(attemptIndex + 1) (\(attempt.name)): \(issue.message)")
                 onLog("Сегмент \(chunk.index + 1)/\(chunkCount): обнаружена \(issue.message); выполняется автоматический повтор.")
                 continue
@@ -247,7 +247,7 @@ struct SegmentedWhisperTranscriber {
 
     private func validCachedChunk(srtURL: URL, jsonURL: URL) -> Bool {
         guard nonempty(srtURL), nonempty(jsonURL), let cues = try? srt.load(from: srtURL) else { return false }
-        return quality.catastrophicIssue(cues: cues) == nil
+        return quality.recoveryIssue(cues: cues) == nil
     }
 
     private func cacheDirectory(

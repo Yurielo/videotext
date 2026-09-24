@@ -5,6 +5,7 @@ struct TranscriptionQualityAssessment {
     var tasks: [ReviewTask]
     var html: String
     var catastrophicIssue: CatastrophicTranscriptionIssue?
+    var recoveryIssue: TranscriptionRecoveryIssue?
 }
 
 struct CatastrophicTranscriptionIssue: Equatable {
@@ -16,6 +17,45 @@ struct CatastrophicTranscriptionIssue: Equatable {
 
     var message: String {
         "массовая петля Whisper: \(affectedCueIDs.count) cue (\(Int((repetitionRatio * 100).rounded()))%) в диапазоне \(time(start))-\(time(end)) повторяют «\(repeatedText)»"
+    }
+
+    private func time(_ value: TimeInterval) -> String {
+        let seconds = max(0, Int(value.rounded()))
+        return String(format: "%02d:%02d:%02d", seconds / 3600, (seconds / 60) % 60, seconds % 60)
+    }
+}
+
+struct TranscriptionRecoveryIssue: Equatable {
+    enum Kind: String, Equatable {
+        case catastrophicRepetition
+        case fuzzyContextualRepetition
+        case progressiveRepetition
+    }
+
+    var kind: Kind
+    var start: TimeInterval
+    var end: TimeInterval
+    var affectedCueIDs: [Int]
+    var sampleText: String
+
+    var message: String {
+        let range = "\(time(start))-\(time(end))"
+        switch kind {
+        case .catastrophicRepetition:
+            return "массовая петля Whisper в диапазоне \(range)"
+        case .fuzzyContextualRepetition:
+            return "нечёткая контекстная петля Whisper в диапазоне \(range)"
+        case .progressiveRepetition:
+            return "прогрессивное дублирование реплик Whisper в диапазоне \(range)"
+        }
+    }
+
+    var reviewReasonCode: String {
+        switch kind {
+        case .catastrophicRepetition: return "catastrophic-repetition-loop"
+        case .fuzzyContextualRepetition: return "fuzzy-contextual-repetition"
+        case .progressiveRepetition: return "progressive-repetition-loop"
+        }
     }
 
     private func time(_ value: TimeInterval) -> String {
@@ -109,6 +149,11 @@ struct TranscriptionQualityService {
         let noSpeechProbabilities = whisperJSONURL.map(inspector.segmentNoSpeechProbabilities) ?? []
         let normalized = cues.map { normalize($0.text) }
         let catastrophicIssue = catastrophicIssue(cues: cues, normalized: normalized)
+        let recoveryIssue = recoveryIssue(
+            cues: cues,
+            normalized: normalized,
+            catastrophicIssue: catastrophicIssue
+        )
         let counts = Dictionary(grouping: normalized.filter { !$0.isEmpty }, by: { $0 }).mapValues(\.count)
         let suspiciousGlobal = Set(counts.compactMap { text, count in
             let ratio = Double(count) / Double(max(normalized.count, 1))
@@ -119,7 +164,7 @@ struct TranscriptionQualityService {
         let loopingTail = tail.count >= 15 && Set(tail).count <= 3
         let progressiveChains = progressiveRepetitionChains(cues: cues, normalized: normalized)
 
-        let catastrophicCueIDs = Set(catastrophicIssue?.affectedCueIDs ?? [])
+        let blockedCueIDs = Set(recoveryIssue?.affectedCueIDs ?? [])
         var tasks: [ReviewTask] = []
         for (index, cue) in cues.enumerated() {
             var reasons: [String] = []
@@ -147,7 +192,7 @@ struct TranscriptionQualityService {
                 reasons.append("consecutive-repetition")
             }
             if loopingTail && index >= tailStart { reasons.append("repetitive-tail") }
-            guard !reasons.isEmpty, !catastrophicCueIDs.contains(cue.id) else { continue }
+            guard !reasons.isEmpty, !blockedCueIDs.contains(cue.id) else { continue }
             tasks.append(ReviewTask(
                 id: "quality-\(transcriptRevisionID)-cue-\(cue.id)",
                 transcriptRevisionID: transcriptRevisionID,
@@ -166,18 +211,18 @@ struct TranscriptionQualityService {
             ))
         }
 
-        if let issue = catastrophicIssue {
+        if let issue = recoveryIssue {
             tasks.append(ReviewTask(
-                id: "quality-\(transcriptRevisionID)-catastrophic-repetition",
+                id: "quality-\(transcriptRevisionID)-automatic-retranscription-\(issue.kind.rawValue)",
                 transcriptRevisionID: transcriptRevisionID,
                 status: .needsReview,
                 language: language,
                 start: issue.start,
                 end: issue.end,
                 cueIDs: issue.affectedCueIDs,
-                reasonCodes: ["catastrophic-repetition-loop", "automatic-retranscription-required"],
+                reasonCodes: [issue.reviewReasonCode, "automatic-retranscription-required"],
                 confidence: nil,
-                originalText: issue.repeatedText,
+                originalText: issue.sampleText,
                 suggestedText: nil,
                 createdAt: Date(),
                 resolvedAt: nil,
@@ -188,7 +233,7 @@ struct TranscriptionQualityService {
         for indices in progressiveChains {
             guard let firstIndex = indices.first, let lastIndex = indices.last else { continue }
             let chainCues = indices.map { cues[$0] }
-            if chainCues.contains(where: { catastrophicCueIDs.contains($0.id) }) { continue }
+            if chainCues.contains(where: { blockedCueIDs.contains($0.id) }) { continue }
             tasks.append(ReviewTask(
                 id: "quality-\(transcriptRevisionID)-progressive-\(cues[firstIndex].id)-\(cues[lastIndex].id)",
                 transcriptRevisionID: transcriptRevisionID,
@@ -219,6 +264,11 @@ struct TranscriptionQualityService {
             metrics["catastrophicRepetitionStart"] = issue.start
             metrics["catastrophicRepetitionEnd"] = issue.end
         }
+        if let issue = recoveryIssue {
+            metrics["automaticRetranscriptionCueCount"] = Double(issue.affectedCueIDs.count)
+            metrics["automaticRetranscriptionStart"] = issue.start
+            metrics["automaticRetranscriptionEnd"] = issue.end
+        }
         if !confidenceValues.isEmpty {
             metrics["averageTokenConfidence"] = confidenceValues.reduce(0, +) / Double(confidenceValues.count)
             metrics["lowConfidenceSegmentCount"] = Double(confidenceValues.filter { $0 < 0.45 }.count)
@@ -235,7 +285,7 @@ struct TranscriptionQualityService {
         if skippedZeroDurationCount > 0 {
             warnings.append("Исключено служебных cue нулевой длительности: \(skippedZeroDurationCount).")
         }
-        if let issue = catastrophicIssue {
+        if let issue = recoveryIssue {
             warnings.append("Обнаружена \(issue.message). Требуется автоматическая повторная расшифровка повреждённого диапазона.")
         } else if !tasks.isEmpty {
             warnings.append("Требуют ручной проверки фрагменты: \(tasks.count). Pipeline продолжен.")
@@ -245,7 +295,7 @@ struct TranscriptionQualityService {
             transcriptRevisionID: transcriptRevisionID,
             language: language,
             analyzedAt: Date(),
-            status: catastrophicIssue != nil ? .invalid : (tasks.isEmpty ? .ready : .needsReview),
+            status: recoveryIssue != nil ? .invalid : (tasks.isEmpty ? .ready : .needsReview),
             cueCount: cues.count,
             reviewTaskIDs: tasks.map(\.id),
             metrics: metrics,
@@ -255,12 +305,42 @@ struct TranscriptionQualityService {
             report: report,
             tasks: tasks,
             html: renderHTML(cues: cues, tasks: tasks, language: language),
-            catastrophicIssue: catastrophicIssue
+            catastrophicIssue: catastrophicIssue,
+            recoveryIssue: recoveryIssue
         )
     }
 
     func catastrophicIssue(cues: [SubtitleCue]) -> CatastrophicTranscriptionIssue? {
         catastrophicIssue(cues: cues, normalized: cues.map { normalize($0.text) })
+    }
+
+    func recoveryIssue(cues: [SubtitleCue]) -> TranscriptionRecoveryIssue? {
+        let normalized = cues.map { normalize($0.text) }
+        return recoveryIssue(
+            cues: cues,
+            normalized: normalized,
+            catastrophicIssue: catastrophicIssue(cues: cues, normalized: normalized)
+        )
+    }
+
+    private func recoveryIssue(
+        cues: [SubtitleCue],
+        normalized: [String],
+        catastrophicIssue: CatastrophicTranscriptionIssue?
+    ) -> TranscriptionRecoveryIssue? {
+        if let catastrophicIssue {
+            return TranscriptionRecoveryIssue(
+                kind: .catastrophicRepetition,
+                start: catastrophicIssue.start,
+                end: catastrophicIssue.end,
+                affectedCueIDs: catastrophicIssue.affectedCueIDs,
+                sampleText: catastrophicIssue.repeatedText
+            )
+        }
+        if let issue = fuzzyContextualRepetitionIssue(cues: cues, normalized: normalized) {
+            return issue
+        }
+        return severeProgressiveRepetitionIssue(cues: cues, normalized: normalized)
     }
 
     private func catastrophicIssue(
@@ -300,6 +380,138 @@ struct TranscriptionQualityService {
         }
         return nil
     }
+
+    private func fuzzyContextualRepetitionIssue(
+        cues: [SubtitleCue],
+        normalized: [String]
+    ) -> TranscriptionRecoveryIssue? {
+        let phraseLength = 12
+        let localWindow = 180
+        let minimumGap = 8
+        let minimumSharedTokens = 9
+        let minimumSimilarity = 0.82
+        let minimumMatches = 4
+        let words = zip(cues, normalized).flatMap { cue, text in
+            text.split(separator: " ").map { (String($0), cue.id) }
+        }
+        guard words.count >= phraseLength else { return nil }
+
+        var start = 0
+        while start <= words.count - phraseLength {
+            let anchor = Array(words[start..<(start + phraseLength)])
+            let anchorWords = anchor.map(\.0)
+            let content = Set(anchorWords.filter { $0.count > 2 && !Self.fuzzyStopWords.contains($0) })
+            guard content.count >= 3 else {
+                start += 1
+                continue
+            }
+
+            var matches = [start]
+            var lastMatch = start
+            let lastCandidate = min(words.count - phraseLength, start + localWindow)
+            var candidateStart = start + minimumGap
+            while candidateStart <= lastCandidate {
+                if candidateStart - lastMatch < minimumGap {
+                    candidateStart += 1
+                    continue
+                }
+                let candidate = Array(words[candidateStart..<(candidateStart + phraseLength)]).map(\.0)
+                guard sharedTokenCount(anchorWords, candidate) >= minimumSharedTokens,
+                      orderedTokenSimilarity(anchorWords, candidate) >= minimumSimilarity else {
+                    candidateStart += 1
+                    continue
+                }
+                matches.append(candidateStart)
+                lastMatch = candidateStart
+                if matches.count >= minimumMatches {
+                    let clusterEnd = candidateStart + phraseLength
+                    let clusterWords = words[start..<clusterEnd].map(\.0)
+                    if ordinalKinds(in: clusterWords).count >= 3 {
+                        start = clusterEnd
+                        break
+                    }
+                    let cueIDs = Array(Set(matches.flatMap { match in
+                        words[match..<(match + phraseLength)].map(\.1)
+                    })).sorted()
+                    guard let firstCueID = cueIDs.first,
+                          let lastCueID = cueIDs.last,
+                          let firstCue = cues.first(where: { $0.id == firstCueID }),
+                          let lastCue = cues.first(where: { $0.id == lastCueID }) else {
+                        return nil
+                    }
+                    return TranscriptionRecoveryIssue(
+                        kind: .fuzzyContextualRepetition,
+                        start: firstCue.start,
+                        end: lastCue.end,
+                        affectedCueIDs: cueIDs,
+                        sampleText: cues.first(where: { $0.id == firstCueID })?.text ?? ""
+                    )
+                }
+                candidateStart += 1
+            }
+            start += 1
+        }
+        return nil
+    }
+
+    private func severeProgressiveRepetitionIssue(
+        cues: [SubtitleCue],
+        normalized: [String]
+    ) -> TranscriptionRecoveryIssue? {
+        for chain in progressiveRepetitionChains(cues: cues, normalized: normalized) {
+            guard let first = chain.first, let last = chain.last else { continue }
+            let duration = cues[last].end - cues[first].start
+            guard chain.count >= 8, duration >= 12 else { continue }
+            let chainCues = chain.map { cues[$0] }
+            return TranscriptionRecoveryIssue(
+                kind: .progressiveRepetition,
+                start: chainCues[0].start,
+                end: chainCues[chainCues.count - 1].end,
+                affectedCueIDs: chainCues.map(\.id),
+                sampleText: chainCues.max(by: { $0.text.count < $1.text.count })?.text ?? ""
+            )
+        }
+        return nil
+    }
+
+    private func sharedTokenCount(_ lhs: [String], _ rhs: [String]) -> Int {
+        let lhsCounts = Dictionary(grouping: lhs, by: { $0 }).mapValues(\.count)
+        let rhsCounts = Dictionary(grouping: rhs, by: { $0 }).mapValues(\.count)
+        return lhsCounts.reduce(0) { partial, entry in
+            partial + min(entry.value, rhsCounts[entry.key] ?? 0)
+        }
+    }
+
+    private func orderedTokenSimilarity(_ lhs: [String], _ rhs: [String]) -> Double {
+        var previous = Array(repeating: 0, count: rhs.count + 1)
+        for left in lhs {
+            var current = Array(repeating: 0, count: rhs.count + 1)
+            for index in rhs.indices {
+                if left == rhs[index] {
+                    current[index + 1] = previous[index] + 1
+                } else {
+                    current[index + 1] = max(previous[index + 1], current[index])
+                }
+            }
+            previous = current
+        }
+        return Double(previous[rhs.count]) / Double(max(lhs.count, rhs.count, 1))
+    }
+
+    private func ordinalKinds(in words: [String]) -> Set<String> {
+        let roots = ["перв", "втор", "трет", "четверт", "пят", "шест", "седьм", "восьм", "девят", "десят"]
+        let english = Set(["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"])
+        var kinds = Set(words.filter { english.contains($0) })
+        for root in roots where words.contains(where: { $0.hasPrefix(root) }) {
+            kinds.insert(root)
+        }
+        return kinds
+    }
+
+    private static let fuzzyStopWords: Set<String> = [
+        "а", "без", "бы", "в", "во", "вот", "все", "всего", "всей", "всем", "всех", "вы", "где", "да", "для", "до", "его", "ее", "ей", "есть", "еще", "же", "за", "и", "из", "или", "им", "их", "к", "как", "ко", "кто", "ли", "меня", "мне", "мы", "на", "нам", "нас", "не", "нет", "но", "о", "об", "он", "она", "они", "оно", "от", "по", "при", "с", "себя", "так", "такой", "там", "тем", "то", "того", "тоже", "тут", "ты", "у", "уже", "чем", "чего", "что", "чтобы", "это", "этого", "этой", "я",
+        "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "in", "is", "it", "of", "on", "or", "that", "the", "this", "to", "was", "we", "with"
+    ]
 
     private func normalize(_ text: String) -> String {
         let lowered = text.lowercased().replacingOccurrences(of: "ё", with: "е")

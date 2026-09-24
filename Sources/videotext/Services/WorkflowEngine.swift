@@ -1323,7 +1323,7 @@ final class WorkflowEngine: @unchecked Sendable {
                         transcriptRevisionID: revision.id,
                         mediaDuration: try await requiredDuration(of: mediaURL, manifest: manifest)
                     )
-                    if !assessment.tasks.isEmpty {
+                    if assessment.recoveryIssue == nil, !assessment.tasks.isEmpty {
                         let modelPath = try WhisperModelLocator().resolvedModelPath(settings.whisperModelPath)
                         assessment.tasks = try await localWhisperRetry.addSuggestions(
                             to: assessment.tasks,
@@ -1352,8 +1352,9 @@ final class WorkflowEngine: @unchecked Sendable {
                     try store.registerOutput(kind: "transcription-quality", url: layout.transcriptionQualityURL, in: projectURL)
                     try store.registerOutput(kind: "review-tasks", url: layout.reviewTasksURL, in: projectURL)
                     try store.registerOutput(kind: "transcript-review", url: layout.transcriptReviewHTMLURL, in: projectURL)
-                    if let issue = assessment.catastrophicIssue {
+                    if let issue = assessment.recoveryIssue {
                         log("Качество расшифровки: обнаружена \(issue.message). Тематический анализ заблокирован до автоматической повторной расшифровки.")
+                        throw WorkflowError.processFailed("Расшифровка повреждена: \(issue.message). Повторите расшифровку с автоматическим восстановлением сегментов.")
                     } else {
                         log(assessment.tasks.isEmpty
                             ? "Качество расшифровки: замечаний не найдено."
@@ -2507,7 +2508,7 @@ final class WorkflowEngine: @unchecked Sendable {
                 log("Существующий full.srt не прошёл проверку; потребуется новая расшифровка.")
                 return false
             }
-            if let issue = transcriptionQuality.catastrophicIssue(cues: parsed.cues) {
+            if let issue = transcriptionQuality.recoveryIssue(cues: parsed.cues) {
                 log("Существующий full.srt содержит \(issue.message). Будет выполнена автоматическая сегментированная расшифровка.")
                 return false
             }

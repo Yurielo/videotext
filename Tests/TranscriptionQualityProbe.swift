@@ -68,6 +68,38 @@ struct TranscriptionQualityProbe {
             !substringAssessment.tasks.contains { $0.reasonCodes.contains("progressive-repetition") },
             "совпадение подстроки внутри слова принято за прогрессивный повтор"
         )
+        let fuzzyLoop = service.assess(
+            cues: [
+                SubtitleCue(id: 1, start: 0, end: 4, text: "И с чего начать хотелось с того что самые большие ценности в нашей жизни не материальные"),
+                SubtitleCue(id: 2, start: 4, end: 8, text: "И с чего же начать хотелось с того что самые большие ценности в нашей жизни вовсе не материальные"),
+                SubtitleCue(id: 3, start: 8, end: 12, text: "И с чего начать мне хотелось с того что самые большие ценности в нашей жизни обычно не материальные"),
+                SubtitleCue(id: 4, start: 12, end: 16, text: "И все таки с чего начать хотелось с того что самые большие ценности в нашей жизни не бывают материальными"),
+                SubtitleCue(id: 5, start: 16, end: 20, text: "Затем лектор переходит к следующему разделу и показывает таблицу")
+            ],
+            skippedZeroDurationCount: 0,
+            whisperJSONURL: nil,
+            language: .ru,
+            transcriptRevisionID: "fuzzy-loop-fixture"
+        )
+        try require(fuzzyLoop.report.status == .invalid, "нечёткая ASR-петля принята как пригодная расшифровка")
+        try require(fuzzyLoop.recoveryIssue?.kind == .fuzzyContextualRepetition, "нечёткая ASR-петля не требует повторной расшифровки")
+        try require(
+            fuzzyLoop.tasks.contains { $0.reasonCodes.contains("automatic-retranscription-required") },
+            "нечёткая ASR-петля не создала блокирующее задание"
+        )
+        let progressiveLoop = service.assess(
+            cues: (0..<8).map { index in
+                let words = Array(repeating: "обсуждаем", count: index + 1).joined(separator: " ")
+                let start = Double(index) * 1.9
+                return SubtitleCue(id: index + 1, start: start, end: start + 2, text: words)
+            },
+            skippedZeroDurationCount: 0,
+            whisperJSONURL: nil,
+            language: .ru,
+            transcriptRevisionID: "progressive-loop-fixture"
+        )
+        try require(progressiveLoop.report.status == .invalid, "длинное прогрессивное дублирование принято как пригодная расшифровка")
+        try require(progressiveLoop.recoveryIssue?.kind == .progressiveRepetition, "прогрессивное дублирование не требует повторной расшифровки")
         try require(assessment.report.warnings.contains { $0.contains("Pipeline продолжен") }, "нет неблокирующего предупреждения")
         try require(assessment.html.contains("class=\"needs-review\""), "нет красной review-разметки")
         try require(assessment.html.contains("Low confidence phrase."), "текст потерян в HTML")

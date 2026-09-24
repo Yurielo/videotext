@@ -173,6 +173,13 @@ struct HumanReviewService {
             throw WorkflowError.processFailed("Нет расшифровки, ожидающей утверждения.")
         }
         let language = checkpoint.language
+        if (manifest.reviewTasks ?? []).contains(where: {
+            $0.transcriptRevisionID == checkpoint.revisionID
+                && $0.status == .needsReview
+                && $0.reasonCodes.contains("automatic-retranscription-required")
+        }) {
+            throw WorkflowError.processFailed("Расшифровка содержит критическую ошибку и требует повторной расшифровки; Human Review не может утвердить этот результат.")
+        }
         let workingSRT = workingSubtitleURL(manifest: manifest, language: language, layout: layout)
         let cues = try srt.load(from: workingSRT)
         try validateTimeline(cues, againstRevisionID: checkpoint.revisionID, language: language, layout: layout)

@@ -87,6 +87,33 @@ struct HumanReviewProbe {
         try require(checkpoint?.revisionID == baselineID, "source checkpoint не создан")
         try require(try store.load(from: project).activeTranscriptRevision(for: .ru) == nil, "pending revision стала активной")
 
+        var criticalManifest = try store.load(from: project)
+        criticalManifest.reviewTasks?.append(ReviewTask(
+            id: "critical-retranscription",
+            transcriptRevisionID: baselineID,
+            status: .needsReview,
+            language: .ru,
+            start: 0,
+            end: 4,
+            cueIDs: [1, 2],
+            reasonCodes: ["progressive-repetition-loop", "automatic-retranscription-required"],
+            confidence: nil,
+            originalText: cues[0].text,
+            suggestedText: nil,
+            createdAt: Date(),
+            resolvedAt: nil,
+            dependentArtifactIDs: []
+        ))
+        try store.save(criticalManifest, to: project)
+        do {
+            _ = try service.approve(projectURL: project)
+            throw ProbeFailure(message: "Human Review утвердил расшифровку с критической ошибкой")
+        } catch WorkflowError.processFailed {
+            // Expected: a structural ASR failure requires retranscription.
+        }
+        criticalManifest.reviewTasks?.removeAll { $0.id == "critical-retranscription" }
+        try store.save(criticalManifest, to: project)
+
         let draftCues = try service.saveDraftCue(
             projectURL: project,
             language: .ru,
