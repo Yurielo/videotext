@@ -28,6 +28,51 @@ final class FailingHybridTopicAdapter: TopicAdapter {
     }
 }
 
+final class RecordingTopicAdapter: TopicAdapter {
+    let name = "RecordingTopicAdapter"
+    private(set) var contexts: [TopicBuildContext] = []
+
+    func buildTopics(
+        from cues: [SubtitleCue],
+        sourceSRT: URL,
+        context: TopicBuildContext,
+        onProgress: @escaping (Double) -> Void,
+        onLog: @escaping (String) -> Void
+    ) async throws -> TopicsFile {
+        contexts.append(context)
+        guard let first = cues.first, let last = cues.last else {
+            throw WorkflowError.missingFullSRT
+        }
+        let source = try String(contentsOf: sourceSRT, encoding: .utf8)
+        onProgress(1)
+        return TopicsFile(
+            schemaVersion: TopicAlgorithmIdentity.schemaVersion,
+            algorithmVersion: TopicAlgorithmIdentity.hybridVersion,
+            adapter: TopicAlgorithmIdentity.hybridAdapter,
+            createdAt: Date(),
+            sourceSRT: sourceSRT.path,
+            sourceSignature: StableTopicHash.string(source),
+            status: .ready,
+            granularity: context.granularity,
+            embeddingModel: "probe",
+            languageModel: "probe",
+            topics: [TopicSegment(
+                id: "topic-1",
+                title: "Проверка выбранного варианта",
+                start: first.start,
+                end: last.end,
+                summary: "Проверяется запуск только выбранной детализации.",
+                keywords: ["проверка", "вариант"],
+                confidence: 1,
+                boundaryReason: "probe",
+                sourceCueStart: first.id,
+                sourceCueEnd: last.id,
+                cueIds: cues.map(\.id)
+            )]
+        )
+    }
+}
+
 @main
 struct EndToEndTest {
     static func main() async {
@@ -109,7 +154,12 @@ struct EndToEndTest {
             guard let topicCheckpoint = topicPausedResult.topicReviewCheckpoint else {
                 throw EndToEndError.failed("Тематический таймкодинг не остановился для Human Review")
             }
-            try require(topicCheckpoint.revisionIDs.count >= 3, "Topic Human Review потерял варианты детализации")
+            try require(topicCheckpoint.revisionIDs.count == 1, "Topic Human Review сохранил невыбранные варианты детализации")
+            try validateOnlySelectedTopicVariant(
+                projectURL: topicPausedResult.projectURL,
+                language: .ru,
+                granularity: .normal
+            )
             let topicApproval = try TopicReviewService().approve(projectURL: topicPausedResult.projectURL)
             try require(topicApproval.pendingOperations == topicCheckpoint.pendingOperations, "Topic Human Review изменил очередь продолжения")
             let finalSettings = WorkflowSettings(
@@ -142,6 +192,11 @@ struct EndToEndTest {
                 requireWhisperProgress: false
             )
             try validateHybridTopics(initialResult.projectURL)
+            try await validateExplicitTopicVariant(
+                mediaURL: mediaURL,
+                projectURL: initialResult.projectURL,
+                modelPath: modelPath
+            )
             try await validateHybridFailureDoesNotCreateDraft(
                 mediaURL: mediaURL,
                 projectURL: initialResult.projectURL,
@@ -330,6 +385,88 @@ struct EndToEndTest {
             mediaDuration: (try ProjectStore().load(from: projectURL)).durationSeconds
         )
         try require(issues.isEmpty, "topics.json не прошёл точную сверку с SRT: \(issues.joined(separator: " "))")
+    }
+
+    private static func validateOnlySelectedTopicVariant(
+        projectURL: URL,
+        language: ArtifactLanguage,
+        granularity: TopicGranularity
+    ) throws {
+        let layout = ProjectLayout(root: projectURL)
+        for candidate in TopicGranularity.allCases {
+            let exists = FileManager.default.fileExists(
+                atPath: layout.topicsURL(language: language, granularity: candidate).path
+            )
+            try require(
+                exists == (candidate == granularity),
+                "Создан невыбранный набор тем \(language.rawValue)/\(candidate.rawValue)"
+            )
+        }
+        let legacy = try WorkflowEngine.loadTopics(projectURL: projectURL)
+        try require(legacy.granularity == granularity, "Совместимый topics.json указывает не на выбранный вариант")
+    }
+
+    private static func validateExplicitTopicVariant(
+        mediaURL: URL,
+        projectURL: URL,
+        modelPath: String
+    ) async throws {
+        let variantProject = projectURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("Контрольный выбранный вариант тем", isDirectory: true)
+        try? FileManager.default.removeItem(at: variantProject)
+        try FileManager.default.copyItem(at: projectURL, to: variantProject)
+        defer { try? FileManager.default.removeItem(at: variantProject) }
+
+        let store = ProjectStore()
+        let layout = ProjectLayout(root: variantProject)
+        try? FileManager.default.removeItem(at: layout.topicsURL)
+        try? FileManager.default.removeItem(at: layout.topicsTextURL)
+        for language in ArtifactLanguage.allCases {
+            for granularity in TopicGranularity.allCases {
+                try? FileManager.default.removeItem(at: layout.topicsURL(language: language, granularity: granularity))
+                try? FileManager.default.removeItem(at: layout.topicsTextURL(language: language, granularity: granularity))
+            }
+        }
+        try store.mutate(variantProject) { manifest in
+            manifest.topicRevisions = []
+            manifest.topicReviewState = .newProjectDefault
+            manifest.artifacts = manifest.artifacts?.filter { $0.kind != .topics }
+        }
+
+        let adapter = RecordingTopicAdapter()
+        let settings = WorkflowSettings(
+            mediaURL: mediaURL,
+            projectURL: variantProject,
+            selectedOperations: [.topicTimecoding],
+            mode: .resumeProject,
+            rangeStart: 0,
+            rangeEnd: 1,
+            fragmentName: "",
+            burnFragmentSubtitles: false,
+            subtitleStyle: .standard,
+            selectedTopicID: nil,
+            whisperModelPath: modelPath,
+            whisperLanguage: "auto",
+            topicGranularity: .coarse,
+            artifactLanguage: .ru,
+            sourceHumanReviewEnabled: false,
+            fillerAnalysisBeforeReview: false,
+            topicHumanReviewEnabled: false
+        )
+        _ = try await WorkflowEngine(store: store, hybridTopicAdapter: adapter).run(
+            settings: settings,
+            onLog: { _ in }
+        )
+        try require(
+            adapter.contexts.map { "\($0.language.rawValue)-\($0.granularity.rawValue)" } == ["ru-coarse"],
+            "Workflow запустил несколько или неверный вариант тематического таймкодинга"
+        )
+        try validateOnlySelectedTopicVariant(projectURL: variantProject, language: .ru, granularity: .coarse)
+        let outputPaths = try store.load(from: variantProject)
+            .workflow?.operations[WorkflowOperation.topicTimecoding.rawValue]?.outputPaths ?? []
+        let unexpected = outputPaths.filter { $0.contains("detailed") || $0.contains("normal") }
+        try require(unexpected.isEmpty, "В результатах операции записаны невыбранные варианты: \(unexpected.joined(separator: ", "))")
     }
 
     private static func validateHybridFailureDoesNotCreateDraft(

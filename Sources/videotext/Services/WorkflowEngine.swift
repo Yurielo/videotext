@@ -653,7 +653,9 @@ final class WorkflowViewModel: ObservableObject {
             topicReviewCheckpoint = try topicReviewService.beginReview(
                 projectURL: projectURL,
                 enabled: true,
-                force: true
+                force: true,
+                language: artifactLanguage,
+                granularity: topicGranularity
             )
             topicHumanReviewEnabled = true
             status = "Ожидает проверки тем"
@@ -1177,7 +1179,7 @@ final class WorkflowEngine: @unchecked Sendable {
                     log: log
                 ) {
                     log("Пропуск: \(operation.title) — готовый результат прошёл проверку.")
-                    try markOperation(operation, status: .skipped, projectURL: projectURL, error: nil)
+                    try markOperation(operation, status: .skipped, projectURL: projectURL, settings: settings, error: nil)
                     tracker.finish(operation, recordActual: false)
                     try updateWorkflow(projectURL, status: .running, progress: Double(index + 1) / Double(max(operations.count, 1)), mode: settings.mode, error: nil)
                     try refreshDetectedResults(in: projectURL)
@@ -1222,7 +1224,7 @@ final class WorkflowEngine: @unchecked Sendable {
                 }
 
                 log("Запуск: \(operation.title)")
-                try markOperation(operation, status: .running, projectURL: projectURL, error: nil)
+                try markOperation(operation, status: .running, projectURL: projectURL, settings: settings, error: nil)
 
                 switch operation {
                 case .diagnostics:
@@ -1423,10 +1425,14 @@ final class WorkflowEngine: @unchecked Sendable {
                     }
                     let adapter = hybridTopicAdapter
                     let currentManifest = try store.load(from: projectURL)
-                    let languages = availableTopicLanguages(manifest: currentManifest, layout: layout)
-                    let combinations = languages.flatMap { language in
-                        TopicGranularity.allCases.map { (language, $0) }
-                    }
+                    let language = selectedTopicLanguage(
+                        settings: settings,
+                        manifest: currentManifest,
+                        layout: layout
+                    )
+                    // A run produces only the language and detail level selected in the UI.
+                    // Existing variants remain available, but are never recomputed implicitly.
+                    let combinations = [(language, settings.topicGranularity)]
                     let mediaDuration = try await requiredDuration(of: mediaURL, manifest: currentManifest)
                     for (combinationIndex, combination) in combinations.enumerated() {
                         let (language, granularity) = combination
@@ -1451,17 +1457,12 @@ final class WorkflowEngine: @unchecked Sendable {
                             onProgress: progress,
                             onLog: log
                         )
-                        let activeLanguage = settings.artifactLanguage
-                            ?? currentManifest.languageProfile?.effective
-                            ?? language
-                        let updateLegacy = language == activeLanguage
-                            && granularity == settings.topicGranularity
                         try TopicFileService().save(
                             topics,
                             projectURL: projectURL,
                             language: language,
                             granularity: granularity,
-                            updateLegacyFiles: updateLegacy
+                            updateLegacyFiles: true
                         )
                         try registerTopicArtifact(
                             topics,
@@ -1949,7 +1950,7 @@ final class WorkflowEngine: @unchecked Sendable {
                     try await validateAllVideos(projectURL: projectURL, operation: operation, tracker: tracker, log: log)
                 }
 
-                try markOperation(operation, status: .completed, projectURL: projectURL, error: nil)
+                try markOperation(operation, status: .completed, projectURL: projectURL, settings: settings, error: nil)
                 tracker.finish(operation)
                 try updateWorkflow(projectURL, status: .running, progress: Double(index + 1) / Double(max(operations.count, 1)), mode: settings.mode, error: nil)
                 try refreshDetectedResults(in: projectURL)
@@ -1994,7 +1995,7 @@ final class WorkflowEngine: @unchecked Sendable {
         } catch is CancellationError {
             cleanupPartialFiles(in: projectURL)
             if let currentOperation {
-                try? markOperation(currentOperation, status: .stopped, projectURL: projectURL, error: "Остановлено пользователем")
+                try? markOperation(currentOperation, status: .stopped, projectURL: projectURL, settings: settings, error: "Остановлено пользователем")
             }
             try? updateWorkflow(projectURL, status: .stopped, progress: currentProgress(projectURL), mode: settings.mode, error: nil)
             try? refreshDetectedResults(in: projectURL)
@@ -2003,7 +2004,7 @@ final class WorkflowEngine: @unchecked Sendable {
         } catch {
             cleanupPartialFiles(in: projectURL)
             if let currentOperation {
-                try? markOperation(currentOperation, status: .failed, projectURL: projectURL, error: error.localizedDescription)
+                try? markOperation(currentOperation, status: .failed, projectURL: projectURL, settings: settings, error: error.localizedDescription)
             }
             try? updateWorkflow(projectURL, status: .failed, progress: currentProgress(projectURL), mode: settings.mode, error: error.localizedDescription)
             try? refreshDetectedResults(in: projectURL)
@@ -2102,10 +2103,14 @@ final class WorkflowEngine: @unchecked Sendable {
         pendingOperations: [WorkflowOperation]
     ) throws -> TopicReviewCheckpoint? {
         guard operation == .topicTimecoding else { return nil }
+        let layout = ProjectLayout(root: projectURL)
+        let manifest = try store.load(from: projectURL)
         return try topicReview.beginReview(
             projectURL: projectURL,
             pendingOperations: pendingOperations,
-            enabled: settings.topicHumanReviewEnabled
+            enabled: settings.topicHumanReviewEnabled,
+            language: selectedTopicLanguage(settings: settings, manifest: manifest, layout: layout),
+            granularity: settings.topicGranularity
         )
     }
 
@@ -2537,33 +2542,30 @@ final class WorkflowEngine: @unchecked Sendable {
             return report.contains("Временная шкала корректна")
         case .topicTimecoding:
             guard settings.mode != .newProject else { return false }
-            let languages = availableTopicLanguages(manifest: manifest, layout: layout)
-            for language in languages {
-                let sourceSRT = layout.subtitlesURL(language: language)
-                guard nonemptyFile(sourceSRT) else { return false }
-                let sourceSignature = StableTopicHash.string(try String(contentsOf: sourceSRT, encoding: .utf8))
-                for granularity in TopicGranularity.allCases {
-                    let jsonURL = layout.topicsURL(language: language, granularity: granularity)
-                    let textURL = layout.topicsTextURL(language: language, granularity: granularity)
-                    guard isAtLeastAsNew(jsonURL, as: sourceSRT),
-                          isAtLeastAsNew(textURL, as: sourceSRT),
-                          let topics = try? Self.loadTopics(
-                            projectURL: projectURL,
-                            language: language,
-                            granularity: granularity
-                          ),
-                          !topics.topics.isEmpty,
-                          TopicAlgorithmIdentity.isCurrent(
-                            topics,
-                            granularity: granularity,
-                            sourceSignature: sourceSignature
-                          ) else {
-                        log("Набор тем \(language.rawValue)/\(granularity.rawValue) отсутствует или устарел; анализ будет пересчитан.")
-                        return false
-                    }
-                }
+            let language = selectedTopicLanguage(settings: settings, manifest: manifest, layout: layout)
+            let granularity = settings.topicGranularity
+            let sourceSRT = layout.subtitlesURL(language: language)
+            guard nonemptyFile(sourceSRT) else { return false }
+            let sourceSignature = StableTopicHash.string(try String(contentsOf: sourceSRT, encoding: .utf8))
+            let jsonURL = layout.topicsURL(language: language, granularity: granularity)
+            let textURL = layout.topicsTextURL(language: language, granularity: granularity)
+            guard isAtLeastAsNew(jsonURL, as: sourceSRT),
+                  isAtLeastAsNew(textURL, as: sourceSRT),
+                  let topics = try? Self.loadTopics(
+                    projectURL: projectURL,
+                    language: language,
+                    granularity: granularity
+                  ),
+                  !topics.topics.isEmpty,
+                  TopicAlgorithmIdentity.isCurrent(
+                    topics,
+                    granularity: granularity,
+                    sourceSignature: sourceSignature
+                  ) else {
+                log("Набор тем \(language.rawValue)/\(granularity.rawValue) отсутствует или устарел; анализ будет пересчитан.")
+                return false
             }
-            return nonemptyFile(layout.topicsURL) && nonemptyFile(layout.topicsTextURL)
+            return true
         case .detectFillerWords:
             guard settings.mode != .newProject,
                   nonemptyFile(layout.fillerWordsURL),
@@ -2582,9 +2584,10 @@ final class WorkflowEngine: @unchecked Sendable {
         _ operation: WorkflowOperation,
         status: ProjectOperationStatus,
         projectURL: URL,
+        settings: WorkflowSettings? = nil,
         error: String?
     ) throws {
-        let outputPaths = operationOutputPaths(operation, projectURL: projectURL)
+        let outputPaths = operationOutputPaths(operation, projectURL: projectURL, settings: settings)
         try store.mutate(projectURL) { manifest in
             var workflow = manifest.workflow ?? ProjectWorkflowState(status: .ready, progress: 0, mode: .resumeProject, operations: [:], lastError: nil)
             var record = workflow.operations[operation.rawValue] ?? ProjectOperationRecord(
@@ -2605,7 +2608,11 @@ final class WorkflowEngine: @unchecked Sendable {
         }
     }
 
-    private func operationOutputPaths(_ operation: WorkflowOperation, projectURL: URL) -> [String] {
+    private func operationOutputPaths(
+        _ operation: WorkflowOperation,
+        projectURL: URL,
+        settings: WorkflowSettings? = nil
+    ) -> [String] {
         let layout = ProjectLayout(root: projectURL)
         let manifest = try? store.load(from: projectURL)
         switch operation {
@@ -2630,12 +2637,14 @@ final class WorkflowEngine: @unchecked Sendable {
             ].filter { nonemptyFile($0) }.map(\.path)
         case .validateTimeline: return [layout.timelineValidationURL.path]
         case .topicTimecoding:
-            let localized = ArtifactLanguage.allCases.flatMap { language in
-                TopicGranularity.allCases.flatMap { granularity in
-                    [layout.topicsURL(language: language, granularity: granularity),
-                     layout.topicsTextURL(language: language, granularity: granularity)]
-                }
+            guard let manifest, let settings else {
+                return [layout.topicsURL, layout.topicsTextURL].filter { nonemptyFile($0) }.map(\.path)
             }
+            let language = selectedTopicLanguage(settings: settings, manifest: manifest, layout: layout)
+            let localized = [
+                layout.topicsURL(language: language, granularity: settings.topicGranularity),
+                layout.topicsTextURL(language: language, granularity: settings.topicGranularity)
+            ]
             return ([layout.topicsURL, layout.topicsTextURL] + localized)
                 .filter { nonemptyFile($0) }
                 .map(\.path)
@@ -3379,16 +3388,14 @@ final class WorkflowEngine: @unchecked Sendable {
         )
     }
 
-    private func availableTopicLanguages(manifest: ProjectManifest, layout: ProjectLayout) -> [ArtifactLanguage] {
+    private func selectedTopicLanguage(
+        settings: WorkflowSettings,
+        manifest: ProjectManifest,
+        layout: ProjectLayout
+    ) -> ArtifactLanguage {
         let source = manifest.languageProfile?.effective ?? .ru
-        var languages = [source]
-        for language in ArtifactLanguage.allCases where language != source {
-            if nonemptyFile(layout.subtitlesURL(language: language)),
-               manifest.activeTranscriptRevision(for: language) != nil {
-                languages.append(language)
-            }
-        }
-        return languages
+        let requested = settings.artifactLanguage ?? source
+        return nonemptyFile(layout.subtitlesURL(language: requested)) ? requested : source
     }
 
     private func registerTopicArtifact(

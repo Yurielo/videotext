@@ -18,7 +18,9 @@ struct TopicReviewService {
         projectURL: URL,
         pendingOperations: [WorkflowOperation] = [],
         enabled: Bool = true,
-        force: Bool = false
+        force: Bool = false,
+        language: ArtifactLanguage? = nil,
+        granularity: TopicGranularity? = nil
     ) throws -> TopicReviewCheckpoint? {
         let layout = ProjectLayout(root: projectURL)
         var manifest = try store.load(from: projectURL)
@@ -26,7 +28,11 @@ struct TopicReviewService {
         state.enabled = enabled
         guard state.pendingCheckpoint == nil else { return state.pendingCheckpoint }
 
-        let variants = try availableVariants(layout: layout)
+        let variants = try availableVariants(
+            layout: layout,
+            language: language,
+            granularity: granularity
+        )
         guard !variants.isEmpty else { throw WorkflowError.missingTopics }
         if !force && variants.allSatisfy({ variant in
             guard let activeID = state.activeRevisionIDs[variant.key],
@@ -128,9 +134,15 @@ struct TopicReviewService {
         return TopicReviewApproval(revisions: approved, pendingOperations: checkpoint.pendingOperations)
     }
 
-    private func availableVariants(layout: ProjectLayout) throws -> [Variant] {
+    private func availableVariants(
+        layout: ProjectLayout,
+        language requestedLanguage: ArtifactLanguage? = nil,
+        granularity requestedGranularity: TopicGranularity? = nil
+    ) throws -> [Variant] {
         try ArtifactLanguage.allCases.flatMap { language in
             try TopicGranularity.allCases.compactMap { granularity in
+                guard (requestedLanguage == nil || requestedLanguage == language),
+                      (requestedGranularity == nil || requestedGranularity == granularity) else { return nil }
                 let url = layout.topicsURL(language: language, granularity: granularity)
                 guard FileManager.default.fileExists(atPath: url.path) else { return nil }
                 return try variant(language: language, granularity: granularity, layout: layout)
