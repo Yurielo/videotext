@@ -14,7 +14,14 @@ fi
 
 VIDEO_PATH="$1"
 MODEL_PATH="$2"
+mkdir -p "${WORK_ROOT}"
 SOURCE_PATH="$(mktemp -d "${WORK_ROOT}/videotext-e2e-source.XXXXXX")"
+cleanup_source() {
+  rm -rf -- "${SOURCE_PATH}"
+}
+trap cleanup_source EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 export VIDEOTEXT_HISTORY_PATH="${SOURCE_PATH}/history.json"
 EXTENSION="${VIDEO_PATH##*.}"
 TEST_VIDEO="${SOURCE_PATH}/Короткое видео Юрий's test.${EXTENSION}"
