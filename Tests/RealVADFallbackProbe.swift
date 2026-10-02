@@ -3,8 +3,8 @@ import Foundation
 @main
 struct RealVADFallbackProbe {
     static func main() async throws {
-        guard CommandLine.arguments.count == 3 else {
-            throw WorkflowError.processFailed("Usage: real-vad-fallback <media> <whisper-model>")
+        guard CommandLine.arguments.count == 4 else {
+            throw WorkflowError.processFailed("Usage: real-vad-fallback <media> <whisper-model> <valid-vad-model>")
         }
 
         let source = URL(fileURLWithPath: CommandLine.arguments[1])
@@ -71,6 +71,14 @@ struct RealVADFallbackProbe {
             throw WorkflowError.processFailed("Changed context did not invalidate chunk cache")
         }
 
-        print("REAL_VAD_FALLBACK_PASS duration=\(duration) first_attempts=3 cache_reuse=PASS context_invalidation=PASS")
+        try FileManager.default.removeItem(at: badVAD)
+        try FileManager.default.copyItem(atPath: CommandLine.arguments[3], toPath: badVAD.path)
+        let restored = try await run(context: "Проверка разговорной речи")
+        guard restored.contains(where: { $0.contains("стратегия: VAD long-form") }),
+              !restored.contains(where: { $0.contains("восстановлен из проверенного кэша") }) else {
+            throw WorkflowError.processFailed("Repaired VAD model did not invalidate fallback cache")
+        }
+
+        print("REAL_VAD_FALLBACK_PASS duration=\(duration) fallback=PASS cache_reuse=PASS context_invalidation=PASS vad_repair_invalidation=PASS")
     }
 }

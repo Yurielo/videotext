@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 struct WhisperChunk: Equatable {
     var index: Int
@@ -122,6 +123,7 @@ struct SegmentedWhisperTranscriber {
         let chunks = WhisperChunkPlanner.chunks(duration: mediaDuration, overlap: profile.overlap)
         guard !chunks.isEmpty else { throw WorkflowError.processFailed("Не удалось подготовить сегменты расшифровки.") }
         let layout = ProjectLayout(root: projectURL)
+        let vadModel = vadModelLocator.bestModelPath()
         let cache = try cacheDirectory(
             layout: layout,
             mediaURL: mediaURL,
@@ -129,9 +131,9 @@ struct SegmentedWhisperTranscriber {
             language: language,
             mediaDuration: mediaDuration,
             profile: profile,
-            contextHint: contextHint
+            contextHint: contextHint,
+            vadModelPath: vadModel
         )
-        let vadModel = vadModelLocator.bestModelPath()
         onLog("Длинное видео: распознавание разделено на \(chunks.count) независимых сегментов по 5 минут (профиль \(profile.identifier)).")
         if let vadModel { onLog("Silero VAD: \(vadModel)") }
 
@@ -317,7 +319,8 @@ struct SegmentedWhisperTranscriber {
         language: String,
         mediaDuration: TimeInterval,
         profile: WhisperLongFormProfile,
-        contextHint: String?
+        contextHint: String?,
+        vadModelPath: String?
     ) throws -> URL {
         let attributes = try FileManager.default.attributesOfItem(atPath: mediaURL.path)
         let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
@@ -325,12 +328,23 @@ struct SegmentedWhisperTranscriber {
         let modelAttributes = try? FileManager.default.attributesOfItem(atPath: modelPath)
         let modelSize = (modelAttributes?[.size] as? NSNumber)?.int64Value ?? 0
         let modelModified = (modelAttributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let vadIdentity: String
+        if let vadModelPath {
+            if let bytes = try? Data(contentsOf: URL(fileURLWithPath: vadModelPath)) {
+                let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+                vadIdentity = "\(vadModelPath)|\(digest)"
+            } else {
+                vadIdentity = "\(vadModelPath)|unreadable"
+            }
+        } else {
+            vadIdentity = "none"
+        }
         let identity = StableTopicHash.string(
-            "segmented-whisper-v3|profile=\(profile.identifier)|overlap=\(profile.overlap)|" +
+            "segmented-whisper-v4|profile=\(profile.identifier)|overlap=\(profile.overlap)|" +
             "primary=\(profile.primaryArguments.joined(separator: ","))|" +
             "recovery=\(profile.recoveryArguments.joined(separator: ","))|" +
             "noVAD=\(profile.noVADArguments.joined(separator: ","))|" +
-            "context=\(WhisperTranscriptionContext.normalized(contextHint) ?? "")|" +
+            "context=\(WhisperTranscriptionContext.normalized(contextHint) ?? "")|vad=\(vadIdentity)|" +
             "\(mediaURL.standardizedFileURL.path)|\(size)|\(modified)|" +
             "\(modelPath)|\(modelSize)|\(modelModified)|\(language)|\(mediaDuration)"
         )

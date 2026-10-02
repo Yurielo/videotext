@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-  printf 'Usage: %s <short-media> <whisper-model>\n' "$0" >&2
+if [[ $# -ne 3 ]]; then
+  printf 'Usage: %s <short-media> <whisper-model> <valid-vad-model>\n' "$0" >&2
   exit 2
 fi
 
@@ -25,4 +25,4 @@ swiftc -O \
   "${SOURCES[@]}" \
   "$ROOT/Tests/RealVADFallbackProbe.swift"
 
-"$BINARY" "$1" "$2"
+"$BINARY" "$1" "$2" "$3"
