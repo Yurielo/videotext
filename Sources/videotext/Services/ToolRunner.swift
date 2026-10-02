@@ -242,7 +242,10 @@ final class OwnedTemporaryWorkspace {
     private let fm = FileManager.default
 
     static var namespace: URL {
-        FileManager.default.temporaryDirectory.appendingPathComponent("videotext-owned-v1-\(getuid())", isDirectory: true)
+        let base = ProcessInfo.processInfo.environment["TMPDIR"].map {
+            URL(fileURLWithPath: $0, isDirectory: true)
+        } ?? FileManager.default.temporaryDirectory
+        return base.appendingPathComponent("videotext-owned-v1-\(getuid())", isDirectory: true)
     }
     private static func identity(_ url: URL) throws -> (UInt64, UInt64) {
         var info = stat()
