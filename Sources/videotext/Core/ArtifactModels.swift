@@ -2,7 +2,7 @@ import Foundation
 
 enum ProjectSchema {
     static let minimumSupportedVersion = 1
-    static let currentVersion = 7
+    static let currentVersion = 8
 }
 
 enum ArtifactLanguage: String, CaseIterable, Codable, Identifiable, Equatable {

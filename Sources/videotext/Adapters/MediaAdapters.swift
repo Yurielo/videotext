@@ -1,5 +1,15 @@
 import Foundation
 
+enum WhisperTranscriptionContext {
+    static func normalized(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let normalized = value
+            .split(whereSeparator: { $0.isWhitespace || $0.isNewline })
+            .joined(separator: " ")
+        return normalized.isEmpty ? nil : normalized
+    }
+}
+
 struct TranscriptionResult {
     var srtURL: URL
     var jsonURL: URL
@@ -23,6 +33,7 @@ struct WhisperCLITranscriber {
         mediaDuration: TimeInterval,
         modelPath: String,
         language: String,
+        contextHint: String? = nil,
         onProgress: @escaping (Double) -> Void,
         onLog: @escaping (String) -> Void = { _ in }
     ) async throws -> TranscriptionResult {
@@ -42,6 +53,7 @@ struct WhisperCLITranscriber {
                 mediaDuration: mediaDuration,
                 modelPath: modelPath,
                 language: language,
+                contextHint: contextHint,
                 onProgress: onProgress,
                 onLog: onLog
             )
@@ -62,7 +74,8 @@ struct WhisperCLITranscriber {
             outputBase: outputBase,
             modelPath: modelPath,
             language: language,
-            vadModelPath: vadModelPath
+            vadModelPath: vadModelPath,
+            contextHint: contextHint
         )
         if let vadModelPath {
             onLog("Silero VAD: \(vadModelPath)")
@@ -88,7 +101,8 @@ struct WhisperCLITranscriber {
                 outputBase: outputBase,
                 modelPath: modelPath,
                 language: language,
-                vadModelPath: nil
+                vadModelPath: nil,
+                contextHint: contextHint
             )
             parser = WhisperProgressParser()
             result = try await runner.run(whisper, args, currentDirectory: projectURL) { _, chunk in
@@ -135,7 +149,9 @@ struct WhisperCLITranscriber {
         outputBase: URL,
         modelPath: String,
         language: String,
-        vadModelPath: String?
+        vadModelPath: String?,
+        contextHint: String? = nil,
+        additionalArguments: [String] = []
     ) -> [String] {
         var args = [
             "-f", audioURL.path,
@@ -155,6 +171,10 @@ struct WhisperCLITranscriber {
            !vadModelPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             args += ["--vad", "-vm", vadModelPath]
         }
+        if let contextHint = WhisperTranscriptionContext.normalized(contextHint) {
+            args += ["--prompt", contextHint]
+        }
+        args += additionalArguments
         return args
     }
 

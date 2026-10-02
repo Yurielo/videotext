@@ -30,6 +30,18 @@ struct WhisperVADProbe {
             throw ProbeFailure(message: "нет аргумента VAD model")
         }
         try require(arguments[modelFlag + 1] == model.path, "в Whisper передана неверная VAD model")
+        let contextualArguments = adapter.commandArguments(
+            audioURL: root.appendingPathComponent("source.wav"),
+            outputBase: root.appendingPathComponent("context.partial"),
+            modelPath: "/models/whisper.bin",
+            language: "ru",
+            vadModelPath: located,
+            contextHint: "  разговорная   речь\n редкий термин "
+        )
+        guard let prompt = contextualArguments.firstIndex(of: "--prompt"), prompt + 1 < contextualArguments.count else {
+            throw ProbeFailure(message: "контекст не передан в Whisper")
+        }
+        try require(contextualArguments[prompt + 1] == "разговорная речь редкий термин", "контекст не нормализован")
 
         let fallback = adapter.commandArguments(
             audioURL: root.appendingPathComponent("source.wav"),
@@ -39,6 +51,22 @@ struct WhisperVADProbe {
             vadModelPath: nil
         )
         try require(!fallback.contains("--vad") && !fallback.contains("-vm"), "fallback не отключил VAD")
+        let profile = WhisperLongFormProfile.forLanguage("ru")
+        let profileArguments = adapter.commandArguments(
+            audioURL: root.appendingPathComponent("source.wav"),
+            outputBase: root.appendingPathComponent("profile.partial"),
+            modelPath: "/models/whisper.bin",
+            language: "ru",
+            vadModelPath: located,
+            additionalArguments: profile.primaryArguments
+        )
+        try require(profile.identifier == "russian-conversation-v1", "не выбран профиль длинной русской разговорной речи")
+        try require(profile.overlap == 0, "русский long-form профиль не отключил перекрытие chunks")
+        try require(!profileArguments.contains("-mc"), "русский long-form профиль сбросил контекст Whisper")
+        try require(profileArguments.contains("-vt") && profileArguments.contains("0.55"), "не сохранены параметры Silero VAD")
+        try require(profileArguments.filter { $0 == "-vt" }.count == 1, "параметры профиля переданы Whisper дважды")
+        try require(profileArguments.contains("-sow") && profileArguments.contains("-sns"), "не сохранена безопасная сегментация по словам")
+        try require(WhisperLongFormProfile.forLanguage("en").overlap == WhisperChunkPlanner.legacyOverlap, "изменение русского профиля затронуло другой язык")
         try require(!WhisperChunkPlanner.shouldSegment(duration: 20 * 60), "порог сегментации включён слишком рано")
         try require(WhisperChunkPlanner.shouldSegment(duration: 20 * 60 + 1), "длинное видео не переведено на сегменты")
         let chunks = WhisperChunkPlanner.chunks(duration: 965)
@@ -46,6 +74,9 @@ struct WhisperVADProbe {
         try require(chunks.first?.coreStart == 0 && chunks.last?.coreEnd == 965, "сегменты не покрывают видео полностью")
         try require(chunks[1].coreStart == chunks[0].coreEnd, "между core-диапазонами появилась дыра")
         try require(chunks[1].extractionStart < chunks[1].coreStart, "нет защитного перекрытия сегментов")
+        let russianChunks = WhisperChunkPlanner.chunks(duration: 965, overlap: profile.overlap)
+        try require(russianChunks[1].extractionStart == russianChunks[1].coreStart, "русские chunks получили непроверенное перекрытие")
+        try require(russianChunks[0].extractionEnd == russianChunks[0].coreEnd, "граница русского chunk не совпала с core")
         try validateSegmentMerge(root: root)
         print("WHISPER_VAD_PROBE_PASS")
     }
