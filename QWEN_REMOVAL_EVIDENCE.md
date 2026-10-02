@@ -1,5 +1,14 @@
 # Active Model Migration Evidence
 
+## Current acceptance status
+
+`HUMAN_TRANSLATION_REVIEW: FAIL`. The owner rejected semantic outputs from
+`a16ae0c016e94c76b78a5bb2f6fb7e05012c4d78`. The structural benchmark results
+below are historical engineering evidence, not semantic acceptance. PR #9
+remains draft and the previous Candidate must not be promoted. Contextual
+experiments did not satisfy the repair gate and were withdrawn from production.
+See [the investigation and failure evidence](TRANSLATION_CONTEXT_REPAIR_EVIDENCE.md).
+
 ## Active model map
 
 | Operation | Previous active model family | Active replacement |
@@ -39,7 +48,7 @@ names, natural repetition and a sentence split across cue boundaries:
 
 The first contextual-cue experiment was rejected: TranslateGemma sometimes
 translated the supplied neighbouring context and duplicated text across cues.
-The accepted protocol therefore translates one cue at a time, returns plain
+The protocol in that snapshot therefore translates one cue at a time, returns plain
 text only, and never redistributes a merged answer across timestamps. A failed
 cue creates a `Human Review` task; a failed cue cannot silently validate the
 remaining batch.
