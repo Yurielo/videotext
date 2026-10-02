@@ -66,7 +66,7 @@ struct TranslationModelBenchmark {
             }
             let reportURL = URL(fileURLWithPath: CommandLine.arguments[1])
             let provider = OllamaTranslationProvider()
-            let models = ["qwen3:8b", "qwen2.5:7b"]
+            let models = [OllamaTranslationProvider.model]
             var modelResults: [BenchmarkModelResult] = []
             for model in models {
                 var directions: [BenchmarkDirectionResult] = []
@@ -124,14 +124,28 @@ struct TranslationModelBenchmark {
             TranslationRequestCue(id: 2, text: "Анна проверила субтитры в 09:30 и сохранила файл."),
             TranslationRequestCue(id: 3, text: "WorkflowEngine не должен перезаписывать исходный проект."),
             TranslationRequestCue(id: 4, text: "Стоимость составила 1250 рублей, а скидка - 15%."),
-            TranslationRequestCue(id: 5, text: "Используйте FFmpeg и модель Whisper large-v3.")
+            TranslationRequestCue(id: 5, text: "Используйте FFmpeg и модель Whisper large-v3."),
+            TranslationRequestCue(id: 6, text: "Я не думаю, что в отчёте нет ошибки,"),
+            TranslationRequestCue(id: 7, text: "поэтому давайте проверим исходную запись ещё раз."),
+            TranslationRequestCue(id: 8, text: "Нет, нет, это не отмена, а перенос встречи на 3 октября."),
+            TranslationRequestCue(id: 9, text: "Мария сказала: «пожалуйста, не меняйте название проекта VideoText»."),
+            TranslationRequestCue(id: 10, text: "В 14:05 было 2,5 минуты тишины, затем разговор продолжился."),
+            TranslationRequestCue(id: 11, text: "Мы обсудили договор, однако окончательное решение пока не принято."),
+            TranslationRequestCue(id: 12, text: "Повторю: резервную копию удалять нельзя.")
         ]
         let en = [
-            TranslationRequestCue(id: 1, text: "In 2026, the videotext team processed 12 short videos."),
+            TranslationRequestCue(id: 1, text: "In 2026, the VideoText team processed 12 short videos."),
             TranslationRequestCue(id: 2, text: "Anna reviewed the subtitles at 09:30 and saved the file."),
             TranslationRequestCue(id: 3, text: "WorkflowEngine must not overwrite the source project."),
             TranslationRequestCue(id: 4, text: "The total was 1250 dollars with a 15% discount."),
-            TranslationRequestCue(id: 5, text: "Use FFmpeg and the Whisper large-v3 model.")
+            TranslationRequestCue(id: 5, text: "Use FFmpeg and the Whisper large-v3 model."),
+            TranslationRequestCue(id: 6, text: "I do not think there is no mistake in the report,"),
+            TranslationRequestCue(id: 7, text: "so let us check the original recording once more."),
+            TranslationRequestCue(id: 8, text: "No, no, this is not a cancellation but a move of the meeting to October 3."),
+            TranslationRequestCue(id: 9, text: "Maria said, please do not change the name of the VideoText project."),
+            TranslationRequestCue(id: 10, text: "At 14:05 there were 2.5 minutes of silence, then the conversation continued."),
+            TranslationRequestCue(id: 11, text: "We discussed the contract, but the final decision has not yet been made."),
+            TranslationRequestCue(id: 12, text: "I repeat: the backup must not be deleted.")
         ]
         return [
             Fixture(
@@ -140,7 +154,10 @@ struct TranslationModelBenchmark {
                 cues: ru,
                 semanticMarkerGroups: [
                     1: [["team"], ["processed"]], 2: [["anna"], ["subtitles"]],
-                    3: [["workflowengine"], ["source", "original"]], 4: [["discount"]], 5: [["ffmpeg"], ["whisper"]]
+                    3: [["workflowengine"], ["source", "original"]], 4: [["discount"]], 5: [["ffmpeg"], ["whisper"]],
+                    6: [["not", "no", "don't"]], 7: [["check", "recording", "record"]], 8: [["not", "cancel"]],
+                    9: [["maria"], ["videotext"]], 10: [["silence"], ["conversation"]],
+                    11: [["contract"], ["not", "decision"]], 12: [["backup"], ["not", "must", "should", "cannot"]]
                 ]
             ),
             Fixture(
@@ -149,7 +166,10 @@ struct TranslationModelBenchmark {
                 cues: en,
                 semanticMarkerGroups: [
                     1: [["команд"], ["обработ"]], 2: [["анна"], ["субтитр"]],
-                    3: [["workflowengine"], ["исход", "оригинал"]], 4: [["скид"]], 5: [["ffmpeg"], ["whisper"]]
+                    3: [["workflowengine"], ["исход", "оригинал"]], 4: [["скид"]], 5: [["ffmpeg"], ["whisper"]],
+                    6: [["не", "ошиб"]], 7: [["провер", "запис"]], 8: [["не", "отмен"]],
+                    9: [["мар"], ["videotext"]], 10: [["тишин"], ["разговор"]],
+                    11: [["договор", "контракт"], ["не", "решени"]], 12: [["резерв", "копи"], ["не", "нельзя"]]
                 ]
             )
         ]

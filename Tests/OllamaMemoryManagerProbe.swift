@@ -11,7 +11,7 @@ enum OllamaMemoryProbeError: LocalizedError {
 
 final class OllamaMockURLProtocol: URLProtocol {
     private static let lock = NSLock()
-    private static var loaded = Set(["embeddinggemma:latest", "qwen2.5:7b", "qwen3:8b", "gemma3:4b", "unrelated:latest"])
+    private static var loaded = Set(["embeddinggemma:latest", "translategemma:4b", "gemma3:4b", "unrelated:latest"])
     private static var unloadBodies: [[String: Any]] = []
     private static var paths: [String] = []
 
@@ -84,7 +84,7 @@ struct OllamaMemoryManagerProbe {
             )
             let unloaded = await manager.unloadVideoTextModels()
             let result = OllamaMockURLProtocol.result()
-            let expected = Set(["embeddinggemma:latest", "qwen2.5:7b", "qwen3:8b", "gemma3:4b"])
+            let expected = Set(["embeddinggemma:latest", "translategemma:4b", "gemma3:4b"])
             guard Set(unloaded) == expected else {
                 throw OllamaMemoryProbeError.failed("выгружен неверный набор моделей: \(unloaded); запросы: \(result.paths)")
             }

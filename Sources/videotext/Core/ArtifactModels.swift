@@ -245,6 +245,8 @@ struct TranslationReport: Codable, Equatable {
     var sourceLanguage: ArtifactLanguage
     var targetLanguage: ArtifactLanguage
     var model: String
+    var modelDigest: String?
+    var protocolVersion: String?
     var translatedAt: Date
     var cueCount: Int
     var reviewTaskIDs: [String]

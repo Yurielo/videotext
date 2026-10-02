@@ -10,7 +10,7 @@ struct DiagnosticsProbe {
         for filter in ["subtitles", "rubberband", "boxblur", "gblur", "overlay", "afftdn", "loudnorm"] {
             try require(report.capabilities?[filter] == true, "нет обязательного фильтра \(filter)")
         }
-        try require(report.ollamaModels?.contains("qwen3:8b") == true, "не обнаружена qwen3:8b")
+        try require(report.ollamaModels?.contains("translategemma:4b") == true, "не обнаружена translategemma:4b")
         try require(report.systemVoices?.contains(where: { $0.hasPrefix("Daniel (Enhanced) ") }) == true, "не обнаружен EN enhanced male voice Daniel")
         try require(report.systemVoices?.contains(where: { $0.hasPrefix("Yuri (Enhanced) ") }) == true, "не обнаружен RU enhanced male voice Yuri")
         let tasks = report.terminalTasks ?? []

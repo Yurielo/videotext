@@ -8,8 +8,8 @@ struct TranslationAdapterProbe {
             SubtitleCue(id: 9, start: 4, end: 6, text: "Проверяем порядок строк.")
         ]
         let provider = ScriptedTranslationProvider(responses: [
-            [7: "Version 2 has ten functions."],
-            [7: "Version 2 has ten functions.", 9: "We check the line order."]
+            [7: "", 9: "We check the line order."],
+            [7: "Version 2 has ten functions."]
         ])
         let result = try await TranslationAdapter(provider: provider).translate(
             cues: source,
@@ -39,7 +39,7 @@ struct TranslationAdapterProbe {
 
         let bad = try await TranslationAdapter(provider: ScriptedTranslationProvider(responses: [
             [7: "Version 3 has ten functions.", 9: "We check the line order."],
-            [7: "Version 3 has ten functions.", 9: "We check the line order."]
+            [7: "Version 3 has ten functions."]
         ])).translate(
             cues: source,
             source: .ru,

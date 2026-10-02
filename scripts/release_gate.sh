@@ -66,6 +66,10 @@ release_files() {
     "$ROOT/scripts/test_topics.sh" \
     "$ROOT/scripts/test_topic_matrix.sh" \
     "$ROOT/scripts/test_ollama_topics.sh" \
+    "$ROOT/scripts/test_translation.sh" \
+    "$ROOT/scripts/test_translation_models.sh" \
+    "$ROOT/scripts/test_ollama_memory_shutdown.sh" \
+    "$ROOT/scripts/test_no_retired_translation_models.sh" \
     "$ROOT/scripts/test_tool_runner.sh" \
     "$ROOT/scripts/test_whisper_vad.sh" \
     "$ROOT/scripts/test_transcription_quality.sh" \
@@ -78,6 +82,9 @@ release_files() {
     "$ROOT/Tests/TopicAnalysisProbe.swift" \
     "$ROOT/Tests/TopicMatrixProbe.swift" \
     "$ROOT/Tests/OllamaTopicProbe.swift" \
+    "$ROOT/Tests/TranslationAdapterProbe.swift" \
+    "$ROOT/Tests/TranslationModelBenchmark.swift" \
+    "$ROOT/Tests/OllamaMemoryManagerProbe.swift" \
     "$ROOT/Tests/ToolRunnerProbe.swift" \
     "$ROOT/Tests/WhisperVADProbe.swift" \
     "$ROOT/Tests/TranscriptionQualityProbe.swift"

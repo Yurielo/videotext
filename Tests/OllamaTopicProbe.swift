@@ -14,8 +14,8 @@ struct OllamaTopicProbe {
         do {
             let provider = OllamaTopicProvider()
             let models = try await provider.availableLanguageModels()
-            guard models.contains(provider.primaryLanguageModel), models.contains(provider.fallbackLanguageModel) else {
-                throw OllamaProbeError.failed("не найдены основная и резервная модели")
+            guard models == [provider.primaryLanguageModel] else {
+                throw OllamaProbeError.failed("для тематического анализа должна быть доступна только Gemma 3")
             }
             let vectors = try await provider.embeddings(for: [
                 "Настройка локальной модели распознавания речи",
@@ -89,7 +89,7 @@ struct OllamaTopicProbe {
             )
             let longIssues = TopicValidator().boundaryReviewIssues(longBoundary, request: longBoundaryRequest)
             guard longIssues.isEmpty else {
-                throw OllamaProbeError.failed("qwen3:8b не прошла длинное окно границ: \(longIssues.joined(separator: " "))")
+                throw OllamaProbeError.failed("\(provider.primaryLanguageModel) не прошла длинное окно границ: \(longIssues.joined(separator: " "))")
             }
             print("LONG BOUNDARY PASS: \(provider.primaryLanguageModel), границ: \(longBoundary.decisions.count)")
 

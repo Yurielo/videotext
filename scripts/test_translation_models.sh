@@ -20,8 +20,7 @@ if [[ ! -x "${OLLAMA}" ]]; then
 fi
 
 cleanup() {
-  "${OLLAMA}" stop qwen3:8b >/dev/null 2>&1 || true
-  "${OLLAMA}" stop qwen2.5:7b >/dev/null 2>&1 || true
+  "${OLLAMA}" stop translategemma:4b >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 

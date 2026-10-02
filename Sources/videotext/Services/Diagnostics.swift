@@ -63,7 +63,7 @@ struct DiagnosticsService {
         var warnings: [String] = []
         let missingFilters = capabilities.filter { !$0.value }.map(\.key).sorted()
         if !missingFilters.isEmpty { warnings.append("В каноническом FFmpeg отсутствуют фильтры: \(missingFilters.joined(separator: ", ")).") }
-        for requiredModel in ["qwen3:8b", "qwen2.5:7b", "embeddinggemma"] where !ollamaModels.contains(requiredModel) {
+        for requiredModel in ["translategemma:4b", "embeddinggemma", "gemma3:4b"] where !ollamaModels.contains(requiredModel) {
             warnings.append("Не найдена модель Ollama \(requiredModel).")
         }
         if !blockers.isEmpty { warnings.append("Terminal-задачи изменения Homebrew заблокированы активными процессами: \(blockers.joined(separator: ", ")).") }
@@ -84,7 +84,7 @@ struct DiagnosticsService {
                 blockedBy: [whisperPath == nil ? "whisper-cli" : nil, vadModelPath == nil ? "Silero VAD model" : nil].compactMap { $0 },
                 requiresExplicitApproval: false
             ),
-            TerminalTaskRecord(id: "MODEL-01", title: "Использовать qwen3:8b по результатам двустороннего benchmark", command: nil, status: "completed", blockedBy: [], requiresExplicitApproval: false),
+            TerminalTaskRecord(id: "MODEL-01", title: "Использовать TranslateGemma для двустороннего перевода и Gemma 3 для тематического анализа", command: nil, status: "completed", blockedBy: [], requiresExplicitApproval: false),
             TerminalTaskRecord(
                 id: "TTS-01",
                 title: "Использовать системные голоса: Daniel для EN, Yuri для RU до будущей замены",

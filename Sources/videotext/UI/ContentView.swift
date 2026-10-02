@@ -390,7 +390,7 @@ struct ContentView: View {
                             Text(model.artifactLanguage == detectedSourceLanguage ? "Оригинал" : "Перевод")
                                 .foregroundStyle(.secondary)
                             Spacer()
-                            Text("Качественный: embeddinggemma + qwen3:8b / gemma3:4b")
+                            Text("Качественный: embeddinggemma + gemma3:4b")
                                 .foregroundStyle(.secondary)
                         }
                         .font(.caption)

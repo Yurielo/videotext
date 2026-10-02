@@ -2541,7 +2541,13 @@ final class WorkflowEngine: @unchecked Sendable {
                   let report = try? store.decoder.decode(TranslationReport.self, from: Data(contentsOf: reportURL)) else {
                 return false
             }
+            guard let identity = try? await translationAdapter.currentIdentity() else {
+                return false
+            }
             return report.sourceRevisionID == sourceRevision.id
+                && report.model == identity.model
+                && report.modelDigest == identity.digest
+                && report.protocolVersion == identity.protocolVersion
         case .validateTimeline:
             guard settings.mode != .newProject else { return false }
             guard isAtLeastAsNew(layout.timelineValidationURL, as: layout.fullSRTURL),
@@ -3282,7 +3288,9 @@ final class WorkflowEngine: @unchecked Sendable {
         try writeTranscript(from: result.cues, to: transcriptURL)
         let subtitleText = try String(contentsOf: subtitleURL, encoding: .utf8)
         let transcriptText = try String(contentsOf: transcriptURL, encoding: .utf8)
-        let revisionHash = StableTopicHash.string("\(sourceRevision.id)|\(result.model)|\(subtitleText)")
+        let revisionHash = StableTopicHash.string(
+            "\(sourceRevision.id)|\(result.model)|\(result.modelDigest ?? "unknown")|\(result.protocolVersion)|\(subtitleText)"
+        )
         let revisionID = "translation-\(sourceLanguage.rawValue)-\(targetLanguage.rawValue)-\(revisionHash)"
         let transcriptArtifactID = "artifact-\(revisionID)-txt"
         let subtitleArtifactID = "artifact-\(revisionID)-srt"
@@ -3382,12 +3390,14 @@ final class WorkflowEngine: @unchecked Sendable {
         encoder.dateEncodingStrategy = .iso8601
         try encoder.encode(allTasks).write(to: layout.reviewTasksURL, options: .atomic)
         return TranslationReport(
-            schemaVersion: 1,
+            schemaVersion: 2,
             sourceRevisionID: sourceRevision.id,
             targetRevisionID: revisionID,
             sourceLanguage: sourceLanguage,
             targetLanguage: targetLanguage,
             model: result.model,
+            modelDigest: result.modelDigest,
+            protocolVersion: result.protocolVersion,
             translatedAt: Date(),
             cueCount: result.cues.count,
             reviewTaskIDs: tasks.map(\.id),

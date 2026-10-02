@@ -3,7 +3,7 @@ import Foundation
 struct OllamaMemoryManager {
     private let baseURL: URL
     private let session: URLSession
-    private let videoTextModelPrefixes = ["embeddinggemma", "qwen2.5", "qwen3", "gemma3"]
+    private let videoTextModelPrefixes = ["embeddinggemma", "translategemma", "gemma3"]
 
     init(
         baseURL: URL = URL(string: "http://127.0.0.1:11434")!,
