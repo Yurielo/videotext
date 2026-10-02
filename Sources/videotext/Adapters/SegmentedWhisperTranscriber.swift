@@ -43,6 +43,7 @@ struct WhisperLongFormProfile: Equatable {
     let overlap: TimeInterval
     let primaryArguments: [String]
     let recoveryArguments: [String]
+    let noVADArguments: [String]
 
     static func forLanguage(_ language: String) -> WhisperLongFormProfile {
         guard language.lowercased() == "ru" else {
@@ -50,7 +51,8 @@ struct WhisperLongFormProfile: Equatable {
                 identifier: "legacy-long-form-v1",
                 overlap: WhisperChunkPlanner.legacyOverlap,
                 primaryArguments: ["-mc", "0"],
-                recoveryArguments: ["-mc", "0", "-nf"]
+                recoveryArguments: ["-mc", "0", "-nf"],
+                noVADArguments: ["-mc", "0", "-nf"]
             )
         }
 
@@ -70,8 +72,23 @@ struct WhisperLongFormProfile: Equatable {
                 "-vt", "0.68", "-vspd", "250", "-vsd", "350",
                 "-vp", "200", "-vo", "0.10", "-nth", "0.60",
                 "-sns", "-ml", "80", "-sow"
+            ],
+            noVADArguments: [
+                "-t", "8", "-bo", "3", "-bs", "3",
+                "-sns", "-ml", "80", "-sow", "-nf"
             ]
         )
+    }
+
+    func attempts(vadModelPath: String?) -> [(name: String, vad: String?, extra: [String])] {
+        guard let vadModelPath else {
+            return [("standard segmentation", nil, noVADArguments)]
+        }
+        return [
+            ("VAD long-form", vadModelPath, primaryArguments),
+            ("VAD long-form recovery", vadModelPath, recoveryArguments),
+            ("standard segmentation after VAD failure", nil, noVADArguments)
+        ]
     }
 }
 
@@ -202,15 +219,7 @@ struct SegmentedWhisperTranscriber {
             throw WorkflowError.processFailed("Не удалось извлечь аудио сегмента \(chunk.index + 1): \(extraction.stderr)")
         }
 
-        var attempts: [(name: String, vad: String?, extra: [String])] = []
-        if let vadModelPath {
-            attempts = [
-                ("VAD long-form", vadModelPath, profile.primaryArguments),
-                ("VAD long-form recovery", vadModelPath, profile.recoveryArguments)
-            ]
-        } else {
-            attempts = [("стандартная сегментация", nil, profile.primaryArguments)]
-        }
+        let attempts = profile.attempts(vadModelPath: vadModelPath)
         var failures: [String] = []
         for (attemptIndex, attempt) in attempts.enumerated() {
             try Task.checkCancellation()
@@ -317,9 +326,10 @@ struct SegmentedWhisperTranscriber {
         let modelSize = (modelAttributes?[.size] as? NSNumber)?.int64Value ?? 0
         let modelModified = (modelAttributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
         let identity = StableTopicHash.string(
-            "segmented-whisper-v2|profile=\(profile.identifier)|overlap=\(profile.overlap)|" +
+            "segmented-whisper-v3|profile=\(profile.identifier)|overlap=\(profile.overlap)|" +
             "primary=\(profile.primaryArguments.joined(separator: ","))|" +
             "recovery=\(profile.recoveryArguments.joined(separator: ","))|" +
+            "noVAD=\(profile.noVADArguments.joined(separator: ","))|" +
             "context=\(WhisperTranscriptionContext.normalized(contextHint) ?? "")|" +
             "\(mediaURL.standardizedFileURL.path)|\(size)|\(modified)|" +
             "\(modelPath)|\(modelSize)|\(modelModified)|\(language)|\(mediaDuration)"

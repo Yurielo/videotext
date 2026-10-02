@@ -67,6 +67,10 @@ release_files() {
     "$ROOT/scripts/test_topic_matrix.sh" \
     "$ROOT/scripts/test_ollama_topics.sh" \
     "$ROOT/scripts/test_tool_runner.sh" \
+    "$ROOT/scripts/test_whisper_vad.sh" \
+    "$ROOT/scripts/test_transcription_quality.sh" \
+    "$ROOT/scripts/check_baseline.sh" \
+    "$ROOT/scripts/test_baseline_guard.sh" \
     "$ROOT/scripts/release_gate.sh" \
     "$ROOT/Tests/EndToEnd.swift" \
     "$ROOT/Tests/ProjectSchemaProbe.swift" \
@@ -74,7 +78,9 @@ release_files() {
     "$ROOT/Tests/TopicAnalysisProbe.swift" \
     "$ROOT/Tests/TopicMatrixProbe.swift" \
     "$ROOT/Tests/OllamaTopicProbe.swift" \
-    "$ROOT/Tests/ToolRunnerProbe.swift"
+    "$ROOT/Tests/ToolRunnerProbe.swift" \
+    "$ROOT/Tests/WhisperVADProbe.swift" \
+    "$ROOT/Tests/TranscriptionQualityProbe.swift"
 }
 
 release_inputs_hash() {
@@ -125,6 +131,10 @@ record source_commit "$SOURCE_COMMIT"
 record source_tree_clean true
 record source_version "$SOURCE_VERSION"
 record source_build "$SOURCE_BUILD"
+if ! BASELINE_RESULT="$("$ROOT/scripts/check_baseline.sh" 2>&1)"; then
+  fail "$BASELINE_RESULT"
+fi
+record baseline_status "$BASELINE_RESULT"
 record video_path "$VIDEO_PATH"
 record video_sha256 "$(shasum -a 256 "$VIDEO_PATH" | awk '{print $1}')"
 record whisper_model_path "$MODEL_PATH"
@@ -145,7 +155,9 @@ for focused in \
   test_human_review.sh \
   test_topics.sh \
   test_topic_matrix.sh \
-  test_ollama_topics.sh; do
+  test_ollama_topics.sh \
+  test_whisper_vad.sh \
+  test_transcription_quality.sh; do
   log="$RUN_DIR/$focused.log"
   if ! "$ROOT/scripts/$focused" > "$log" 2>&1; then
     record "${focused%.sh}_exit_status" 1

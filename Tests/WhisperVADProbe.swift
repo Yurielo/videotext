@@ -66,7 +66,25 @@ struct WhisperVADProbe {
         try require(profileArguments.contains("-vt") && profileArguments.contains("0.55"), "не сохранены параметры Silero VAD")
         try require(profileArguments.filter { $0 == "-vt" }.count == 1, "параметры профиля переданы Whisper дважды")
         try require(profileArguments.contains("-sow") && profileArguments.contains("-sns"), "не сохранена безопасная сегментация по словам")
+        let attempts = profile.attempts(vadModelPath: located)
+        try require(attempts.count == 3, "после сбоя VAD исчезла третья попытка без VAD")
+        try require(attempts[0].vad == located && attempts[1].vad == located, "первые две попытки потеряли VAD")
+        try require(attempts[2].vad == nil, "последняя попытка должна обходить неисправную VAD model")
+        let noVADArguments = adapter.commandArguments(
+            audioURL: root.appendingPathComponent("source.wav"),
+            outputBase: root.appendingPathComponent("no-vad.partial"),
+            modelPath: "/models/whisper.bin",
+            language: "ru",
+            vadModelPath: attempts[2].vad,
+            contextHint: "редкий термин",
+            additionalArguments: attempts[2].extra
+        )
+        try require(!noVADArguments.contains("--vad") && !noVADArguments.contains("-vt"), "резервная попытка сохранила VAD параметры")
+        try require(noVADArguments.contains("--prompt") && noVADArguments.contains("редкий термин"), "резервная попытка потеряла контекст пользователя")
+        try require(profile.attempts(vadModelPath: nil).count == 1, "без VAD model не нужна повторная VAD попытка")
         try require(WhisperLongFormProfile.forLanguage("en").overlap == WhisperChunkPlanner.legacyOverlap, "изменение русского профиля затронуло другой язык")
+        let englishAttempts = WhisperLongFormProfile.forLanguage("en").attempts(vadModelPath: located)
+        try require(englishAttempts.count == 3 && englishAttempts[2].vad == nil, "не сохранен старый fallback для другого языка")
         try require(!WhisperChunkPlanner.shouldSegment(duration: 20 * 60), "порог сегментации включён слишком рано")
         try require(WhisperChunkPlanner.shouldSegment(duration: 20 * 60 + 1), "длинное видео не переведено на сегменты")
         let chunks = WhisperChunkPlanner.chunks(duration: 965)
