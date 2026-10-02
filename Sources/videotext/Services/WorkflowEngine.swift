@@ -17,6 +17,7 @@ final class WorkflowViewModel: ObservableObject {
     @Published var subtitleStyle = SubtitleStyleSettings.standard
     @Published var whisperModelPath = ""
     @Published var whisperLanguage = "ru"
+    @Published var transcriptionContext = ""
     @Published var topicGranularity = TopicGranularity.normal
     @Published var artifactLanguage = ArtifactLanguage.ru
     @Published var selectedTopicID = ""
@@ -129,6 +130,7 @@ final class WorkflowViewModel: ObservableObject {
             clearTopicMetadata()
             subtitleStyle = .standard
             whisperLanguage = "ru"
+            transcriptionContext = ""
             blurEnabled = false
             fragmentMuteFillerWords = false
             fragmentAdjustSpeed = false
@@ -169,6 +171,8 @@ final class WorkflowViewModel: ObservableObject {
                 clearTopicMetadata()
             }
             subtitleStyle = manifest.subtitleStyle ?? .standard
+            whisperLanguage = manifest.languageProfile?.effective?.rawValue ?? "ru"
+            transcriptionContext = manifest.transcriptionContext ?? ""
             blurEnabled = false
             fragmentMuteFillerWords = false
             fragmentAdjustSpeed = false
@@ -878,6 +882,7 @@ final class WorkflowViewModel: ObservableObject {
             selectedTopicID: selectedTopicID.isEmpty ? nil : selectedTopicID,
             whisperModelPath: whisperModelPath,
             whisperLanguage: whisperLanguage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "auto" : whisperLanguage,
+            transcriptionContext: WhisperTranscriptionContext.normalized(transcriptionContext),
             topicGranularity: topicGranularity,
             artifactLanguage: artifactLanguage,
             quoteStart: quoteProvenance ? quoteStartText : nil,
@@ -1242,6 +1247,7 @@ final class WorkflowEngine: @unchecked Sendable {
                         manifest.durationSeconds = try await ffmpeg.duration(of: mediaURL)
                     }
                     manifest.subtitleStyle = settings.subtitleStyle
+                    manifest.transcriptionContext = settings.transcriptionContext
                     try store.save(manifest, to: projectURL)
                     log("Манифест сохранён.")
 
@@ -1285,6 +1291,7 @@ final class WorkflowEngine: @unchecked Sendable {
                         mediaDuration: mediaDuration,
                         modelPath: modelPath,
                         language: transcriptionLanguage,
+                        contextHint: settings.transcriptionContext,
                         onProgress: { fraction in
                         tracker.update(operation, fraction: fraction)
                     }, onLog: log)

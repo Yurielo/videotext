@@ -11,13 +11,13 @@ struct WhisperChunk: Equatable {
 enum WhisperChunkPlanner {
     static let segmentationThreshold: TimeInterval = 20 * 60
     static let coreDuration: TimeInterval = 5 * 60
-    static let overlap: TimeInterval = 1.5
+    static let legacyOverlap: TimeInterval = 1.5
 
     static func shouldSegment(duration: TimeInterval) -> Bool {
         duration > segmentationThreshold
     }
 
-    static func chunks(duration: TimeInterval) -> [WhisperChunk] {
+    static func chunks(duration: TimeInterval, overlap: TimeInterval = legacyOverlap) -> [WhisperChunk] {
         guard duration > 0 else { return [] }
         var result: [WhisperChunk] = []
         var coreStart: TimeInterval = 0
@@ -33,6 +33,45 @@ enum WhisperChunkPlanner {
             coreStart = coreEnd
         }
         return result
+    }
+}
+
+/// The long-form profile is deliberately limited to the Russian conversational
+/// pipeline measured by Issue #6. It is not a meeting-specific vocabulary.
+struct WhisperLongFormProfile: Equatable {
+    let identifier: String
+    let overlap: TimeInterval
+    let primaryArguments: [String]
+    let recoveryArguments: [String]
+
+    static func forLanguage(_ language: String) -> WhisperLongFormProfile {
+        guard language.lowercased() == "ru" else {
+            return WhisperLongFormProfile(
+                identifier: "legacy-long-form-v1",
+                overlap: WhisperChunkPlanner.legacyOverlap,
+                primaryArguments: ["-mc", "0"],
+                recoveryArguments: ["-mc", "0", "-nf"]
+            )
+        }
+
+        // These are decoder and Silero VAD controls from the successful
+        // SeminarText comparison. They do not alter the spoken text.
+        return WhisperLongFormProfile(
+            identifier: "russian-conversation-v1",
+            overlap: 0,
+            primaryArguments: [
+                "-t", "8", "-bo", "5", "-bs", "5",
+                "-vt", "0.55", "-vspd", "250", "-vsd", "550",
+                "-vp", "200", "-vo", "0.10", "-nth", "0.60",
+                "-sns", "-ml", "80", "-sow"
+            ],
+            recoveryArguments: [
+                "-t", "8", "-bo", "3", "-bs", "3",
+                "-vt", "0.68", "-vspd", "250", "-vsd", "350",
+                "-vp", "200", "-vo", "0.10", "-nth", "0.60",
+                "-sns", "-ml", "80", "-sow"
+            ]
+        )
     }
 }
 
@@ -55,13 +94,15 @@ struct SegmentedWhisperTranscriber {
         mediaDuration: TimeInterval,
         modelPath: String,
         language: String,
+        contextHint: String? = nil,
         onProgress: @escaping (Double) -> Void,
         onLog: @escaping (String) -> Void
     ) async throws -> TranscriptionResult {
         guard let whisper = runner.resolve("whisper-cli"), let ffmpeg = runner.resolve("ffmpeg") else {
             throw WorkflowError.missingTool("whisper-cli/ffmpeg")
         }
-        let chunks = WhisperChunkPlanner.chunks(duration: mediaDuration)
+        let profile = WhisperLongFormProfile.forLanguage(language)
+        let chunks = WhisperChunkPlanner.chunks(duration: mediaDuration, overlap: profile.overlap)
         guard !chunks.isEmpty else { throw WorkflowError.processFailed("Не удалось подготовить сегменты расшифровки.") }
         let layout = ProjectLayout(root: projectURL)
         let cache = try cacheDirectory(
@@ -69,10 +110,12 @@ struct SegmentedWhisperTranscriber {
             mediaURL: mediaURL,
             modelPath: modelPath,
             language: language,
-            mediaDuration: mediaDuration
+            mediaDuration: mediaDuration,
+            profile: profile,
+            contextHint: contextHint
         )
         let vadModel = vadModelLocator.bestModelPath()
-        onLog("Длинное видео: распознавание разделено на \(chunks.count) независимых сегментов по 5 минут.")
+        onLog("Длинное видео: распознавание разделено на \(chunks.count) независимых сегментов по 5 минут (профиль \(profile.identifier)).")
         if let vadModel { onLog("Silero VAD: \(vadModel)") }
 
         var outputs: [WhisperChunkOutput] = []
@@ -85,9 +128,11 @@ struct SegmentedWhisperTranscriber {
                 projectURL: projectURL,
                 modelPath: modelPath,
                 language: language,
+                contextHint: contextHint,
                 whisper: whisper,
                 ffmpeg: ffmpeg,
                 vadModelPath: vadModel,
+                profile: profile,
                 chunkCount: chunks.count,
                 onProgress: onProgress,
                 onLog: onLog
@@ -127,9 +172,11 @@ struct SegmentedWhisperTranscriber {
         projectURL: URL,
         modelPath: String,
         language: String,
+        contextHint: String?,
         whisper: String,
         ffmpeg: String,
         vadModelPath: String?,
+        profile: WhisperLongFormProfile,
         chunkCount: Int,
         onProgress: @escaping (Double) -> Void,
         onLog: @escaping (String) -> Void
@@ -155,12 +202,15 @@ struct SegmentedWhisperTranscriber {
             throw WorkflowError.processFailed("Не удалось извлечь аудио сегмента \(chunk.index + 1): \(extraction.stderr)")
         }
 
-        var attempts: [(name: String, vad: String?, extra: [String])] = [
-            ("VAD и сброшенный контекст", vadModelPath, ["-mc", "0"]),
-            ("VAD без температурного fallback", vadModelPath, ["-mc", "0", "-nf"]),
-            ("стандартная сегментация без контекста", nil, ["-mc", "0", "-nf"])
-        ]
-        if vadModelPath == nil { attempts.removeFirst(2) }
+        var attempts: [(name: String, vad: String?, extra: [String])] = []
+        if let vadModelPath {
+            attempts = [
+                ("VAD long-form", vadModelPath, profile.primaryArguments),
+                ("VAD long-form recovery", vadModelPath, profile.recoveryArguments)
+            ]
+        } else {
+            attempts = [("стандартная сегментация", nil, profile.primaryArguments)]
+        }
         var failures: [String] = []
         for (attemptIndex, attempt) in attempts.enumerated() {
             try Task.checkCancellation()
@@ -169,14 +219,15 @@ struct SegmentedWhisperTranscriber {
             let attemptJSON = outputBase.appendingPathExtension("json")
             try? FileManager.default.removeItem(at: attemptSRT)
             try? FileManager.default.removeItem(at: attemptJSON)
-            var arguments = WhisperCLITranscriber(runner: runner, vadModelLocator: vadModelLocator).commandArguments(
+            let arguments = WhisperCLITranscriber(runner: runner, vadModelLocator: vadModelLocator).commandArguments(
                 audioURL: audioPart,
                 outputBase: outputBase,
                 modelPath: modelPath,
                 language: language,
-                vadModelPath: attempt.vad
+                vadModelPath: attempt.vad,
+                contextHint: contextHint,
+                additionalArguments: attempt.extra
             )
-            arguments += attempt.extra
             var parser = WhisperProgressParser()
             let result = try await runner.run(whisper, arguments, currentDirectory: projectURL) { _, text in
                 guard let fraction = parser.consume(text) else { return }
@@ -255,7 +306,9 @@ struct SegmentedWhisperTranscriber {
         mediaURL: URL,
         modelPath: String,
         language: String,
-        mediaDuration: TimeInterval
+        mediaDuration: TimeInterval,
+        profile: WhisperLongFormProfile,
+        contextHint: String?
     ) throws -> URL {
         let attributes = try FileManager.default.attributesOfItem(atPath: mediaURL.path)
         let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
@@ -264,7 +317,11 @@ struct SegmentedWhisperTranscriber {
         let modelSize = (modelAttributes?[.size] as? NSNumber)?.int64Value ?? 0
         let modelModified = (modelAttributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
         let identity = StableTopicHash.string(
-            "segmented-whisper-v1|\(mediaURL.standardizedFileURL.path)|\(size)|\(modified)|" +
+            "segmented-whisper-v2|profile=\(profile.identifier)|overlap=\(profile.overlap)|" +
+            "primary=\(profile.primaryArguments.joined(separator: ","))|" +
+            "recovery=\(profile.recoveryArguments.joined(separator: ","))|" +
+            "context=\(WhisperTranscriptionContext.normalized(contextHint) ?? "")|" +
+            "\(mediaURL.standardizedFileURL.path)|\(size)|\(modified)|" +
             "\(modelPath)|\(modelSize)|\(modelModified)|\(language)|\(mediaDuration)"
         )
         let url = layout.supportDirectory
