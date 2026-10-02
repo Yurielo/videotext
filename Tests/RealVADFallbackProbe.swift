@@ -82,6 +82,17 @@ struct RealVADFallbackProbe {
             throw WorkflowError.processFailed("Invalid cached JSON was reused")
         }
 
+        let invalidSegments: [String: Any] = ["transcription": [[:]]]
+        let invalidSegmentsData = try JSONSerialization.data(withJSONObject: invalidSegments)
+        try invalidSegmentsData.write(
+            to: cacheDirectories[0].appendingPathComponent("chunk-0001.json"), options: .atomic
+        )
+        let repairedSegments = try await run(context: "Проверка разговорной речи")
+        guard repairedSegments.contains(where: { $0.contains("standard segmentation after VAD failure") }),
+              !repairedSegments.contains(where: { $0.contains("восстановлен из проверенного кэша") }) else {
+            throw WorkflowError.processFailed("Invalid cached transcription segment was reused")
+        }
+
         let changed = try await run(context: "Другая предметная область")
         guard changed.contains(where: { $0.contains("standard segmentation after VAD failure") }),
               !changed.contains(where: { $0.contains("восстановлен из проверенного кэша") }) else {
@@ -96,6 +107,6 @@ struct RealVADFallbackProbe {
             throw WorkflowError.processFailed("Repaired VAD model did not invalidate fallback cache")
         }
 
-        print("REAL_VAD_FALLBACK_PASS duration=\(duration) fallback=PASS cache_reuse=PASS invalid_json_recovery=PASS context_invalidation=PASS vad_repair_invalidation=PASS")
+        print("REAL_VAD_FALLBACK_PASS duration=\(duration) fallback=PASS cache_reuse=PASS invalid_json_recovery=PASS invalid_segment_recovery=PASS context_invalidation=PASS vad_repair_invalidation=PASS")
     }
 }

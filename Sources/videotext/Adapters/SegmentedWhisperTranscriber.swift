@@ -312,7 +312,13 @@ struct SegmentedWhisperTranscriber {
               let cues = try? srt.load(from: srtURL),
               let data = try? Data(contentsOf: jsonURL),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              root["transcription"] is [[String: Any]] else { return false }
+              let segments = root["transcription"] as? [[String: Any]],
+              !segments.isEmpty,
+              segments.allSatisfy({ segment in
+                  guard let range = localRange(segment), range.start >= 0, range.end > range.start,
+                        let text = segment["text"] as? String else { return false }
+                  return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+              }) else { return false }
         return quality.recoveryIssue(cues: cues) == nil
     }
 
