@@ -1,9 +1,9 @@
 import Foundation
 
 struct OllamaTopicProvider: TopicAIProvider {
-    static let chatTimeoutSeconds: TimeInterval = 120
+    static let chatTimeoutSeconds: TimeInterval = 360
     let embeddingModel = "embeddinggemma:latest"
-    let primaryLanguageModel = "qwen2.5:7b"
+    let primaryLanguageModel = "qwen3:8b"
     let fallbackLanguageModel = "gemma3:4b"
     private let baseURL = URL(string: "http://127.0.0.1:11434")!
 
@@ -159,6 +159,7 @@ struct OllamaTopicProvider: TopicAIProvider {
         let payload = ChatRequest(
             model: model,
             stream: false,
+            think: false,
             format: schema.node,
             messages: [ChatMessage(role: "user", content: prompt)],
             options: ChatOptions(temperature: 0.05, numPredict: 1_200)
@@ -232,6 +233,8 @@ struct OllamaTopicProvider: TopicAIProvider {
     private struct ChatRequest: Encodable {
         var model: String
         var stream: Bool
+        // qwen3 otherwise may spend the response budget in hidden reasoning and leave content empty.
+        var think: Bool
         var format: TopicSchemaNode
         var messages: [ChatMessage]
         var options: ChatOptions

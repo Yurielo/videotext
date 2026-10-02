@@ -65,6 +65,34 @@ struct OllamaTopicProbe {
                 print("BOUNDARY PASS: \(model)")
             }
 
+            let longCues = (1...30).map { id in
+                SubtitleCue(
+                    id: id,
+                    start: Double(id - 1) * 20,
+                    end: Double(id) * 20,
+                    text: "Рассматривается содержательный переход \(id): сначала объясняется практический пример, затем уточняются его причины, последствия и связь с последующим разделом занятия."
+                )
+            }
+            let longBoundaryRequest = TopicBoundaryReviewRequest(
+                id: "ollama-long-boundary",
+                granularity: .normal,
+                cues: longCues,
+                candidates: [6, 10, 14, 18, 22, 26].map { id in
+                    TopicBoundaryCandidate(afterCueId: id, semanticChange: 0.76, lexicalChange: 0.81, pauseSeconds: 0.2, score: 0.69)
+                },
+                focusAfterCueIds: [6, 10, 14, 18, 22, 26]
+            )
+            let longBoundary = try await provider.reviewBoundaries(
+                longBoundaryRequest,
+                model: provider.primaryLanguageModel,
+                correction: nil
+            )
+            let longIssues = TopicValidator().boundaryReviewIssues(longBoundary, request: longBoundaryRequest)
+            guard longIssues.isEmpty else {
+                throw OllamaProbeError.failed("qwen3:8b не прошла длинное окно границ: \(longIssues.joined(separator: " "))")
+            }
+            print("LONG BOUNDARY PASS: \(provider.primaryLanguageModel), границ: \(longBoundary.decisions.count)")
+
             var selectedModel: String?
             for model in models where selectedModel == nil {
                 var correction: String?

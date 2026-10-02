@@ -1,0 +1,29 @@
+name: Topic Regression
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  topic-regression:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate development baseline
+        run: scripts/test_baseline_guard.sh
+      - name: Validate Whisper VAD and long-form recovery
+        run: scripts/test_whisper_vad.sh
+      - name: Validate transcription quality
+        run: scripts/test_transcription_quality.sh
+      - name: Validate project schema
+        run: scripts/test_project_schema.sh
+      - name: Validate human review
+        run: scripts/test_human_review.sh
+      - name: Validate topic analysis
+        run: scripts/test_topics.sh
+      - name: Validate topic review matrix
+        run: scripts/test_topic_matrix.sh

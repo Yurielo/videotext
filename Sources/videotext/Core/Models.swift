@@ -2,8 +2,8 @@ import Foundation
 
 enum BuildInfo {
     static let name = "videotext"
-    static let version = "0.6.4"
-    static let build = "2026.09.09.1"
+    static let version = "0.6.8"
+    static let build = "2026.09.25.1"
 }
 
 enum WorkflowOperation: String, CaseIterable, Identifiable, Codable {
@@ -457,40 +457,20 @@ enum TopicGranularity: String, CaseIterable, Identifiable, Codable, Equatable {
     }
 }
 
-enum TopicAnalysisMode: String, CaseIterable, Identifiable, Codable {
-    case hybrid
-    case draft
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .hybrid: return "Качественный"
-        case .draft: return "Черновой"
-        }
-    }
-}
-
 enum TopicAlgorithmIdentity {
     static let schemaVersion = 2
     static let hybridAdapter = "HybridTopicAdapter"
-    static let hybridVersion = "hybrid-cue-review-v9"
-    static let draftAdapter = "DraftTopicAdapter"
-    static let draftVersion = "draft-keyword-v2"
+    static let hybridVersion = "hybrid-cue-review-v10"
 
     static func recognizes(_ file: TopicsFile) -> Bool {
-        guard file.schemaVersion == schemaVersion else { return false }
-        switch file.status {
-        case .ready:
-            return file.adapter == hybridAdapter && file.algorithmVersion == hybridVersion
-        case .draft:
-            return file.adapter == draftAdapter && file.algorithmVersion == draftVersion
-        }
+        file.schemaVersion == schemaVersion
+            && file.status == .ready
+            && file.adapter == hybridAdapter
+            && file.algorithmVersion == hybridVersion
     }
 
     static func isCurrent(
         _ file: TopicsFile,
-        mode: TopicAnalysisMode,
         granularity: TopicGranularity,
         sourceSignature: String
     ) -> Bool {
@@ -498,10 +478,7 @@ enum TopicAlgorithmIdentity {
               file.granularity == granularity,
               !sourceSignature.isEmpty,
               file.sourceSignature == sourceSignature else { return false }
-        switch mode {
-        case .hybrid: return file.status == .ready
-        case .draft: return file.status == .draft
-        }
+        return file.status == .ready
     }
 }
 
@@ -649,7 +626,6 @@ struct WorkflowSettings {
     var whisperLanguage: String
     var transcriptionContext: String? = nil
     var topicGranularity: TopicGranularity = .normal
-    var topicAnalysisMode: TopicAnalysisMode = .hybrid
     var artifactLanguage: ArtifactLanguage? = nil
     var quoteStart: String? = nil
     var quoteEnd: String? = nil
@@ -731,7 +707,7 @@ enum WorkflowError: LocalizedError {
         case .insufficientDiskSpace: return "Недостаточно свободного места для обработки выбранного файла."
         case .cannotOpenProjectFolder: return "Не удалось открыть папку проекта в Finder."
         case .processFailed(let message): return message
-        case .topicServiceUnavailable(let message): return "Качественный тематический анализ недоступен: \(message) Выберите режим «Черновой», если нужен результат без Ollama."
+        case .topicServiceUnavailable(let message): return "Качественный тематический анализ недоступен: \(message)"
         case .invalidTopics(let message): return "Тематический таймкодинг не прошёл проверку: \(message)"
         case .unsupportedProjectSchema(let version): return "Версия проекта \(version) новее поддерживаемой схемы \(ProjectSchema.currentVersion). Обновите videotext и не изменяйте этот проект старой версией приложения."
         }
