@@ -94,14 +94,13 @@ struct AudioEnhancementAdapter {
         let graph = "highpass=f=\(highPass),afftdn=nf=\(noiseFloor):tn=1,loudnorm=I=-16:TP=-1.5:LRA=11"
         try FileManager.default.createDirectory(at: outputAudioURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: outputVideoURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let separatorOutput = FileManager.default.temporaryDirectory
-            .appendingPathComponent("videotext-uvr-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: separatorOutput, withIntermediateDirectories: true)
+        let workspace = try OwnedTemporaryWorkspace()
+        defer { workspace.close() }
+        let separatorOutput = workspace.url
         let dereverbedAudio = separatorOutput.appendingPathComponent("dereverbed.wav")
         let partialAudio = partialURL(for: outputAudioURL)
         let partialVideo = partialURL(for: outputVideoURL)
         defer {
-            try? FileManager.default.removeItem(at: separatorOutput)
             try? FileManager.default.removeItem(at: partialAudio)
             try? FileManager.default.removeItem(at: partialVideo)
         }

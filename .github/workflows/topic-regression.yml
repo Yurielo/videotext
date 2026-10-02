@@ -8,11 +8,14 @@ on:
 
 jobs:
   topic-regression:
+    name: Quality Gate
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Quality Gate — owned TMP lifecycle
+        run: scripts/test_owned_tmp.sh
       - name: Validate development baseline
         run: scripts/test_baseline_guard.sh
       - name: Validate Whisper VAD and long-form recovery

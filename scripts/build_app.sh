@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DEFAULT_APP="${TMPDIR:-/private/tmp}/videotext-build/videotext.app"
+DEFAULT_APP="${ROOT}/../work/videotext-build/videotext.app"
 APP="${VIDEOTEXT_APP_PATH:-${DEFAULT_APP}}"
 CONTENTS="${APP}/Contents"
 MACOS="${CONTENTS}/MacOS"

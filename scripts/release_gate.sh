@@ -30,7 +30,7 @@ fi
 
 STAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
 RUN_DIR="$WORK_ROOT/release-gate/$STAMP"
-CANDIDATE_ROOT="${TMPDIR:-/private/tmp}/videotext-release-gate/$STAMP"
+CANDIDATE_ROOT="${VIDEOTEXT_CANDIDATE_ROOT:-${RUN_DIR}/candidate}"
 CANDIDATE="$CANDIDATE_ROOT/videotext.app"
 EVIDENCE="$RUN_DIR/evidence.env"
 mkdir -p "$RUN_DIR" "$CANDIDATE_ROOT" "$OUTPUT_ROOT"

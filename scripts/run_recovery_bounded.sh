@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
+# The supervisor owns all disposable scratch, including child tool TMPDIR.
+if [[ "${VIDEOTEXT_TMP_RUNNER:-}" != "1" ]]; then
+  exec python3 "$(cd "$(dirname "$0")" && pwd)/owned_tmp.py" /bin/bash "$0" "$@"
+fi
+
 if [[ $# -lt 2 || ! "$1" =~ ^[1-9][0-9]*$ ]]; then
   printf 'PROJECT_RECOVERY_FAIL: watchdog ожидает <секунды> <команда> [аргументы].\n' >&2
   exit 2

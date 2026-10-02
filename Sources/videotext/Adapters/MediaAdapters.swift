@@ -303,10 +303,10 @@ struct FFmpegAdapter {
         guard let ffmpeg = await ffmpegWithSubtitlesFilter() else {
             throw WorkflowError.processFailed("Не найден FFmpeg с фильтром subtitles (libass). Установите или выберите сборку ffmpeg-full.")
         }
-        let temporarySRT = FileManager.default.temporaryDirectory
-            .appendingPathComponent("videotext-subtitles-\(UUID().uuidString).srt")
+        let workspace = try OwnedTemporaryWorkspace()
+        defer { workspace.close() }
+        let temporarySRT = workspace.url.appendingPathComponent("subtitles.srt")
         try Data(contentsOf: srtURL).write(to: temporarySRT, options: .atomic)
-        defer { try? FileManager.default.removeItem(at: temporarySRT) }
         try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let partial = partialURL(for: outputURL)
         try? FileManager.default.removeItem(at: partial)
@@ -568,10 +568,12 @@ struct FFmpegAdapter {
         let watermarkedLabel = srtURL == nil ? "[outv]" : "[watermarked]"
         graphParts.append("\(baseLabel)[wm]overlay=x='\(xExpression)':y='\(yExpression)'\(enable)\(watermarkedLabel)")
 
+        let watermarkWorkspace = try OwnedTemporaryWorkspace()
+        defer { watermarkWorkspace.close() }
         var temporarySRT: URL?
         if let srtURL {
             guard FileManager.default.fileExists(atPath: srtURL.path) else { throw WorkflowError.missingFullSRT }
-            let copy = FileManager.default.temporaryDirectory.appendingPathComponent("videotext-watermark-subtitles-\(UUID().uuidString).srt")
+            let copy = watermarkWorkspace.url.appendingPathComponent("subtitles.srt")
             try Data(contentsOf: srtURL).write(to: copy, options: .atomic)
             temporarySRT = copy
             graphParts.append("[watermarked]subtitles=filename='\(copy.path)':force_style='\(assStyle(subtitleStyle))'[outv]")
