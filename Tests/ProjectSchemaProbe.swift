@@ -9,7 +9,7 @@ struct ProjectSchemaProbe {
         }
 
         let fileManager = FileManager.default
-        let temporaryRoot = fileManager.temporaryDirectory
+        let temporaryRoot = (URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? fileManager.temporaryDirectory.path, isDirectory: true))
             .appendingPathComponent("videotext-schema-probe-\(UUID().uuidString)", isDirectory: true)
         defer { try? fileManager.removeItem(at: temporaryRoot) }
 

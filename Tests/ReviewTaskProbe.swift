@@ -4,7 +4,7 @@ import Foundation
 struct ReviewTaskProbe {
     static func main() throws {
         let fileManager = FileManager.default
-        let root = fileManager.temporaryDirectory.appendingPathComponent("videotext-review-probe-\(UUID().uuidString)", isDirectory: true)
+        let root = (URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? fileManager.temporaryDirectory.path, isDirectory: true)).appendingPathComponent("videotext-review-probe-\(UUID().uuidString)", isDirectory: true)
         defer { try? fileManager.removeItem(at: root) }
         let source = root.appendingPathComponent("source.mp4")
         let project = root.appendingPathComponent("project", isDirectory: true)

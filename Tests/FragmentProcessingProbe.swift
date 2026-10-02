@@ -4,7 +4,7 @@ import Foundation
 struct FragmentProcessingProbe {
     static func main() async throws {
         let fileManager = FileManager.default
-        let root = fileManager.temporaryDirectory
+        let root = (URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? fileManager.temporaryDirectory.path, isDirectory: true))
             .appendingPathComponent("videotext-fragment-processing-\(UUID().uuidString)", isDirectory: true)
         let projectURL = root.appendingPathComponent("project", isDirectory: true)
         let sourceURL = root.appendingPathComponent("source.mp4")

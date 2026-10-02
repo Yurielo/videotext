@@ -37,6 +37,20 @@ def alive(pid):
         return True
 
 
+def group_alive(group):
+    if group is None:
+        return False
+    if not isinstance(group, int) or group <= 0:
+        return True
+    try:
+        os.killpg(group, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
 def foreign_open(path):
     scanner = shutil.which('lsof') or '/usr/sbin/lsof'
     try:
@@ -56,7 +70,7 @@ def recover(base):
             marker = json.loads((path / 'owner.json').read_text())
             if (marker.get('schema') != 1 or marker.get('id') != path.name or
                     marker.get('path') != str(path) or list(identity(path)) != marker.get('identity') or
-                    alive(marker.get('pid'))):
+                    alive(marker.get('pid')) or group_alive(marker.get('child_group'))):
                 continue
             with os.fdopen(os.open(path / 'lease', os.O_RDONLY | os.O_NOFOLLOW), 'r') as lease:
                 fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -118,7 +132,13 @@ def supervise(command):
             env['VIDEOTEXT_EPHEMERAL_WORK_ROOT'] = str(evidence)
         for signum in (signal.SIGINT, signal.SIGTERM):
             old_handlers[signum] = signal.signal(signum, interrupted)
-        child = subprocess.Popen(command, env=env, start_new_session=True)
+        child = subprocess.Popen(command, env=env, start_new_session=True,
+                                 pass_fds=(workspace.lease.fileno(),))
+        workspace.marker['child_group'] = child.pid
+        marker = workspace.path / 'owner.json'
+        pending = workspace.path / 'owner.pending'
+        pending.write_text(json.dumps(workspace.marker))
+        pending.replace(marker)
         while True:
             try:
                 code = child.wait(timeout=0.1)

@@ -4,7 +4,7 @@ import Foundation
 struct TopicMatrixProbe {
     static func main() throws {
         let fm = FileManager.default
-        let root = fm.temporaryDirectory.appendingPathComponent("videotext-topic-matrix-\(UUID().uuidString)", isDirectory: true)
+        let root = (URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? fm.temporaryDirectory.path, isDirectory: true)).appendingPathComponent("videotext-topic-matrix-\(UUID().uuidString)", isDirectory: true)
         defer { try? fm.removeItem(at: root) }
         try ProjectLayout(root: root).createDirectories()
         let media = root.appendingPathComponent("source.mp4")
