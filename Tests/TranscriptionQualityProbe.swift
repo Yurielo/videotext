@@ -100,6 +100,20 @@ struct TranscriptionQualityProbe {
         )
         try require(progressiveLoop.report.status == .invalid, "длинное прогрессивное дублирование принято как пригодная расшифровка")
         try require(progressiveLoop.recoveryIssue?.kind == .progressiveRepetition, "прогрессивное дублирование не требует повторной расшифровки")
+        let naturalRollCall = service.assess(
+            cues: [
+                SubtitleCue(id: 1, start: 0, end: 1, text: "Я есть."),
+                SubtitleCue(id: 2, start: 8, end: 9, text: "Спасибо."),
+                SubtitleCue(id: 3, start: 18, end: 19, text: "Я есть."),
+                SubtitleCue(id: 4, start: 28, end: 29, text: "Спасибо."),
+                SubtitleCue(id: 5, start: 38, end: 39, text: "Я есть.")
+            ],
+            skippedZeroDurationCount: 0,
+            whisperJSONURL: nil,
+            language: .ru,
+            transcriptRevisionID: "natural-roll-call"
+        )
+        try require(naturalRollCall.recoveryIssue == nil, "естественная перекличка ошибочно принята за ASR-петлю")
         try require(assessment.report.warnings.contains { $0.contains("Pipeline продолжен") }, "нет неблокирующего предупреждения")
         try require(assessment.html.contains("class=\"needs-review\""), "нет красной review-разметки")
         try require(assessment.html.contains("Low confidence phrase."), "текст потерян в HTML")

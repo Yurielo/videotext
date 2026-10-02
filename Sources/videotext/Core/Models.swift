@@ -314,6 +314,9 @@ struct ProjectManifest: Codable {
     var fillerMuteRecords: [FillerMuteRecord]? = nil
     var audioEnhancements: [AudioEnhancementRecord]? = nil
     var dubbingRecords: [DubbingRecord]? = nil
+    // Optional, user-provided recognition hint. It is never populated from a
+    // project transcript or from a product-specific vocabulary.
+    var transcriptionContext: String? = nil
 }
 
 struct ProjectHistoryEntry: Codable, Identifiable, Equatable {
@@ -644,6 +647,7 @@ struct WorkflowSettings {
     var selectedTopicID: String?
     var whisperModelPath: String
     var whisperLanguage: String
+    var transcriptionContext: String? = nil
     var topicGranularity: TopicGranularity = .normal
     var topicAnalysisMode: TopicAnalysisMode = .hybrid
     var artifactLanguage: ArtifactLanguage? = nil

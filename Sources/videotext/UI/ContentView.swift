@@ -327,6 +327,8 @@ struct ContentView: View {
                             Text("EN").tag("en")
                         }
                         .pickerStyle(.segmented)
+                        TextField("Контекст и термины (необязательно)", text: $model.transcriptionContext)
+                            .help("Кратко укажите предметную область или редкие термины. Это подсказка модели, а не текст для расшифровки.")
                         Toggle("Human Review исходной расшифровки", isOn: $model.sourceHumanReviewEnabled)
                             .disabled(model.isRunning || model.humanReviewCheckpoint != nil)
                         Toggle("Анализировать слова-паразиты до Human Review", isOn: $model.fillerAnalysisBeforeReview)

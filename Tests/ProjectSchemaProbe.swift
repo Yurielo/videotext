@@ -42,6 +42,7 @@ struct ProjectSchemaProbe {
         try require(migrated.topicRevisions?.isEmpty == true, "topic revisions не инициализированы")
         try require(migrated.topicReviewState?.enabled == true, "Human Review тем не включён по умолчанию")
         try require(migrated.topicReviewState?.pendingCheckpoint == nil, "legacy migration создала ложный topic checkpoint")
+        try require(migrated.transcriptionContext == nil, "legacy manifest получил неявный контекст распознавания")
         try require(SubtitleStyleSettings.standard.fontSize == 20, "размер субтитров по умолчанию должен быть 20")
         let defaultSettings = WorkflowSettings(
             mediaURL: nil,
@@ -62,7 +63,11 @@ struct ProjectSchemaProbe {
         try require(!defaultSettings.fragmentMuteFillerWords, "mute итогового фрагмента должен подключаться явно")
         try require(!defaultSettings.fragmentAdjustSpeed, "скорость итогового фрагмента должна подключаться явно")
         try require(!defaultSettings.fragmentApplyBlur, "blur итогового фрагмента должен быть выключен по умолчанию")
-        try require(ProjectSchema.currentVersion == 7, "ожидалась schema v7 для рецепта фрагмента")
+        try require(ProjectSchema.currentVersion == 8, "ожидалась schema v8 для контекста распознавания")
+        try require(defaultSettings.transcriptionContext == nil, "контекст распознавания должен быть пустым по умолчанию")
+        try store.mutate(projectURL) { $0.transcriptionContext = "редкий термин" }
+        let persistedContext = try store.load(from: projectURL).transcriptionContext
+        try require(persistedContext == "редкий термин", "контекст распознавания не сохраняется в manifest")
         let engine = WorkflowEngine(store: store)
         let planned = engine.expanded([.topicTimecoding], includeFillerAnalysisBeforeReview: true)
         try require(planned.contains(.detectFillerWords), "pre-review анализ слов-паразитов не добавлен в план")
