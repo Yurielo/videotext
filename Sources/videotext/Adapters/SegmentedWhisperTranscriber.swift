@@ -308,7 +308,11 @@ struct SegmentedWhisperTranscriber {
     }
 
     private func validCachedChunk(srtURL: URL, jsonURL: URL) -> Bool {
-        guard nonempty(srtURL), nonempty(jsonURL), let cues = try? srt.load(from: srtURL) else { return false }
+        guard nonempty(srtURL), nonempty(jsonURL),
+              let cues = try? srt.load(from: srtURL),
+              let data = try? Data(contentsOf: jsonURL),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              root["transcription"] is [[String: Any]] else { return false }
         return quality.recoveryIssue(cues: cues) == nil
     }
 

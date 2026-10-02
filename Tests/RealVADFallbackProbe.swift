@@ -65,6 +65,23 @@ struct RealVADFallbackProbe {
         guard repeated.contains(where: { $0.contains("восстановлен из проверенного кэша") }) else {
             throw WorkflowError.processFailed("Equivalent normalized context did not reuse cache")
         }
+
+        let cacheRoot = layout.supportDirectory.appendingPathComponent("Transcription cache", isDirectory: true)
+        let cacheDirectories = try FileManager.default.contentsOfDirectory(
+            at: cacheRoot, includingPropertiesForKeys: nil
+        )
+        guard cacheDirectories.count == 1 else {
+            throw WorkflowError.processFailed("Expected one chunk cache before context change")
+        }
+        try Data("{invalid-json".utf8).write(
+            to: cacheDirectories[0].appendingPathComponent("chunk-0001.json"), options: .atomic
+        )
+        let repairedJSON = try await run(context: "Проверка разговорной речи")
+        guard repairedJSON.contains(where: { $0.contains("standard segmentation after VAD failure") }),
+              !repairedJSON.contains(where: { $0.contains("восстановлен из проверенного кэша") }) else {
+            throw WorkflowError.processFailed("Invalid cached JSON was reused")
+        }
+
         let changed = try await run(context: "Другая предметная область")
         guard changed.contains(where: { $0.contains("standard segmentation after VAD failure") }),
               !changed.contains(where: { $0.contains("восстановлен из проверенного кэша") }) else {
@@ -79,6 +96,6 @@ struct RealVADFallbackProbe {
             throw WorkflowError.processFailed("Repaired VAD model did not invalidate fallback cache")
         }
 
-        print("REAL_VAD_FALLBACK_PASS duration=\(duration) fallback=PASS cache_reuse=PASS context_invalidation=PASS vad_repair_invalidation=PASS")
+        print("REAL_VAD_FALLBACK_PASS duration=\(duration) fallback=PASS cache_reuse=PASS invalid_json_recovery=PASS context_invalidation=PASS vad_repair_invalidation=PASS")
     }
 }
