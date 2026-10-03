@@ -114,7 +114,7 @@ class OwnedTMPTests(unittest.TestCase):
             (path / 'owner.json').write_text(json.dumps(value))
         owned.recover(base)
         self.assertEqual(4, len(list(base.iterdir())))
-        self.assertEqual(0, owned.supervise(['/bin/true']))
+        self.assertEqual(0, owned.supervise([sys.executable, '-c', 'pass']))
         self.assertEqual(4, len(list(base.iterdir())))
 
     def test_non_object_nested_receipts_are_busy(self):
