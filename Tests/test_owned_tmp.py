@@ -105,6 +105,26 @@ class OwnedTMPTests(unittest.TestCase):
         workspace.close()
         self.assertTrue(workspace.path.exists())
 
+    def test_non_object_unknown_receipts_retain_without_poisoning_startup(self):
+        base = owned.namespace()
+        base.mkdir(mode=0o700)
+        for index, value in enumerate([[], None, 7, 'unknown']):
+            path = base / f'unknown-{index}'
+            path.mkdir(mode=0o700)
+            (path / 'owner.json').write_text(json.dumps(value))
+        owned.recover(base)
+        self.assertEqual(4, len(list(base.iterdir())))
+        self.assertEqual(0, owned.supervise(['/bin/true']))
+        self.assertEqual(4, len(list(base.iterdir())))
+
+    def test_non_object_nested_receipts_are_busy(self):
+        root = Path(self.parent.name) / 'scratch'
+        child = root / f'videotext-owned-v1-{os.getuid()}' / 'unknown'
+        child.mkdir(parents=True, mode=0o700)
+        for value in [[], None, 7, 'unknown']:
+            (child / 'owner.json').write_text(json.dumps(value))
+            self.assertTrue(owned.nested_native_live(root))
+
     def test_stale_and_foreign_open(self):
         workspace = owned.Workspace()
         workspace.lease.close()

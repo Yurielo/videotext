@@ -63,6 +63,8 @@ def nested_native_live(path):
         for child in namespace_path.iterdir():
             try:
                 record = json.loads((child / 'owner.json').read_text())
+                if not isinstance(record, dict):
+                    return True
                 if (record.get('schema') != 2 or record.get('id') != child.name or
                         record.get('path') != str(child.resolve()) or
                         list(identity(child)) != [record.get('device'), record.get('inode')]):
@@ -93,6 +95,8 @@ def recover(base):
     for path in base.iterdir():
         try:
             marker = json.loads((path / 'owner.json').read_text())
+            if not isinstance(marker, dict):
+                continue
             if (marker.get('schema') != 2 or marker.get('id') != path.name or
                     marker.get('path') != str(path) or list(identity(path)) != marker.get('identity') or
                     marker.get('launch_pending') is not False or alive(marker.get('pid')) or group_alive(marker.get('child_group'))):
