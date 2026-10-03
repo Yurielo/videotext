@@ -25,7 +25,7 @@ struct ToolRunnerProbe {
             guard let ffmpeg = runner.resolve("ffmpeg") else {
                 throw ToolRunnerProbeError.failed("ffmpeg не найден")
             }
-            let output = FileManager.default.temporaryDirectory
+            let output = (URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? FileManager.default.temporaryDirectory.path, isDirectory: true))
                 .appendingPathComponent("videotext-tool-runner-\(UUID().uuidString).wav")
             defer { try? FileManager.default.removeItem(at: output) }
             let result = try await runner.run(ffmpeg, [

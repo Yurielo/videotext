@@ -4,7 +4,7 @@ import Foundation
 struct HumanReviewProbe {
     static func main() throws {
         let fileManager = FileManager.default
-        let root = fileManager.temporaryDirectory.appendingPathComponent("videotext-human-review-\(UUID().uuidString)", isDirectory: true)
+        let root = (URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? fileManager.temporaryDirectory.path, isDirectory: true)).appendingPathComponent("videotext-human-review-\(UUID().uuidString)", isDirectory: true)
         defer { try? fileManager.removeItem(at: root) }
         let media = root.appendingPathComponent("source.mp4")
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)

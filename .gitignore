@@ -29,3 +29,7 @@ models/
 .env.*
 *.pem
 *.key
+
+# Python test supervisor bytecode
+__pycache__/
+*.pyc

@@ -9,7 +9,7 @@ struct RealVADFallbackProbe {
 
         let source = URL(fileURLWithPath: CommandLine.arguments[1])
         let model = CommandLine.arguments[2]
-        let root = FileManager.default.temporaryDirectory
+        let root = (URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? FileManager.default.temporaryDirectory.path, isDirectory: true))
             .appendingPathComponent("videotext-real-vad-fallback-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }

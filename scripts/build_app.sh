@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Contain compiler/tool scratch; explicit application/project/evidence outputs persist.
+if [[ "${VIDEOTEXT_TMP_RUNNER:-}" != "1" ]]; then
+  exec python3 "$(cd "$(dirname "$0")" && pwd)/owned_tmp.py" /bin/bash "$0" "$@"
+fi
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DEFAULT_APP="${TMPDIR:-/private/tmp}/videotext-build/videotext.app"
+DEFAULT_APP="${ROOT}/../work/videotext-build/videotext.app"
 APP="${VIDEOTEXT_APP_PATH:-${DEFAULT_APP}}"
 CONTENTS="${APP}/Contents"
 MACOS="${CONTENTS}/MacOS"

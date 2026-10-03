@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The supervisor owns all disposable scratch, including child tool TMPDIR.
+if [[ "${VIDEOTEXT_TMP_RUNNER:-}" != "1" ]]; then
+  exec python3 "$(cd "$(dirname "$0")" && pwd)/owned_tmp.py" /bin/bash "$0" "$@"
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEMP="$(mktemp -d "${TMPDIR:-/private/tmp}/videotext-baseline-guard.XXXXXX")"
 trap 'rm -rf "$TEMP"' EXIT

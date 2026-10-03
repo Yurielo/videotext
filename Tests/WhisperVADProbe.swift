@@ -3,7 +3,7 @@ import Foundation
 @main
 struct WhisperVADProbe {
     static func main() throws {
-        let root = FileManager.default.temporaryDirectory
+        let root = (URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? FileManager.default.temporaryDirectory.path, isDirectory: true))
             .appendingPathComponent("videotext-vad-locator-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }

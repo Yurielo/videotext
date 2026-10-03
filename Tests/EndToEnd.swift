@@ -786,7 +786,7 @@ struct EndToEndTest {
 
     private static func extractedFrameContainsColor(videoURL: URL, time: TimeInterval, expected: ExpectedColor) -> Bool {
         guard let ffmpeg = ToolRunner().resolve("ffmpeg") else { return false }
-        let png = FileManager.default.temporaryDirectory.appendingPathComponent("videotext-color-\(UUID().uuidString).png")
+        let png = (URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? FileManager.default.temporaryDirectory.path, isDirectory: true)).appendingPathComponent("videotext-color-\(UUID().uuidString).png")
         defer { try? FileManager.default.removeItem(at: png) }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: ffmpeg)

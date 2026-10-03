@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The supervisor owns all disposable scratch, including child tool TMPDIR.
+if [[ "${VIDEOTEXT_TMP_RUNNER:-}" != "1" ]]; then
+  exec python3 "$(cd "$(dirname "$0")" && pwd)/owned_tmp.py" /bin/bash "$0" "$@"
+fi
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-WORK_ROOT="${ROOT}/../work"
+WORK_ROOT="${VIDEOTEXT_EPHEMERAL_WORK_ROOT:-${ROOT}/../work}"
 TEST_APP="${WORK_ROOT}/videotext-e2e.app"
 TEST_BINARY="${TEST_APP}/Contents/MacOS/videotext-e2e"
 SWIFT_SOURCES=()
