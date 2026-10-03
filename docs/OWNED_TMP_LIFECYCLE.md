@@ -29,6 +29,14 @@ is conservative: a live reused PID retains the workspace. Thirty-two retained
 namespace entries block new workspace creation instead of unbounded growth.
 This is a count guard, not a bound on an individual media operation's bytes.
 
+A live/pending tool receipt pins all valid sibling workspaces from the same
+creator PID, including adapter scratch that its child may use later without an
+open descriptor. Creator-cohort recovery occurs only after its child groups
+stop. A missing/malformed/inconsistent sibling receipt freezes stale recovery:
+it could conceal a live child/cohort. Unknown objects remain retained, and the
+count guard blocks new creation at capacity. Receipts are revalidated immediately
+before stale deletion.
+
 Current-process cleanup revalidates exact identity and receipt and checks
 foreign open files. SIGKILL cannot run cleanup; safe next-start recovery is the
 recovery path. Native signals stop only verified launched process groups;
@@ -59,7 +67,7 @@ Production app deployment remains a separate release task; no `.app` is issued.
   SIGTERM, SIGKILL parent + child lease/session, normal background cleanup,
   pending launch preservation, namespace symlink rejection.
 - `scripts/test_fixture_suite.sh`: one temporary testable core library reused
-  for 20 existing self-contained probes plus baseline/application lifecycle/
+  for 21 existing self-contained probes plus baseline/application lifecycle/
   recovery-watchdog probes. It does not package an app or run/download models.
   History and ETA state are redirected into the owned fixture workspace.
 - Real Whisper/UVR/Ollama model jobs, enhanced TTS voices, GUI/notifications and

@@ -40,3 +40,48 @@ subprocess.run([probe], check=True)
 assert not path.exists(), 'stopped native child did not recover'
 print('NATIVE_CRASH_LIVE_CHILD_AND_RECOVERY_PASS')
 PYTEST
+python3 - "$TMPDIR/owned-tmp-probe" <<'PYTEST'
+import os, pathlib, signal, subprocess, sys, time
+probe = sys.argv[1]
+owner = subprocess.Popen([probe, '--orphan-adapter'], stdout=subprocess.PIPE, text=True)
+a_text, b_text, pid_text = owner.stdout.readline().strip().rsplit(' ', 2)
+a, b, pid = pathlib.Path(a_text), pathlib.Path(b_text), int(pid_text)
+try:
+    owner.kill()
+    owner.wait()
+    subprocess.run([probe, '--recover'], check=True)
+    assert a.exists() and b.exists(), 'live child lost its adapter sibling after owner SIGKILL'
+finally:
+    os.killpg(pid, signal.SIGKILL)
+time.sleep(.2)
+subprocess.run([probe, '--recover'], check=True)
+assert not a.exists() and not b.exists(), 'adapter/tool siblings not recovered after child stops'
+print('NATIVE_ADAPTER_TOOL_CRASH_COHORT_PASS')
+PYTEST
+python3 - "$TMPDIR/owned-tmp-probe" <<'PYTEST'
+import os, pathlib, signal, subprocess, sys, time
+probe = sys.argv[1]
+for tamper in ('malformed', 'missing'):
+    owner = subprocess.Popen([probe, '--orphan-adapter'], stdout=subprocess.PIPE, text=True)
+    a_text, b_text, pid_text = owner.stdout.readline().strip().rsplit(' ', 2)
+    a, b, pid = pathlib.Path(a_text), pathlib.Path(b_text), int(pid_text)
+    marker = b / 'owner.json'
+    original = marker.read_bytes()
+    try:
+        owner.kill()
+        owner.wait()
+        if tamper == 'malformed': marker.write_text('{}')
+        else: marker.unlink()
+        subprocess.run([probe, '--recover'], check=True)
+        assert a.exists() and b.exists(), 'unknown sibling hid a live child and adapter was deleted'
+    finally:
+        os.killpg(pid, signal.SIGKILL)
+    time.sleep(.2)
+    subprocess.run([probe, '--recover'], check=True)
+    assert a.exists() and b.exists(), 'uncertain sibling authority was treated as deletion evidence'
+    # Restore only the captured receipt of this test-owned fixture after its child stops.
+    marker.write_bytes(original)
+    subprocess.run([probe, '--recover'], check=True)
+    assert not a.exists() and not b.exists()
+print('NATIVE_INCOMPLETE_COHORT_FAIL_CLOSED_PASS')
+PYTEST

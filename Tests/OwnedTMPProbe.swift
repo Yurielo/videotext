@@ -7,7 +7,8 @@ import Darwin
             try OwnedTemporaryWorkspace.recover()
             return
         }
-        if CommandLine.arguments.contains("--orphan") {
+        if CommandLine.arguments.contains("--orphan") || CommandLine.arguments.contains("--orphan-adapter") {
+            let adapter = CommandLine.arguments.contains("--orphan-adapter") ? try OwnedTemporaryWorkspace() : nil
             let workspace = try OwnedTemporaryWorkspace()
             let child = Process()
             child.executableURL = URL(fileURLWithPath: "/bin/sleep")
@@ -17,10 +18,12 @@ import Darwin
             try workspace.prepareLaunch()
             try child.run()
             try workspace.attachChild(child.processIdentifier)
-            print("\(workspace.url.path) \(child.processIdentifier)")
+            if let adapter { print("\(adapter.url.path) \(workspace.url.path) \(child.processIdentifier)") }
+            else { print("\(workspace.url.path) \(child.processIdentifier)") }
             fflush(stdout)
             sleep(20)
             workspace.close()
+            adapter?.close()
             return
         }
         if CommandLine.arguments.contains("--wait") {

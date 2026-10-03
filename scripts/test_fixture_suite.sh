@@ -15,7 +15,7 @@ swiftc -O -whole-module-optimization -emit-library -emit-module -enable-testing 
   -module-name VideoTextFixtureCore -emit-module-path "$WORK/VideoTextFixtureCore.swiftmodule" \
   -framework SwiftUI -framework AppKit -framework AVKit -framework AVFoundation -framework UserNotifications \
   -o "$WORK/libVideoTextFixtureCore.dylib" "${SOURCES[@]}"
-PROBES=(WhisperVAD TranscriptionQuality ProjectSchema HumanReview TopicAnalysis TopicMatrix ETA FillerWord QuoteRange ReviewTask SpeedAdjustment TranslationAdapter TopicPicker ProcessShutdown OllamaMemoryManager FragmentProcessing FillerMute Blur Watermark LanguageDetection)
+PROBES=(WhisperVAD TranscriptionQuality ProjectSchema HumanReview TopicAnalysis TopicMatrix ETA FillerWord QuoteRange ReviewTask SpeedAdjustment TranslationAdapter TopicPicker ProcessShutdown OllamaMemoryManager FragmentProcessing FillerMute Blur Watermark LanguageDetection ToolRunner)
 for name in "${PROBES[@]}"; do
   printf 'RUN_FIXTURE %s\n' "$name"
   { printf '@testable import VideoTextFixtureCore\n'; cat "$ROOT/Tests/${name}Probe.swift"; } > "$WORK/${name}.swift"
@@ -24,6 +24,10 @@ for name in "${PROBES[@]}"; do
   case "$name" in
     TranscriptionQuality) "$WORK/$name" "$ROOT/Tests/Fixtures/Baseline/zero_duration_service_cue.srt" ;;
     ProjectSchema) "$WORK/$name" "$ROOT/Tests/Fixtures/Baseline/legacy_manifest_v3.json" ;;
+    ToolRunner)
+      ffmpeg -v error -y -f lavfi -i 'testsrc2=size=160x90:rate=10:duration=0.2' \
+        -f lavfi -i 'sine=frequency=440:duration=0.2' -c:v libx264 -pix_fmt yuv420p -c:a aac "$WORK/tool-fixture.mp4"
+      "$WORK/$name" "$WORK/tool-fixture.mp4" ;;
     *) "$WORK/$name" ;;
   esac
 done

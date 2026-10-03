@@ -293,18 +293,37 @@ final class OwnedTemporaryWorkspace {
                                                     attributes: [.posixPermissions: 0o700])
         }
         _ = try identity(base)
-        for child in try FileManager.default.contentsOfDirectory(at: base, includingPropertiesForKeys: nil) {
+        let children = try FileManager.default.contentsOfDirectory(at: base, includingPropertiesForKeys: nil)
+        var records: [(URL, Receipt, (UInt64, UInt64))] = []
+        var incompleteCohortAuthority = false
+        for child in children {
             guard let bytes = try? Data(contentsOf: child.appendingPathComponent("owner.json")),
                   let record = try? JSONDecoder().decode(Receipt.self, from: bytes),
-                  record.schema == 2, !record.launchPending, !groupAlive(record.childGroup), record.path == child.path, record.id == child.lastPathComponent,
+                  record.schema == 2, record.path == child.path, record.id == child.lastPathComponent,
                   let actual = try? identity(child), actual.0 == record.device, actual.1 == record.inode,
-                  record.pid > 0 else { continue }
+                  record.pid > 0 else {
+                // An unknown sibling can conceal a live tool's creator/group.
+                incompleteCohortAuthority = true
+                continue
+            }
+            records.append((child, record, actual))
+        }
+        guard !incompleteCohortAuthority else { return }
+        // A tool can write an adapter sibling without currently opening its files.
+        // Protect the creator's entire cohort while any proven child/launch lives.
+        let pinnedCreators = Set(records.compactMap { _, record, _ -> Int32? in
+            record.launchPending || groupAlive(record.childGroup) ? record.pid : nil
+        })
+        for (child, record, actual) in records {
+            guard !pinnedCreators.contains(record.pid) else { continue }
             if kill(record.pid, 0) == 0 || errno != ESRCH { continue }
             let fd = open(child.appendingPathComponent("lease").path, O_RDWR | O_NOFOLLOW)
             guard fd >= 0 else { continue }
             defer { Darwin.close(fd) }
             guard flock(fd, LOCK_EX | LOCK_NB) == 0, !hasForeignOpenFiles(child),
-                  let latest = try? identity(child), latest == actual else { continue }
+                  let latest = try? identity(child), latest == actual,
+                  let latestBytes = try? Data(contentsOf: child.appendingPathComponent("owner.json")),
+                  let latestRecord = try? JSONDecoder().decode(Receipt.self, from: latestBytes), latestRecord == record else { continue }
             try FileManager.default.removeItem(at: child)
         }
     }
