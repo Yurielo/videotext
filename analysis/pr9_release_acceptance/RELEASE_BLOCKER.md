@@ -1,5 +1,11 @@
 # PR #9 release gate: new baseline blocker
 
+> Historical stop record. The Product Owner subsequently authorized integration,
+> and canonical main was merged into PR #9 by
+> `0e1de82e1e9c454c823b3a8b8aa0bda8f20812c6`. See
+> [`MAIN_INTEGRATION.md`](MAIN_INTEGRATION.md). The baseline discrepancy is
+> resolved; fresh exact-snapshot release evidence is still required.
+
 Status on 2026-10-03: `PRODUCT_OUTCOME_BLOCKED_NEW_CAUSE`.
 Human semantic review: PASS; this is not another translation-semantic failure.
 

@@ -7,6 +7,43 @@ on:
     branches: [main]
 
 jobs:
+  pr-head-build:
+    if: github.event_name == 'pull_request'
+    name: PR Head Build
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Verify standalone PR source identity
+        env:
+          EXPECTED_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_PR_HEAD"
+      - name: Validate standalone process lifecycle
+        run: |
+          scripts/test_owned_tmp.sh
+          scripts/test_process_shutdown.sh
+          scripts/test_application_lifecycle.sh
+      - name: Validate standalone translation contracts
+        run: |
+          scripts/test_translation.sh
+          scripts/test_translation_ownership.sh
+          scripts/test_translation_semantic_review.sh --check-alarms
+          scripts/test_no_retired_translation_models.sh
+      - name: Build standalone PR source
+        env:
+          VIDEOTEXT_APP_PATH: ${{ runner.temp }}/videotext-pr-head.app
+        run: scripts/build_app.sh
+      - name: Verify standalone bundle
+        env:
+          VIDEOTEXT_APP_PATH: ${{ runner.temp }}/videotext-pr-head.app
+        run: |
+          codesign --verify --deep --strict "$VIDEOTEXT_APP_PATH"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$VIDEOTEXT_APP_PATH/Contents/Info.plist")" = "com.videotext.app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$VIDEOTEXT_APP_PATH/Contents/Info.plist")" = "0.6.8"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$VIDEOTEXT_APP_PATH/Contents/Info.plist")" = "2026.09.25.1"
+
   topic-regression:
     name: Quality Gate
     runs-on: macos-14

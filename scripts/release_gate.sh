@@ -76,6 +76,11 @@ release_files() {
     "$ROOT/scripts/test_translation_models.sh" \
     "$ROOT/scripts/test_ollama_memory_shutdown.sh" \
     "$ROOT/scripts/test_no_retired_translation_models.sh" \
+    "$ROOT/scripts/test_translation_ownership.sh" \
+    "$ROOT/scripts/test_translation_semantic_review.sh" \
+    "$ROOT/scripts/test_owned_tmp.sh" \
+    "$ROOT/scripts/test_process_shutdown.sh" \
+    "$ROOT/scripts/test_application_lifecycle.sh" \
     "$ROOT/scripts/test_tool_runner.sh" \
     "$ROOT/scripts/test_whisper_vad.sh" \
     "$ROOT/scripts/test_transcription_quality.sh" \
@@ -91,6 +96,12 @@ release_files() {
     "$ROOT/Tests/TranslationAdapterProbe.swift" \
     "$ROOT/Tests/TranslationModelBenchmark.swift" \
     "$ROOT/Tests/OllamaMemoryManagerProbe.swift" \
+    "$ROOT/Tests/TranslationOwnershipProbe.swift" \
+    "$ROOT/Tests/TranslationSemanticReviewProbe.swift" \
+    "$ROOT/Tests/OwnedTMPProbe.swift" \
+    "$ROOT/Tests/ProcessShutdownProbe.swift" \
+    "$ROOT/Tests/ApplicationLifecycleProbe.swift" \
+    "$ROOT/Tests/test_owned_tmp.py" \
     "$ROOT/Tests/ToolRunnerProbe.swift" \
     "$ROOT/Tests/WhisperVADProbe.swift" \
     "$ROOT/Tests/TranscriptionQualityProbe.swift"
@@ -169,6 +180,12 @@ for focused in \
   test_topics.sh \
   test_topic_matrix.sh \
   test_ollama_topics.sh \
+  test_translation.sh \
+  test_translation_ownership.sh \
+  test_no_retired_translation_models.sh \
+  test_owned_tmp.sh \
+  test_process_shutdown.sh \
+  test_application_lifecycle.sh \
   test_whisper_vad.sh \
   test_transcription_quality.sh; do
   log="$RUN_DIR/$focused.log"
@@ -180,6 +197,14 @@ for focused in \
   record "${focused%.sh}_exit_status" 0
   record "${focused%.sh}_log" "$log"
 done
+log="$RUN_DIR/test_translation_semantic_review.sh.log"
+if ! "$ROOT/scripts/test_translation_semantic_review.sh" --check-alarms > "$log" 2>&1; then
+  record test_translation_semantic_review_exit_status 1
+  record test_translation_semantic_review_log "$log"
+  fail "focused-проверка test_translation_semantic_review.sh завершилась ошибкой"
+fi
+record test_translation_semantic_review_exit_status 0
+record test_translation_semantic_review_log "$log"
 log="$RUN_DIR/test_tool_runner.sh.log"
 if ! "$ROOT/scripts/test_tool_runner.sh" "$VIDEO_PATH" > "$log" 2>&1; then
   record test_tool_runner_exit_status 1
@@ -189,6 +214,23 @@ fi
 record test_tool_runner_exit_status 0
 record test_tool_runner_log "$log"
 assert_snapshot
+
+for run in 1 2; do
+  log="$RUN_DIR/e2e-$run.log"
+  if ! "$ROOT/scripts/test_e2e.sh" "$VIDEO_PATH" "$MODEL_PATH" > "$log" 2>&1; then
+    record "e2e_${run}_command" "$ROOT/scripts/test_e2e.sh $VIDEO_PATH $MODEL_PATH"
+    record "e2e_${run}_exit_status" 1
+    record "e2e_${run}_log" "$log"
+    fail "E2E #$run завершился с ненулевым кодом"
+  fi
+  /usr/bin/grep -Fq 'E2E PASS' "$log" || fail "E2E #$run не содержит E2E PASS"
+  record "e2e_${run}_command" "$ROOT/scripts/test_e2e.sh $VIDEO_PATH $MODEL_PATH"
+  record "e2e_${run}_exit_status" 0
+  record "e2e_${run}_status" PASS
+  record "e2e_${run}_log" "$log"
+  assert_snapshot
+  require_no_active_tools
+done
 
 if ! VIDEOTEXT_APP_PATH="$CANDIDATE" "$ROOT/scripts/build_app.sh" > "$RUN_DIR/build.log" 2>&1; then
   record build_command "VIDEOTEXT_APP_PATH=$CANDIDATE $ROOT/scripts/build_app.sh"
@@ -220,23 +262,6 @@ CANDIDATE_HASH="$(bundle_hash "$CANDIDATE")"
 record candidate_path "$CANDIDATE"
 record candidate_sha256 "$CANDIDATE_HASH"
 assert_snapshot
-
-for run in 1 2; do
-  log="$RUN_DIR/e2e-$run.log"
-  if ! "$ROOT/scripts/test_e2e.sh" "$VIDEO_PATH" "$MODEL_PATH" > "$log" 2>&1; then
-    record "e2e_${run}_command" "$ROOT/scripts/test_e2e.sh $VIDEO_PATH $MODEL_PATH"
-    record "e2e_${run}_exit_status" 1
-    record "e2e_${run}_log" "$log"
-    fail "E2E #$run завершился с ненулевым кодом"
-  fi
-  /usr/bin/grep -Fq 'E2E PASS' "$log" || fail "E2E #$run не содержит E2E PASS"
-  record "e2e_${run}_command" "$ROOT/scripts/test_e2e.sh $VIDEO_PATH $MODEL_PATH"
-  record "e2e_${run}_exit_status" 0
-  record "e2e_${run}_status" PASS
-  record "e2e_${run}_log" "$log"
-  assert_snapshot
-  require_no_active_tools
-done
 
 record smoke_command "open -n $CANDIDATE"
 if ! open -n "$CANDIDATE" > "$RUN_DIR/smoke-open.log" 2>&1; then
