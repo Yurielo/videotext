@@ -599,8 +599,11 @@ struct EndToEndTest {
         ]
         let sourceBytes = try sourceFiles.map { try Data(contentsOf: $0) }
         let sourceDates = sourceFiles.map { modificationDate($0) }
-        let evidence = mediaURL.deletingLastPathComponent()
-            .appendingPathComponent("translation-evidence", isDirectory: true)
+        let evidenceRoot = ProcessInfo.processInfo.environment["QA_E2E_EVIDENCE_DIR"].map {
+            URL(fileURLWithPath: $0, isDirectory: true)
+        } ?? mediaURL.deletingLastPathComponent()
+        let evidence = evidenceRoot
+            .appendingPathComponent("real-translation-\(UUID().uuidString)", isDirectory: true)
         let defaultAdapter = TranslationAdapter()
         try require(
             defaultAdapter.batchSize == 32 && defaultAdapter.maximumAttempts == 2,
@@ -808,7 +811,10 @@ struct EndToEndTest {
             )
         }
         let tagCalls = await wire.tagCalls
-        try require(tagCalls >= 4, "Resume did not recheck real model identity")
+        try require(
+            tagCalls == 2,
+            "Initial translation and checkpoint replay did not perform the expected model identity checks"
+        )
         for controller in [executionController, reopenedController, cachedController] {
             try require(
                 !controller.launchedExecutables.contains {
