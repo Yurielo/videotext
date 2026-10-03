@@ -812,7 +812,7 @@ struct EndToEndTest {
         }
         let tagCalls = await wire.tagCalls
         try require(
-            tagCalls == 2,
+            tagCalls == 3,
             "Initial translation and checkpoint replay did not perform the expected model identity checks"
         )
         for controller in [executionController, reopenedController, cachedController] {
