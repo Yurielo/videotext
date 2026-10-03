@@ -15,27 +15,39 @@ PROMOTE=false
 PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
 usage() {
-  printf 'Использование: %s <короткое-видео> <модель-whisper> [--promote]\n' "$0"
+  printf 'Использование: %s <ru-видео> <модель-whisper> <en-видео> <en-проект> [--promote]\n' "$0"
 }
 
-if [[ $# -lt 2 || $# -gt 3 ]]; then
+if [[ $# -lt 4 || $# -gt 5 ]]; then
   usage >&2
   exit 2
 fi
 
 VIDEO_PATH="$1"
 MODEL_PATH="$2"
-if [[ $# -eq 3 ]]; then
-  [[ "$3" == "--promote" ]] || { usage >&2; exit 2; }
+EN_VIDEO_PATH="$3"
+EN_PROJECT_PATH="$4"
+if [[ $# -eq 5 ]]; then
+  [[ "$5" == "--promote" ]] || { usage >&2; exit 2; }
   PROMOTE=true
 fi
 
-[[ -f "$VIDEO_PATH" ]] || { printf 'Не найдено короткое видео: %s\n' "$VIDEO_PATH" >&2; exit 2; }
+[[ -f "$VIDEO_PATH" ]] || { printf 'Не найдено RU-видео: %s\n' "$VIDEO_PATH" >&2; exit 2; }
 [[ -f "$MODEL_PATH" ]] || { printf 'Не найдена модель Whisper: %s\n' "$MODEL_PATH" >&2; exit 2; }
+[[ -f "$EN_VIDEO_PATH" ]] || { printf 'Не найдено EN-видео: %s\n' "$EN_VIDEO_PATH" >&2; exit 2; }
+[[ -d "$EN_PROJECT_PATH" ]] || { printf 'Не найден EN-проект: %s\n' "$EN_PROJECT_PATH" >&2; exit 2; }
+[[ -f "$EN_PROJECT_PATH/Support files/manifest.json" ]] || {
+  printf 'В EN-проекте нет manifest.json: %s\n' "$EN_PROJECT_PATH" >&2
+  exit 2
+}
+[[ -f "$EN_PROJECT_PATH/Texts/full.srt" ]] || {
+  printf 'В EN-проекте нет full.srt: %s\n' "$EN_PROJECT_PATH" >&2
+  exit 2
+}
 
 STAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
 RUN_DIR="$WORK_ROOT/release-gate/$STAMP"
-CANDIDATE_ROOT="${VIDEOTEXT_CANDIDATE_ROOT:-${RUN_DIR}/candidate}"
+CANDIDATE_ROOT="${VIDEOTEXT_CANDIDATE_ROOT:-/private/tmp/videotext-release-candidate-$STAMP}"
 CANDIDATE="$CANDIDATE_ROOT/videotext.app"
 EVIDENCE="$RUN_DIR/evidence.env"
 mkdir -p "$RUN_DIR" "$CANDIDATE_ROOT" "$OUTPUT_ROOT"
@@ -124,6 +136,16 @@ bundle_hash() {
   ) | shasum -a 256 | awk '{print $1}'
 }
 
+directory_hash() {
+  local directory="$1"
+  (
+    cd "$directory"
+    find . -type f -print | LC_ALL=C sort | while IFS= read -r path; do
+      printf '%s  %s\n' "$(shasum -a 256 "$path" | awk '{print $1}')" "$path"
+    done
+  ) | shasum -a 256 | awk '{print $1}'
+}
+
 assert_snapshot() {
   local current candidate_current
   current="$(release_inputs_hash)" || fail "не удалось вычислить hash release inputs"
@@ -160,9 +182,18 @@ if ! BASELINE_RESULT="$("$ROOT/scripts/check_baseline.sh" 2>&1)"; then
 fi
 record baseline_status "$BASELINE_RESULT"
 record video_path "$VIDEO_PATH"
-record video_sha256 "$(shasum -a 256 "$VIDEO_PATH" | awk '{print $1}')"
+VIDEO_SHA256="$(shasum -a 256 "$VIDEO_PATH" | awk '{print $1}')"
+record video_sha256 "$VIDEO_SHA256"
 record whisper_model_path "$MODEL_PATH"
 record whisper_model_sha256 "$(shasum -a 256 "$MODEL_PATH" | awk '{print $1}')"
+EN_VIDEO_SHA256="$(shasum -a 256 "$EN_VIDEO_PATH" | awk '{print $1}')"
+EN_PROJECT_SHA256="$(directory_hash "$EN_PROJECT_PATH")"
+record en_video_path "$EN_VIDEO_PATH"
+record en_video_sha256 "$EN_VIDEO_SHA256"
+record en_project_path "$EN_PROJECT_PATH"
+record en_project_sha256 "$EN_PROJECT_SHA256"
+record en_project_manifest_sha256 "$(shasum -a 256 "$EN_PROJECT_PATH/Support files/manifest.json" | awk '{print $1}')"
+record en_project_full_srt_sha256 "$(shasum -a 256 "$EN_PROJECT_PATH/Texts/full.srt" | awk '{print $1}')"
 for tool in ffmpeg ffprobe whisper-cli; do
   command -v "$tool" >/dev/null 2>&1 || fail "не найден обязательный инструмент $tool"
 done
@@ -219,14 +250,25 @@ for run in 1 2; do
   log="$RUN_DIR/e2e-$run.log"
   e2e_evidence="$RUN_DIR/e2e-$run-evidence"
   mkdir -p "$e2e_evidence"
-  if ! QA_E2E_EVIDENCE_DIR="$e2e_evidence" "$ROOT/scripts/test_e2e.sh" "$VIDEO_PATH" "$MODEL_PATH" > "$log" 2>&1; then
-    record "e2e_${run}_command" "$ROOT/scripts/test_e2e.sh $VIDEO_PATH $MODEL_PATH"
+  if ! QA_E2E_EVIDENCE_DIR="$e2e_evidence" "$ROOT/scripts/test_e2e.sh" \
+    "$VIDEO_PATH" "$MODEL_PATH" "$EN_VIDEO_PATH" "$EN_PROJECT_PATH" > "$log" 2>&1; then
+    record "e2e_${run}_command" "$ROOT/scripts/test_e2e.sh $VIDEO_PATH $MODEL_PATH $EN_VIDEO_PATH $EN_PROJECT_PATH"
     record "e2e_${run}_exit_status" 1
     record "e2e_${run}_log" "$log"
     fail "E2E #$run завершился с ненулевым кодом"
   fi
   /usr/bin/grep -Fq 'E2E PASS' "$log" || fail "E2E #$run не содержит E2E PASS"
-  record "e2e_${run}_command" "$ROOT/scripts/test_e2e.sh $VIDEO_PATH $MODEL_PATH"
+  [[ "$(/usr/bin/grep -Fc 'REAL_TRANSLATION_PASS ru->en:' "$log")" -eq 1 ]] || \
+    fail "E2E #$run не доказал единственный RU->EN production-проход"
+  [[ "$(/usr/bin/grep -Fc 'REAL_TRANSLATION_PASS en->ru:' "$log")" -eq 1 ]] || \
+    fail "E2E #$run не доказал единственный EN->RU production-проход"
+  [[ "$(shasum -a 256 "$VIDEO_PATH" | awk '{print $1}')" == "$VIDEO_SHA256" ]] || \
+    fail "E2E #$run изменил RU-видео"
+  [[ "$(shasum -a 256 "$EN_VIDEO_PATH" | awk '{print $1}')" == "$EN_VIDEO_SHA256" ]] || \
+    fail "E2E #$run изменил EN-видео"
+  [[ "$(directory_hash "$EN_PROJECT_PATH")" == "$EN_PROJECT_SHA256" ]] || \
+    fail "E2E #$run изменил исходный EN-проект"
+  record "e2e_${run}_command" "$ROOT/scripts/test_e2e.sh $VIDEO_PATH $MODEL_PATH $EN_VIDEO_PATH $EN_PROJECT_PATH"
   record "e2e_${run}_exit_status" 0
   record "e2e_${run}_status" PASS
   record "e2e_${run}_log" "$log"

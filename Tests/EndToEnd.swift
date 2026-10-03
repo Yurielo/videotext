@@ -324,8 +324,10 @@ struct EndToEndTest {
                 try await validateTranslationWireMock()
                 return
             }
-            guard CommandLine.arguments.count == 3 else {
-                throw EndToEndError.failed("Использование: videotext-e2e <видео> <модель-whisper>")
+            guard CommandLine.arguments.count == 3 || CommandLine.arguments.count == 5 else {
+                throw EndToEndError.failed(
+                    "Использование: videotext-e2e <ru-видео> <модель-whisper> [<en-видео> <en-проект>]"
+                )
             }
 
             let mediaURL = URL(fileURLWithPath: CommandLine.arguments[1])
@@ -443,8 +445,29 @@ struct EndToEndTest {
             try await validateRealTranslation(
                 mediaURL: mediaURL,
                 projectURL: initialResult.projectURL,
-                modelPath: modelPath
+                modelPath: modelPath,
+                sourceLanguage: .ru,
+                targetLanguage: .en
             )
+            if CommandLine.arguments.count == 5 {
+                let englishMediaURL = URL(fileURLWithPath: CommandLine.arguments[3])
+                let englishProjectURL = URL(fileURLWithPath: CommandLine.arguments[4], isDirectory: true)
+                try require(
+                    FileManager.default.fileExists(atPath: englishMediaURL.path),
+                    "Английское тестовое видео не найдено"
+                )
+                try require(
+                    FileManager.default.fileExists(atPath: ProjectLayout(root: englishProjectURL).manifestURL.path),
+                    "Английский тестовый проект не найден"
+                )
+                try await validateRealTranslation(
+                    mediaURL: englishMediaURL,
+                    projectURL: englishProjectURL,
+                    modelPath: modelPath,
+                    sourceLanguage: .en,
+                    targetLanguage: .ru
+                )
+            }
             try await validateExplicitTopicVariant(
                 mediaURL: mediaURL,
                 projectURL: initialResult.projectURL,
@@ -577,25 +600,31 @@ struct EndToEndTest {
     private static func validateRealTranslation(
         mediaURL: URL,
         projectURL: URL,
-        modelPath: String
+        modelPath: String,
+        sourceLanguage: ArtifactLanguage,
+        targetLanguage: ArtifactLanguage
     ) async throws {
         let layout = ProjectLayout(root: projectURL)
         let store = ProjectStore()
         let before = try store.load(from: projectURL)
-        try require(before.languageProfile?.effective == .ru, "Release translation requires the retained Russian media")
+        try require(
+            before.languageProfile?.effective == sourceLanguage,
+            "Release translation source language differs from the retained project"
+        )
+        try require(sourceLanguage != targetLanguage, "Release translation languages must differ")
         try require(
             (before.durationSeconds ?? 0) > 0 && (before.durationSeconds ?? 0) <= 190,
             "Translation media exceeds the bounded short-media contract"
         )
 
-        let sourceURL = layout.subtitlesURL(language: .ru)
+        let sourceURL = layout.subtitlesURL(language: sourceLanguage)
         let source = try SRTService().load(from: sourceURL)
         try require((1...128).contains(source.count), "Bounded full-document translation needs 1...128 cues")
         let sourceFiles = [
             layout.fullSRTURL,
             layout.transcriptURL,
             sourceURL,
-            layout.transcriptURL(language: .ru)
+            layout.transcriptURL(language: sourceLanguage)
         ]
         let sourceBytes = try sourceFiles.map { try Data(contentsOf: $0) }
         let sourceDates = sourceFiles.map { modificationDate($0) }
@@ -603,7 +632,10 @@ struct EndToEndTest {
             URL(fileURLWithPath: $0, isDirectory: true)
         } ?? mediaURL.deletingLastPathComponent()
         let evidence = evidenceRoot
-            .appendingPathComponent("real-translation-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent(
+                "real-translation-\(sourceLanguage.rawValue)-to-\(targetLanguage.rawValue)-\(UUID().uuidString)",
+                isDirectory: true
+            )
         let defaultAdapter = TranslationAdapter()
         try require(
             defaultAdapter.batchSize == 32 && defaultAdapter.maximumAttempts == 2,
@@ -669,15 +701,15 @@ struct EndToEndTest {
             "Independent full-document context fingerprint differs"
         )
         let current = try store.load(from: projectURL)
-        guard let sourceRevision = current.activeTranscriptRevision(for: .ru) else {
+        guard let sourceRevision = current.activeTranscriptRevision(for: sourceLanguage) else {
             throw EndToEndError.failed("Translation lost the source revision")
         }
         let checkpoints = try TranslationCheckpointStore(
-            directory: layout.translationCacheDirectory(source: .ru, target: .en),
+            directory: layout.translationCacheDirectory(source: sourceLanguage, target: targetLanguage),
             plan: plan,
             identity: identity,
-            source: .ru,
-            target: .en,
+            source: sourceLanguage,
+            target: targetLanguage,
             sourceIdentity: sourceRevision.id
         )
         let executionController = ProcessController()
@@ -687,11 +719,40 @@ struct EndToEndTest {
             "Translation unexpectedly opened a review checkpoint"
         )
         let chats = await wire.chats
+        let expectedUnits = plan.units.map { $0.owned.map(\.id) }
+        var chatIndex = 0
+        for (unitIndex, expectedIDs) in expectedUnits.enumerated() {
+            try require(
+                chatIndex < chats.count && chats[chatIndex] == expectedIDs,
+                "Ownership unit was skipped or rerouted"
+            )
+            var attempts = 1
+            chatIndex += 1
+            let nextExpected = expectedUnits.indices.contains(unitIndex + 1)
+                ? expectedUnits[unitIndex + 1]
+                : nil
+            while chatIndex < chats.count && chats[chatIndex] != nextExpected {
+                let retryIDs = chats[chatIndex]
+                let retrySet = Set(retryIDs)
+                try require(
+                    !retryIDs.isEmpty
+                        && retryIDs == expectedIDs.filter { retrySet.contains($0) }
+                        && retrySet.isSubset(of: Set(expectedIDs)),
+                    "Retry escaped its ownership unit or changed cue order"
+                )
+                attempts += 1
+                chatIndex += 1
+            }
+            try require(
+                attempts <= defaultAdapter.maximumAttempts,
+                "Ownership unit exceeded bounded retries"
+            )
+        }
         try require(
-            chats == plan.units.map { $0.owned.map(\.id) },
+            chatIndex == chats.count,
             "Resume repeated completed ownership or made extra chats"
         )
-        let translated = try SRTService().load(from: layout.subtitlesURL(language: .en))
+        let translated = try SRTService().load(from: layout.subtitlesURL(language: targetLanguage))
         try require(
             translated.count == source.count
                 && translated.map(\.id) == source.map(\.id)
@@ -705,7 +766,7 @@ struct EndToEndTest {
             "Final SRT contains fallback, context-only output or differs from real owned replies"
         )
 
-        let reportURL = layout.translationReportURL(source: .ru, target: .en)
+        let reportURL = layout.translationReportURL(source: sourceLanguage, target: targetLanguage)
         let reportBytes = try Data(contentsOf: reportURL)
         let report = try store.decoder.decode(TranslationReport.self, from: reportBytes)
         let (manifest, reopenedMedia) = try ProjectStore().openProject(at: projectURL)
@@ -717,8 +778,8 @@ struct EndToEndTest {
             report.schemaVersion == 3
                 && report.sourceRevisionID == sourceRevision.id
                 && report.cueCount == source.count
-                && report.sourceLanguage == .ru
-                && report.targetLanguage == .en
+                && report.sourceLanguage == sourceLanguage
+                && report.targetLanguage == targetLanguage
                 && report.status == .ready
                 && report.reviewTaskIDs.isEmpty,
             "Translation report has unresolved technical validation or wrong source lineage"
@@ -730,14 +791,14 @@ struct EndToEndTest {
                 && report.contextIdentity == wireContextIdentity,
             "Translation report lost exact model/protocol/context provenance"
         )
-        let translatedSubtitleBytes = try Data(contentsOf: layout.subtitlesURL(language: .en))
-        let translatedTranscriptBytes = try Data(contentsOf: layout.transcriptURL(language: .en))
+        let translatedSubtitleBytes = try Data(contentsOf: layout.subtitlesURL(language: targetLanguage))
+        let translatedTranscriptBytes = try Data(contentsOf: layout.transcriptURL(language: targetLanguage))
         try require(
             report.subtitleSHA256 == TranslationFingerprint.data(translatedSubtitleBytes)
                 && report.transcriptSHA256 == TranslationFingerprint.data(translatedTranscriptBytes),
             "Translation output hashes differ"
         )
-        guard let revision = manifest.activeTranscriptRevision(for: .en) else {
+        guard let revision = manifest.activeTranscriptRevision(for: targetLanguage) else {
             throw EndToEndError.failed("Reopened manifest lost translated revision")
         }
         try require(
@@ -765,8 +826,8 @@ struct EndToEndTest {
         try saveManifest("manifest-translated.json")
 
         let outputs = [
-            layout.subtitlesURL(language: .en),
-            layout.transcriptURL(language: .en),
+            layout.subtitlesURL(language: targetLanguage),
+            layout.transcriptURL(language: targetLanguage),
             reportURL
         ]
         let outputBytes = try outputs.map { try Data(contentsOf: $0) }
@@ -827,7 +888,7 @@ struct EndToEndTest {
         try assertSourceUnchanged()
         try saveManifest("manifest-cache-replayed.json")
         try require(noActiveTools(), "Translation left active child processes")
-        print("REAL_TRANSLATION_PASS: full document metadata/local overlap/owned routing, exact cue IDs/count/order/times, source bytes, completed resume, real checkpoint replay, manifest/reopen, pinned digest/protocol/context")
+        print("REAL_TRANSLATION_PASS \(sourceLanguage.rawValue)->\(targetLanguage.rawValue): full document metadata/local overlap/owned routing, exact cue IDs/count/order/times, source bytes, completed resume, real checkpoint replay, manifest/reopen, pinned digest/protocol/context")
         print("TRANSLATION_EVIDENCE=\(evidence.path)")
     }
 
