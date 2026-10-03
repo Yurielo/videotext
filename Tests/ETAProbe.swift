@@ -3,7 +3,7 @@ import Foundation
 @main
 struct ETAProbe {
     static func main() async throws {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("videotext-eta-probe-\(UUID().uuidString).json")
+        let url = (URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? FileManager.default.temporaryDirectory.path, isDirectory: true)).appendingPathComponent("videotext-eta-probe-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: url) }
         let store = ETAHistoryStore(url: url)
         let context = ETAContext(mediaDuration: 100, model: "whisper-test", language: "ru", codec: "mp4", hardware: "test")

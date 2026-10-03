@@ -70,7 +70,7 @@ struct TranslationAdapterProbe {
 
     private static func verifyTranslatedReviewDoesNotChangeSource() throws {
         let fm = FileManager.default
-        let root = fm.temporaryDirectory.appendingPathComponent("videotext-translation-review-\(UUID().uuidString)", isDirectory: true)
+        let root = (URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? fm.temporaryDirectory.path, isDirectory: true)).appendingPathComponent("videotext-translation-review-\(UUID().uuidString)", isDirectory: true)
         defer { try? fm.removeItem(at: root) }
         let sourceMedia = root.appendingPathComponent("source.mp4")
         let project = root.appendingPathComponent("project", isDirectory: true)

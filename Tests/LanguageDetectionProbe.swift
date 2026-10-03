@@ -46,7 +46,7 @@ struct LanguageDetectionProbe {
     private static func validateMissingAudioError() async throws {
         let runner = ToolRunner()
         guard let ffmpeg = runner.resolve("ffmpeg") else { throw ProbeFailure(message: "ffmpeg не найден") }
-        let root = FileManager.default.temporaryDirectory
+        let root = (URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? FileManager.default.temporaryDirectory.path, isDirectory: true))
             .appendingPathComponent("videotext-language-no-audio-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

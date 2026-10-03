@@ -3,7 +3,7 @@ import Foundation
 @main
 struct WatermarkProbe {
     static func main() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("videotext-watermark-probe-\(UUID().uuidString)")
+        let root = (URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? FileManager.default.temporaryDirectory.path, isDirectory: true)).appendingPathComponent("videotext-watermark-probe-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let runner = ToolRunner()

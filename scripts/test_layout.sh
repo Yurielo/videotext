@@ -2,12 +2,17 @@
 
 set -euo pipefail
 
+# The supervisor owns all disposable scratch, including child tool TMPDIR.
+if [[ "${VIDEOTEXT_TMP_RUNNER:-}" != "1" ]]; then
+  exec python3 "$(cd "$(dirname "$0")" && pwd)/owned_tmp.py" /bin/bash "$0" "$@"
+fi
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-WORK_ROOT="${ROOT}/../work"
+WORK_ROOT="${VIDEOTEXT_EPHEMERAL_WORK_ROOT:-${ROOT}/../work}"
 TEST_APP="${WORK_ROOT}/videotext-layout-probe.app"
 TEST_BINARY="${TEST_APP}/Contents/MacOS/videotext-layout-probe"
 TEST_STATE="${WORK_ROOT}/layout-probe-state"
-OUTPUT_IMAGE="${1:-${WORK_ROOT}/videotext-layout-980x680.png}"
+OUTPUT_IMAGE="${1:-${ROOT}/../outputs/videotext-layout-980x680.png}"
 SWIFT_SOURCES=()
 
 rm -rf "${TEST_APP}" "${TEST_STATE}"

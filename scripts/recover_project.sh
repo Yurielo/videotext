@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Contain compiler/tool scratch; explicit application/project/evidence outputs persist.
+if [[ "${VIDEOTEXT_TMP_RUNNER:-}" != "1" ]]; then
+  exec python3 "$(cd "$(dirname "$0")" && pwd)/owned_tmp.py" /bin/bash "$0" "$@"
+fi
+
 if [[ $# -ne 3 ]]; then
   printf 'PROJECT_RECOVERY_FAIL: Использование: %s <video> <проект> <модель-whisper>\n' "$0" >&2
   exit 2

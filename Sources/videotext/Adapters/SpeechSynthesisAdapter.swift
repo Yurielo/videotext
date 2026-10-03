@@ -31,9 +31,9 @@ struct SpeechSynthesisAdapter {
         let voice = try await selectedVoice(for: language)
         let ffmpeg = preferredFFmpeg()
         guard FileManager.default.isExecutableFile(atPath: ffmpeg) else { throw WorkflowError.missingTool("ffmpeg") }
-        let temp = FileManager.default.temporaryDirectory.appendingPathComponent("videotext-dubbing-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: temp) }
+        let workspace = try OwnedTemporaryWorkspace()
+        defer { workspace.close() }
+        let temp = workspace.url
         var concatFiles: [URL] = []
         var cueRecords: [DubbingCueRecord] = []
         var reviewTasks: [ReviewTask] = []

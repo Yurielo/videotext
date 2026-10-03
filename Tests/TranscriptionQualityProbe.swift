@@ -12,7 +12,7 @@ struct TranscriptionQualityProbe {
         try require(parsedFixture.cues.count == 1, "служебный zero-duration cue не исключен")
         try require(parsedFixture.skippedZeroDurationCount == 1, "zero-duration cue не отражен в отчете")
 
-        let temporaryURL = FileManager.default.temporaryDirectory
+        let temporaryURL = (URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? FileManager.default.temporaryDirectory.path, isDirectory: true))
             .appendingPathComponent("videotext-whisper-quality-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: temporaryURL) }
         let json: [String: Any] = [

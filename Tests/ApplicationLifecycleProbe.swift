@@ -27,7 +27,7 @@ struct ApplicationLifecycleProbe {
     static func main() {
         let application = NSApplication.shared
         let delegate = VideoTextAppDelegate()
-        let markerURL = FileManager.default.temporaryDirectory
+        let markerURL = (URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? FileManager.default.temporaryDirectory.path, isDirectory: true))
             .appendingPathComponent("videotext-lifecycle-\(UUID().uuidString).txt")
         defer { try? FileManager.default.removeItem(at: markerURL) }
         let handler = ProbeTerminationHandler(markerURL: markerURL)

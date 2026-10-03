@@ -59,7 +59,7 @@ struct SpeedAdjustmentProbe {
             guard case .processFailed = error else { throw error }
         }
 
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("videotext-speed-probe-\(UUID().uuidString)")
+        let root = (URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? FileManager.default.temporaryDirectory.path, isDirectory: true)).appendingPathComponent("videotext-speed-probe-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
         let layout = ProjectLayout(root: root)
         try layout.createDirectories()

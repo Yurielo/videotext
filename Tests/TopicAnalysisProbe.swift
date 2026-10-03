@@ -95,7 +95,7 @@ final class FakeTopicAIProvider: TopicAIProvider {
 @main
 struct TopicAnalysisProbe {
     static func main() async {
-        let root = FileManager.default.temporaryDirectory
+        let root = (URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? FileManager.default.temporaryDirectory.path, isDirectory: true))
             .appendingPathComponent("videotext-topic-probe-\(UUID().uuidString)", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

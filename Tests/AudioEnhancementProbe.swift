@@ -3,7 +3,7 @@ import Foundation
 @main
 struct AudioEnhancementProbe {
     static func main() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("videotext-audio-enhancement-probe-\(UUID().uuidString)")
+        let root = (URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? FileManager.default.temporaryDirectory.path, isDirectory: true)).appendingPathComponent("videotext-audio-enhancement-probe-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let runner = ToolRunner()
