@@ -1,0 +1,604 @@
+[
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 2,
+          "text" : "Ирина Адамович."
+        },
+        {
+          "id" : 3,
+          "text" : "Я есть. Здравствуйте."
+        }
+      ],
+      "before" : [
+
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 1
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 3,
+          "text" : "Я есть. Здравствуйте."
+        },
+        {
+          "id" : 4,
+          "text" : "Здравствуйте. Готова. Спасибо."
+        }
+      ],
+      "before" : [
+        {
+          "id" : 1,
+          "text" : "Окей, чуть позже спрошу."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 2
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 4,
+          "text" : "Здравствуйте. Готова. Спасибо."
+        },
+        {
+          "id" : 5,
+          "text" : "Любовь Зуева."
+        }
+      ],
+      "before" : [
+        {
+          "id" : 1,
+          "text" : "Окей, чуть позже спрошу."
+        },
+        {
+          "id" : 2,
+          "text" : "Ирина Адамович."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 3
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 5,
+          "text" : "Любовь Зуева."
+        },
+        {
+          "id" : 6,
+          "text" : "Здравствуйте. Я есть."
+        }
+      ],
+      "before" : [
+        {
+          "id" : 2,
+          "text" : "Ирина Адамович."
+        },
+        {
+          "id" : 3,
+          "text" : "Я есть. Здравствуйте."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 4
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 6,
+          "text" : "Здравствуйте. Я есть."
+        },
+        {
+          "id" : 7,
+          "text" : "Здравствуйте. Готова. Спасибо."
+        }
+      ],
+      "before" : [
+        {
+          "id" : 3,
+          "text" : "Я есть. Здравствуйте."
+        },
+        {
+          "id" : 4,
+          "text" : "Здравствуйте. Готова. Спасибо."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 5
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 7,
+          "text" : "Здравствуйте. Готова. Спасибо."
+        },
+        {
+          "id" : 8,
+          "text" : "Маргарита Мирошиченко."
+        }
+      ],
+      "before" : [
+        {
+          "id" : 4,
+          "text" : "Здравствуйте. Готова. Спасибо."
+        },
+        {
+          "id" : 5,
+          "text" : "Любовь Зуева."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 6
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 8,
+          "text" : "Маргарита Мирошиченко."
+        },
+        {
+          "id" : 9,
+          "text" : "Добрый день. Я есть."
+        }
+      ],
+      "before" : [
+        {
+          "id" : 5,
+          "text" : "Любовь Зуева."
+        },
+        {
+          "id" : 6,
+          "text" : "Здравствуйте. Я есть."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 7
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 9,
+          "text" : "Добрый день. Я есть."
+        },
+        {
+          "id" : 10,
+          "text" : "Готова. Спасибо."
+        }
+      ],
+      "before" : [
+        {
+          "id" : 6,
+          "text" : "Здравствуйте. Я есть."
+        },
+        {
+          "id" : 7,
+          "text" : "Здравствуйте. Готова. Спасибо."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 8
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 10,
+          "text" : "Готова. Спасибо."
+        },
+        {
+          "id" : 11,
+          "text" : "Марина Кушнарева."
+        }
+      ],
+      "before" : [
+        {
+          "id" : 7,
+          "text" : "Здравствуйте. Готова. Спасибо."
+        },
+        {
+          "id" : 8,
+          "text" : "Маргарита Мирошиченко."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 9
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 11,
+          "text" : "Марина Кушнарева."
+        },
+        {
+          "id" : 12,
+          "text" : "Добрый вечер. Я есть."
+        }
+      ],
+      "before" : [
+        {
+          "id" : 8,
+          "text" : "Маргарита Мирошиченко."
+        },
+        {
+          "id" : 9,
+          "text" : "Добрый день. Я есть."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 10
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 12,
+          "text" : "Добрый вечер. Я есть."
+        },
+        {
+          "id" : 13,
+          "text" : "Татьяна."
+        }
+      ],
+      "before" : [
+        {
+          "id" : 9,
+          "text" : "Добрый день. Я есть."
+        },
+        {
+          "id" : 10,
+          "text" : "Готова. Спасибо."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 11
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 13,
+          "text" : "Татьяна."
+        },
+        {
+          "id" : 14,
+          "text" : "Я есть."
+        }
+      ],
+      "before" : [
+        {
+          "id" : 10,
+          "text" : "Готова. Спасибо."
+        },
+        {
+          "id" : 11,
+          "text" : "Марина Кушнарева."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 12
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 14,
+          "text" : "Я есть."
+        },
+        {
+          "id" : 15,
+          "text" : "Готова."
+        }
+      ],
+      "before" : [
+        {
+          "id" : 11,
+          "text" : "Марина Кушнарева."
+        },
+        {
+          "id" : 12,
+          "text" : "Добрый вечер. Я есть."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 13
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 15,
+          "text" : "Готова."
+        },
+        {
+          "id" : 16,
+          "text" : "Так, сейчас у нас заочники."
+        }
+      ],
+      "before" : [
+        {
+          "id" : 12,
+          "text" : "Добрый вечер. Я есть."
+        },
+        {
+          "id" : 13,
+          "text" : "Татьяна."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 14
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 16,
+          "text" : "Так, сейчас у нас заочники."
+        },
+        {
+          "id" : 17,
+          "text" : "Юрий, а я еще."
+        }
+      ],
+      "before" : [
+        {
+          "id" : 13,
+          "text" : "Татьяна."
+        },
+        {
+          "id" : 14,
+          "text" : "Я есть."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 15
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 17,
+          "text" : "Юрий, а я еще."
+        },
+        {
+          "id" : 18,
+          "text" : "А, да, Светлана."
+        }
+      ],
+      "before" : [
+        {
+          "id" : 14,
+          "text" : "Я есть."
+        },
+        {
+          "id" : 15,
+          "text" : "Готова."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 16
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 18,
+          "text" : "А, да, Светлана."
+        },
+        {
+          "id" : 19,
+          "text" : "Здравствуйте. Я есть."
+        }
+      ],
+      "before" : [
+        {
+          "id" : 15,
+          "text" : "Готова."
+        },
+        {
+          "id" : 16,
+          "text" : "Так, сейчас у нас заочники."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 17
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 19,
+          "text" : "Здравствуйте. Я есть."
+        },
+        {
+          "id" : 20,
+          "text" : "Здравствуйте."
+        }
+      ],
+      "before" : [
+        {
+          "id" : 16,
+          "text" : "Так, сейчас у нас заочники."
+        },
+        {
+          "id" : 17,
+          "text" : "Юрий, а я еще."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 18
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 20,
+          "text" : "Здравствуйте."
+        },
+        {
+          "id" : 21,
+          "text" : "Меня что-то выбрасывает сегодня."
+        }
+      ],
+      "before" : [
+        {
+          "id" : 17,
+          "text" : "Юрий, а я еще."
+        },
+        {
+          "id" : 18,
+          "text" : "А, да, Светлана."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 19
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 21,
+          "text" : "Меня что-то выбрасывает сегодня."
+        },
+        {
+          "id" : 22,
+          "text" : "Прям каждую минуту вообще ужас."
+        }
+      ],
+      "before" : [
+        {
+          "id" : 18,
+          "text" : "А, да, Светлана."
+        },
+        {
+          "id" : 19,
+          "text" : "Здравствуйте. Я есть."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 20
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 22,
+          "text" : "Прям каждую минуту вообще ужас."
+        },
+        {
+          "id" : 23,
+          "text" : "Ну, готова."
+        }
+      ],
+      "before" : [
+        {
+          "id" : 19,
+          "text" : "Здравствуйте. Я есть."
+        },
+        {
+          "id" : 20,
+          "text" : "Здравствуйте."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 21
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 23,
+          "text" : "Ну, готова."
+        },
+        {
+          "id" : 24,
+          "text" : "Теперь точно заочники, да?"
+        }
+      ],
+      "before" : [
+        {
+          "id" : 20,
+          "text" : "Здравствуйте."
+        },
+        {
+          "id" : 21,
+          "text" : "Меня что-то выбрасывает сегодня."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 22
+  },
+  {
+    "context" : {
+      "after" : [
+        {
+          "id" : 24,
+          "text" : "Теперь точно заочники, да?"
+        }
+      ],
+      "before" : [
+        {
+          "id" : 21,
+          "text" : "Меня что-то выбрасывает сегодня."
+        },
+        {
+          "id" : 22,
+          "text" : "Прям каждую минуту вообще ужас."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 23
+  },
+  {
+    "context" : {
+      "after" : [
+
+      ],
+      "before" : [
+        {
+          "id" : 22,
+          "text" : "Прям каждую минуту вообще ужас."
+        },
+        {
+          "id" : 23,
+          "text" : "Ну, готова."
+        }
+      ],
+      "document" : "Document type: timecoded spoken audio\/video transcript. Short utterances may belong to different speakers.\nDocument title (source metadata only): Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4\nLogical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries."
+    },
+    "cueID" : 24
+  }
+]

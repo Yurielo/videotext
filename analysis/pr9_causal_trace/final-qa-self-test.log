@@ -1,0 +1,16 @@
+build_evidence=/Users/yurielokhin/Documents/Codex/videotext-pr9-context-review/../work/translation-causal-trace-build.ZO9iBi
+started_at=2026-10-03T13:53:28Z
+swift-driver version: 1.148.6 Apple Swift version 6.3.3 (swiftlang-6.3.3.1.3 clang-2100.1.1.101)
+Target: arm64-apple-macosx26.0
+CAUSAL_TRACE_EVIDENCE: /var/folders/q9/rprrsl95265b7h21d3_mp2fr0000gn/T/videotext-causal-self-test-C5ABA1F6-2655-4947-82B7-32A100C18AB7/fragment
+CAUSAL_TRACE_EVIDENCE: /var/folders/q9/rprrsl95265b7h21d3_mp2fr0000gn/T/videotext-causal-self-test-C5ABA1F6-2655-4947-82B7-32A100C18AB7/scriptedCompletion
+CAUSAL_TRACE_EVIDENCE: /var/folders/q9/rprrsl95265b7h21d3_mp2fr0000gn/T/videotext-causal-self-test-C5ABA1F6-2655-4947-82B7-32A100C18AB7/requestOverride
+Перевод unit 0, попытка 1, отклонены cueId: [501, 87, 704].
+CAUSAL_TRACE_EVIDENCE: /var/folders/q9/rprrsl95265b7h21d3_mp2fr0000gn/T/videotext-causal-self-test-C5ABA1F6-2655-4947-82B7-32A100C18AB7/httpFailure
+Перевод unit 0, попытка 1, отклонены cueId: [501, 87, 704].
+CAUSAL_TRACE_EVIDENCE: /var/folders/q9/rprrsl95265b7h21d3_mp2fr0000gn/T/videotext-causal-self-test-C5ABA1F6-2655-4947-82B7-32A100C18AB7/malformed
+CAUSAL_TRACE_EVIDENCE: /var/folders/q9/rprrsl95265b7h21d3_mp2fr0000gn/T/videotext-causal-self-test-C5ABA1F6-2655-4947-82B7-32A100C18AB7/wrongDigest
+CAUSAL_TRACE_EVIDENCE: /var/folders/q9/rprrsl95265b7h21d3_mp2fr0000gn/T/videotext-causal-self-test-C5ABA1F6-2655-4947-82B7-32A100C18AB7/cancelled
+TRANSLATION_CAUSAL_TRACE_SELF_TEST_PASS: exact bytes/status, reordered IDs/times, trimming equality, override isolation, failures, digest pin and cancellation; no network or semantic acceptance
+SELF_TEST_EVIDENCE: /var/folders/q9/rprrsl95265b7h21d3_mp2fr0000gn/T/videotext-causal-self-test-C5ABA1F6-2655-4947-82B7-32A100C18AB7
+exit_status=0

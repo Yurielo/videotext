@@ -1,0 +1,27 @@
+{
+  "httpStatus" : 200,
+  "index" : 0,
+  "method" : "GET",
+  "originalBodyFile" : "000-request-original.body.bin",
+  "originalBodySHA256" : "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "originalHeaders" : {
+
+  },
+  "originalTimeout" : 8,
+  "overrideApplied" : false,
+  "path" : "\/api\/tags",
+  "responseFile" : "000-response.raw.bin",
+  "responseHeaders" : {
+    "Content-Length" : "2014",
+    "Content-Type" : "application\/json; charset=utf-8",
+    "Date" : "Sat, 03 Oct 2026 13:49:52 GMT"
+  },
+  "responseSHA256" : "f89b8b045d8756b2f037aa50c892eac148d2785b81ac24b7732c75f446f0dbee",
+  "sentBodyFile" : "000-request-sent.body.bin",
+  "sentBodySHA256" : "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "sentHeaders" : {
+
+  },
+  "sentTimeout" : 8,
+  "url" : "http:\/\/127.0.0.1:11434\/api\/tags"
+}

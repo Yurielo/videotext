@@ -1,0 +1,499 @@
+{
+  "adapterOutcome" : "RETURNED_WITHOUT_STRUCTURAL_ISSUES",
+  "buildInputManifest" : "\/Users\/yurielokhin\/Documents\/Codex\/work\/translation-causal-trace-build.qom5u3\/inputs-sha256.before",
+  "calls" : [
+    {
+      "httpStatus" : 200,
+      "index" : 0,
+      "method" : "GET",
+      "originalBodyFile" : "000-request-original.body.bin",
+      "originalBodySHA256" : "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "originalHeaders" : {
+
+      },
+      "originalTimeout" : 8,
+      "overrideApplied" : false,
+      "path" : "\/api\/tags",
+      "responseFile" : "000-response.raw.bin",
+      "responseHeaders" : {
+        "Content-Length" : "2014",
+        "Content-Type" : "application\/json; charset=utf-8",
+        "Date" : "Sat, 03 Oct 2026 13:47:02 GMT"
+      },
+      "responseSHA256" : "f89b8b045d8756b2f037aa50c892eac148d2785b81ac24b7732c75f446f0dbee",
+      "sentBodyFile" : "000-request-sent.body.bin",
+      "sentBodySHA256" : "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sentHeaders" : {
+
+      },
+      "sentTimeout" : 8,
+      "url" : "http:\/\/127.0.0.1:11434\/api\/tags"
+    },
+    {
+      "httpStatus" : 200,
+      "index" : 1,
+      "method" : "POST",
+      "originalBodyFile" : "001-request-original.body.bin",
+      "originalBodySHA256" : "9bc65e5d86c6582887422a75e8aac42595ce47d9d5df64a8d304f9c6eebaaeac",
+      "originalHeaders" : {
+        "Content-Type" : "application\/json"
+      },
+      "originalTimeout" : 300,
+      "overrideApplied" : true,
+      "path" : "\/api\/chat",
+      "rawRows" : [
+        {
+          "cueId" : 1,
+          "text" : "Okay, I'll ask later."
+        },
+        {
+          "cueId" : 2,
+          "text" : "Irina Adamovich."
+        },
+        {
+          "cueId" : 3,
+          "text" : "Hello."
+        },
+        {
+          "cueId" : 4,
+          "text" : "Hello. Ready. Thank you."
+        },
+        {
+          "cueId" : 5,
+          "text" : "Lyubov Zueva."
+        },
+        {
+          "cueId" : 6,
+          "text" : "Hello."
+        },
+        {
+          "cueId" : 7,
+          "text" : "Hello. Ready. Thank you."
+        },
+        {
+          "cueId" : 8,
+          "text" : "Margarita Miroshchenko."
+        },
+        {
+          "cueId" : 9,
+          "text" : "Good afternoon."
+        },
+        {
+          "cueId" : 10,
+          "text" : "Ready. Thank you."
+        },
+        {
+          "cueId" : 11,
+          "text" : "Marina Kushnareva."
+        },
+        {
+          "cueId" : 12,
+          "text" : "Good evening."
+        },
+        {
+          "cueId" : 13,
+          "text" : "Tatyana."
+        },
+        {
+          "cueId" : 14,
+          "text" : "Hello."
+        },
+        {
+          "cueId" : 15,
+          "text" : "Ready."
+        },
+        {
+          "cueId" : 16,
+          "text" : "So, we have distance learners now."
+        },
+        {
+          "cueId" : 17,
+          "text" : "Yuri, and I'm still here."
+        },
+        {
+          "cueId" : 18,
+          "text" : "Oh, yes, Svetlana."
+        },
+        {
+          "cueId" : 19,
+          "text" : "Hello."
+        },
+        {
+          "cueId" : 20,
+          "text" : "Hello."
+        },
+        {
+          "cueId" : 21,
+          "text" : "Something keeps throwing me off today."
+        },
+        {
+          "cueId" : 22,
+          "text" : "It's just awful every minute."
+        },
+        {
+          "cueId" : 23,
+          "text" : "Well, I'm ready."
+        },
+        {
+          "cueId" : 24,
+          "text" : "Now definitely distance learners, right?"
+        }
+      ],
+      "responseFile" : "001-response.raw.bin",
+      "responseHeaders" : {
+        "Content-Length" : "1419",
+        "Content-Type" : "application\/json; charset=utf-8",
+        "Date" : "Sat, 03 Oct 2026 13:47:11 GMT"
+      },
+      "responseSHA256" : "c041ed17bee4daa194230240182372195bd18e4a22f765301f5095c1e40d91a4",
+      "sentBodyFile" : "001-request-sent.body.bin",
+      "sentBodySHA256" : "d506d712e4d016c33857f070d0830b2bfa9b03c3f0fdc8d7b74b37349b4e7f88",
+      "sentHeaders" : {
+        "Content-Type" : "application\/json"
+      },
+      "sentTimeout" : 180,
+      "url" : "http:\/\/127.0.0.1:11434\/api\/chat"
+    }
+  ],
+  "cancelled" : false,
+  "configuration" : "DIAGNOSTIC: batchSize=32, maximumAttempts=1, checkpoint reuse disabled; at most one chat request",
+  "contextIdentity" : "022950cbaabd0d755af89cf4f85a8b683a7fd1afd66d7da182a7e081c2084b59",
+  "countAligned" : true,
+  "diagnosticChecksPassed" : true,
+  "documentTitle" : "Zoom \/ 2026-09-26 13.00.44 Полнолуние 26 сентября 2026 \/ video2572105971.mp4",
+  "expectedDigest" : "c49d986b0764f5881c476eb21435bb62b7abc62347aab3d4a6071e811be510a1",
+  "finalCues" : [
+    {
+      "end" : 1.34,
+      "id" : 1,
+      "start" : 0.16,
+      "text" : "Okay, I'll ask later."
+    },
+    {
+      "end" : 3.06,
+      "id" : 2,
+      "start" : 1.86,
+      "text" : "Irina Adamovich."
+    },
+    {
+      "end" : 12.49,
+      "id" : 3,
+      "start" : 10.76,
+      "text" : "Hello."
+    },
+    {
+      "end" : 24.1,
+      "id" : 4,
+      "start" : 12.91,
+      "text" : "Hello. Ready. Thank you."
+    },
+    {
+      "end" : 26.85,
+      "id" : 5,
+      "start" : 25.59,
+      "text" : "Lyubov Zueva."
+    },
+    {
+      "end" : 31.83,
+      "id" : 6,
+      "start" : 28.52,
+      "text" : "Hello."
+    },
+    {
+      "end" : 42.55,
+      "id" : 7,
+      "start" : 32.28,
+      "text" : "Hello. Ready. Thank you."
+    },
+    {
+      "end" : 44.16,
+      "id" : 8,
+      "start" : 43.06,
+      "text" : "Margarita Miroshchenko."
+    },
+    {
+      "end" : 47.37,
+      "id" : 9,
+      "start" : 46.05,
+      "text" : "Good afternoon."
+    },
+    {
+      "end" : 58.1,
+      "id" : 10,
+      "start" : 53.29,
+      "text" : "Ready. Thank you."
+    },
+    {
+      "end" : 62.07,
+      "id" : 11,
+      "start" : 59.3,
+      "text" : "Marina Kushnareva."
+    },
+    {
+      "end" : 66.43,
+      "id" : 12,
+      "start" : 63.8,
+      "text" : "Good evening."
+    },
+    {
+      "end" : 81.82,
+      "id" : 13,
+      "start" : 76.95,
+      "text" : "Tatyana."
+    },
+    {
+      "end" : 88.04,
+      "id" : 14,
+      "start" : 84.77,
+      "text" : "Hello."
+    },
+    {
+      "end" : 98.34,
+      "id" : 15,
+      "start" : 97.86,
+      "text" : "Ready."
+    },
+    {
+      "end" : 100,
+      "id" : 16,
+      "start" : 98.76,
+      "text" : "So, we have distance learners now."
+    },
+    {
+      "end" : 104.17,
+      "id" : 17,
+      "start" : 102.99,
+      "text" : "Yuri, and I'm still here."
+    },
+    {
+      "end" : 105.92,
+      "id" : 18,
+      "start" : 105.07,
+      "text" : "Oh, yes, Svetlana."
+    },
+    {
+      "end" : 108.16,
+      "id" : 19,
+      "start" : 106.78,
+      "text" : "Hello."
+    },
+    {
+      "end" : 109.03,
+      "id" : 20,
+      "start" : 108.16,
+      "text" : "Hello."
+    },
+    {
+      "end" : 112.3,
+      "id" : 21,
+      "start" : 110.12,
+      "text" : "Something keeps throwing me off today."
+    },
+    {
+      "end" : 114.06,
+      "id" : 22,
+      "start" : 112.44,
+      "text" : "It's just awful every minute."
+    },
+    {
+      "end" : 138.73,
+      "id" : 23,
+      "start" : 116.25,
+      "text" : "Well, I'm ready."
+    },
+    {
+      "end" : 144.24,
+      "id" : 24,
+      "start" : 142.5,
+      "text" : "Now definitely distance learners, right?"
+    }
+  ],
+  "fixtureSHA256" : "7027a9cf6d6f2aa966d2692937ac94b839336b8410d337694cda892ece869b23",
+  "idOrderAligned" : true,
+  "issues" : [
+
+  ],
+  "maximumNetworkTimeoutSeconds" : 180,
+  "mode" : "LOCAL_REAL_MODEL_CAUSAL_DIAGNOSTIC",
+  "probeVersion" : "pr9-causal-trace-v1",
+  "productionContractClaim" : false,
+  "protocolVersion" : "translategemma-booktext-owned-cues-v5-docmeta512-lineage2-overlap2x600-source-anchor1-ctx8k",
+  "rawFinalComparisons" : [
+    {
+      "cueID" : 1,
+      "finalText" : "Okay, I'll ask later.",
+      "rawRowCount" : 1,
+      "rawText" : "Okay, I'll ask later.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 2,
+      "finalText" : "Irina Adamovich.",
+      "rawRowCount" : 1,
+      "rawText" : "Irina Adamovich.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 3,
+      "finalText" : "Hello.",
+      "rawRowCount" : 1,
+      "rawText" : "Hello.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 4,
+      "finalText" : "Hello. Ready. Thank you.",
+      "rawRowCount" : 1,
+      "rawText" : "Hello. Ready. Thank you.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 5,
+      "finalText" : "Lyubov Zueva.",
+      "rawRowCount" : 1,
+      "rawText" : "Lyubov Zueva.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 6,
+      "finalText" : "Hello.",
+      "rawRowCount" : 1,
+      "rawText" : "Hello.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 7,
+      "finalText" : "Hello. Ready. Thank you.",
+      "rawRowCount" : 1,
+      "rawText" : "Hello. Ready. Thank you.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 8,
+      "finalText" : "Margarita Miroshchenko.",
+      "rawRowCount" : 1,
+      "rawText" : "Margarita Miroshchenko.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 9,
+      "finalText" : "Good afternoon.",
+      "rawRowCount" : 1,
+      "rawText" : "Good afternoon.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 10,
+      "finalText" : "Ready. Thank you.",
+      "rawRowCount" : 1,
+      "rawText" : "Ready. Thank you.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 11,
+      "finalText" : "Marina Kushnareva.",
+      "rawRowCount" : 1,
+      "rawText" : "Marina Kushnareva.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 12,
+      "finalText" : "Good evening.",
+      "rawRowCount" : 1,
+      "rawText" : "Good evening.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 13,
+      "finalText" : "Tatyana.",
+      "rawRowCount" : 1,
+      "rawText" : "Tatyana.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 14,
+      "finalText" : "Hello.",
+      "rawRowCount" : 1,
+      "rawText" : "Hello.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 15,
+      "finalText" : "Ready.",
+      "rawRowCount" : 1,
+      "rawText" : "Ready.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 16,
+      "finalText" : "So, we have distance learners now.",
+      "rawRowCount" : 1,
+      "rawText" : "So, we have distance learners now.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 17,
+      "finalText" : "Yuri, and I'm still here.",
+      "rawRowCount" : 1,
+      "rawText" : "Yuri, and I'm still here.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 18,
+      "finalText" : "Oh, yes, Svetlana.",
+      "rawRowCount" : 1,
+      "rawText" : "Oh, yes, Svetlana.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 19,
+      "finalText" : "Hello.",
+      "rawRowCount" : 1,
+      "rawText" : "Hello.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 20,
+      "finalText" : "Hello.",
+      "rawRowCount" : 1,
+      "rawText" : "Hello.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 21,
+      "finalText" : "Something keeps throwing me off today.",
+      "rawRowCount" : 1,
+      "rawText" : "Something keeps throwing me off today.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 22,
+      "finalText" : "It's just awful every minute.",
+      "rawRowCount" : 1,
+      "rawText" : "It's just awful every minute.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 23,
+      "finalText" : "Well, I'm ready.",
+      "rawRowCount" : 1,
+      "rawText" : "Well, I'm ready.",
+      "rawTrimEqualsFinal" : true
+    },
+    {
+      "cueID" : 24,
+      "finalText" : "Now definitely distance learners, right?",
+      "rawRowCount" : 1,
+      "rawText" : "Now definitely distance learners, right?",
+      "rawTrimEqualsFinal" : true
+    }
+  ],
+  "requestOverrideApplied" : true,
+  "requestedModel" : "translategemma:4b",
+  "schemaVersion" : 1,
+  "semanticVerdict" : "NOT_EVALUATED",
+  "sourceHead" : "afe4a79c789349258a504d6348febabc7591a0ed",
+  "timestampsAligned" : true,
+  "verifiedDigest" : "c49d986b0764f5881c476eb21435bb62b7abc62347aab3d4a6071e811be510a1",
+  "wireScope" : "Exact URLRequest.httpBody bytes plus request metadata; URLSession framing\/automatic headers are not captured"
+}

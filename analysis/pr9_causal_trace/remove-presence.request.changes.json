@@ -1,0 +1,39 @@
+{
+  "purpose": "CAUSAL_COUNTERFACTUAL_ONLY_NOT_A_REPAIR",
+  "originalRequestSHA256": "d20794f85cc98149d329a81fa689e891abc1007e7e11653356500a1d264bf119",
+  "counterfactualRequestSHA256": "d506d712e4d016c33857f070d0830b2bfa9b03c3f0fdc8d7b74b37349b4e7f88",
+  "changes": [
+    {
+      "id": 3,
+      "original": "Я есть. Здравствуйте.",
+      "counterfactual": "Здравствуйте."
+    },
+    {
+      "id": 6,
+      "original": "Здравствуйте. Я есть.",
+      "counterfactual": "Здравствуйте."
+    },
+    {
+      "id": 9,
+      "original": "Добрый день. Я есть.",
+      "counterfactual": "Добрый день."
+    },
+    {
+      "id": 12,
+      "original": "Добрый вечер. Я есть.",
+      "counterfactual": "Добрый вечер."
+    },
+    {
+      "id": 14,
+      "original": "Я есть.",
+      "counterfactual": "Здравствуйте."
+    },
+    {
+      "id": 19,
+      "original": "Здравствуйте. Я есть.",
+      "counterfactual": "Здравствуйте."
+    }
+  ],
+  "contextAndOptionsUnchanged": true,
+  "noProductionIntegration": true
+}
