@@ -22,3 +22,21 @@ assert child.wait(timeout=5) == 143
 assert not path.exists(), 'native SIGTERM leaked owned TMP'
 print('NATIVE_SIGTERM_AND_FOREIGN_LIVE_PASS')
 PYTEST
+python3 - "$TMPDIR/owned-tmp-probe" <<'PYTEST'
+import os, pathlib, signal, subprocess, sys, time
+probe = sys.argv[1]
+owner = subprocess.Popen([probe, '--orphan'], stdout=subprocess.PIPE, text=True)
+path_text, pid_text = owner.stdout.readline().strip().rsplit(' ', 1)
+path, pid = pathlib.Path(path_text), int(pid_text)
+try:
+    owner.kill()
+    owner.wait()
+    subprocess.run([probe], check=True)
+    assert path.exists(), 'live no-open-file native child was deleted after owner crash'
+finally:
+    os.killpg(pid, signal.SIGKILL)
+time.sleep(.2)
+subprocess.run([probe], check=True)
+assert not path.exists(), 'stopped native child did not recover'
+print('NATIVE_CRASH_LIVE_CHILD_AND_RECOVERY_PASS')
+PYTEST

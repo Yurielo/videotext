@@ -3,6 +3,26 @@ import Darwin
 
 @main struct OwnedTMPProbe {
     static func main() async throws {
+        if CommandLine.arguments.contains("--recover") {
+            try OwnedTemporaryWorkspace.recover()
+            return
+        }
+        if CommandLine.arguments.contains("--orphan") {
+            let workspace = try OwnedTemporaryWorkspace()
+            let child = Process()
+            child.executableURL = URL(fileURLWithPath: "/bin/sleep")
+            child.arguments = ["20"]
+            child.standardOutput = FileHandle.nullDevice
+            child.standardError = FileHandle.nullDevice
+            try workspace.prepareLaunch()
+            try child.run()
+            try workspace.attachChild(child.processIdentifier)
+            print("\(workspace.url.path) \(child.processIdentifier)")
+            fflush(stdout)
+            sleep(20)
+            workspace.close()
+            return
+        }
         if CommandLine.arguments.contains("--wait") {
             let workspace = try OwnedTemporaryWorkspace()
             print(workspace.url.path)
@@ -43,6 +63,9 @@ import Darwin
             let failed = try await runner.run("/bin/sh", ["-c", "echo fixture > \"$TMPDIR/scratch\"; exit 7"])
             precondition(failed.exitCode == 7)
         }
+        let background = try await runner.run("/bin/sh", ["-c", "sleep 20 >/dev/null 2>&1 & printf %s $!"])
+        let backgroundPID = Int32(background.stdout)!
+        precondition(kill(backgroundPID, 0) != 0, "background descendant survived successful command")
         do { _ = try await runner.run("/does-not-exist", []) } catch { }
         let task = Task { try await runner.run("/bin/sleep", ["10"]) }
         try await Task.sleep(nanoseconds: 100_000_000)

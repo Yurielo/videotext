@@ -2,6 +2,11 @@
 
 set -euo pipefail
 
+# Contain compiler/tool scratch; explicit application/project/evidence outputs persist.
+if [[ "${VIDEOTEXT_TMP_RUNNER:-}" != "1" ]]; then
+  exec python3 "$(cd "$(dirname "$0")" && pwd)/owned_tmp.py" /bin/bash "$0" "$@"
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_ROOT="$ROOT/../work"
 OUTPUT_ROOT="$ROOT/../outputs"
@@ -61,6 +66,7 @@ release_files() {
   printf '%s\n' \
     "$ROOT/scripts/build_app.sh" \
     "$ROOT/scripts/test_e2e.sh" \
+    "$ROOT/scripts/owned_tmp.py" \
     "$ROOT/scripts/test_project_schema.sh" \
     "$ROOT/scripts/test_human_review.sh" \
     "$ROOT/scripts/test_topics.sh" \

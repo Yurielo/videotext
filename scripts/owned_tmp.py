@@ -15,7 +15,7 @@ import uuid
 
 
 def namespace():
-    return Path(tempfile.gettempdir()) / f"videotext-shell-owned-v1-{os.getuid()}"
+    return Path(tempfile.gettempdir()).resolve() / f"videotext-shell-owned-v1-{os.getuid()}"
 
 
 def identity(path):
@@ -48,10 +48,35 @@ def group_alive(group):
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True
+        # Darwin may report EPERM for a vanished group. A complete successful
+        # group snapshot can prove absence; failed/incomplete scans retain.
+        try:
+            scan = subprocess.run(['/bin/ps', '-axo', 'pgid='], capture_output=True, timeout=5)
+            groups = [int(value) for value in scan.stdout.split()]
+            return scan.returncode != 0 or bool(scan.stderr) or group in groups
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return True
+
+
+def nested_native_live(path):
+    for namespace_path in path.rglob(f'videotext-owned-v1-{os.getuid()}'):
+        for child in namespace_path.iterdir():
+            try:
+                record = json.loads((child / 'owner.json').read_text())
+                if (record.get('schema') != 2 or record.get('id') != child.name or
+                        record.get('path') != str(child.resolve()) or
+                        list(identity(child)) != [record.get('device'), record.get('inode')]):
+                    return True
+                if record.get('launchPending') is not False or alive(record.get('pid')) or group_alive(record.get('childGroup')):
+                    return True
+            except (OSError, ValueError, TypeError):
+                return True
+    return False
 
 
 def foreign_open(path):
+    if nested_native_live(path):
+        return True
     scanner = shutil.which('lsof') or '/usr/sbin/lsof'
     try:
         result = subprocess.run([scanner, '-nP', '+D', str(path), '-Fp'], capture_output=True, timeout=10)
@@ -68,9 +93,9 @@ def recover(base):
     for path in base.iterdir():
         try:
             marker = json.loads((path / 'owner.json').read_text())
-            if (marker.get('schema') != 1 or marker.get('id') != path.name or
+            if (marker.get('schema') != 2 or marker.get('id') != path.name or
                     marker.get('path') != str(path) or list(identity(path)) != marker.get('identity') or
-                    alive(marker.get('pid')) or group_alive(marker.get('child_group'))):
+                    marker.get('launch_pending') is not False or alive(marker.get('pid')) or group_alive(marker.get('child_group'))):
                 continue
             with os.fdopen(os.open(path / 'lease', os.O_RDONLY | os.O_NOFOLLOW), 'r') as lease:
                 fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -91,14 +116,15 @@ class Workspace:
         self.token = list(identity(self.path))
         self.lease = open(self.path / 'lease', 'x')
         fcntl.flock(self.lease, fcntl.LOCK_EX)
-        self.marker = {'schema': 1, 'id': self.path.name, 'path': str(self.path),
-                       'identity': self.token, 'pid': os.getpid()}
+        self.marker = {'schema': 2, 'id': self.path.name, 'path': str(self.path),
+                       'identity': self.token, 'pid': os.getpid(), 'child_group': None, 'launch_pending': False}
         (self.path / 'owner.json').write_text(json.dumps(self.marker))
 
     def close(self):
         try:
             if (list(identity(self.path)) == self.token and
                     json.loads((self.path / 'owner.json').read_text()) == self.marker and
+                    self.marker.get('launch_pending') is False and not group_alive(self.marker.get('child_group')) and
                     not foreign_open(self.path)):
                 shutil.rmtree(self.path)
         finally:
@@ -132,9 +158,12 @@ def supervise(command):
             env['VIDEOTEXT_EPHEMERAL_WORK_ROOT'] = str(evidence)
         for signum in (signal.SIGINT, signal.SIGTERM):
             old_handlers[signum] = signal.signal(signum, interrupted)
+        workspace.marker['launch_pending'] = True
+        (workspace.path / 'owner.json').write_text(json.dumps(workspace.marker))
         child = subprocess.Popen(command, env=env, start_new_session=True,
                                  pass_fds=(workspace.lease.fileno(),))
         workspace.marker['child_group'] = child.pid
+        workspace.marker['launch_pending'] = False
         marker = workspace.path / 'owner.json'
         pending = workspace.path / 'owner.pending'
         pending.write_text(json.dumps(workspace.marker))
@@ -154,6 +183,9 @@ def supervise(command):
                     break
         return 128 + caught[-1] if caught else code
     finally:
+        if child is None:
+            workspace.marker['launch_pending'] = False
+            (workspace.path / 'owner.json').write_text(json.dumps(workspace.marker))
         if child is not None:
             # The process group is created by this invocation, never a name/prefix match.
             try:
@@ -163,9 +195,7 @@ def supervise(command):
             # Wait for exact session descendants to close files before deletion.
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
-                try:
-                    os.killpg(child.pid, 0)
-                except ProcessLookupError:
+                if not group_alive(child.pid):
                     break
                 time.sleep(.02)
             else:
