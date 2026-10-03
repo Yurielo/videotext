@@ -705,7 +705,7 @@ struct EndToEndTest {
         let reportURL = layout.translationReportURL(source: .ru, target: .en)
         let reportBytes = try Data(contentsOf: reportURL)
         let report = try store.decoder.decode(TranslationReport.self, from: reportBytes)
-        let (manifest, reopenedMedia) = try ProjectStore().openProject(at: layout.manifestURL)
+        let (manifest, reopenedMedia) = try ProjectStore().openProject(at: projectURL)
         try require(
             reopenedMedia.standardizedFileURL == mediaURL.standardizedFileURL,
             "Translated project reopened the wrong source"
