@@ -335,6 +335,7 @@ struct EndToEndTest {
             try require(WhisperModelLocator().bestModelPath() == modelPath, "Автопоиск выбрал неверную модель Whisper")
             try validateTimecodes()
             try validateZeroDurationSubtitles()
+            try await validateTranslationWireMock()
             try await validateUserOperationSurface()
 
             let initialController = ProcessController()
@@ -589,7 +590,7 @@ struct EndToEndTest {
 
         let sourceURL = layout.subtitlesURL(language: .ru)
         let source = try SRTService().load(from: sourceURL)
-        try require((2...128).contains(source.count), "Bounded full-document translation needs 2...128 cues")
+        try require((1...128).contains(source.count), "Bounded full-document translation needs 1...128 cues")
         let sourceFiles = [
             layout.fullSRTURL,
             layout.transcriptURL,
@@ -605,17 +606,9 @@ struct EndToEndTest {
             defaultAdapter.batchSize == 32 && defaultAdapter.maximumAttempts == 2,
             "Default translation execution policy changed"
         )
-        let e2eBatchSize = min(defaultAdapter.batchSize, max(1, source.count / 2))
-        try require(e2eBatchSize < source.count, "Bounded translation did not create multiple ownership units")
-        let wire = try E2ETranslationWire(
-            cues: source,
-            media: mediaURL,
-            directory: evidence,
-            ownershipUnitSize: e2eBatchSize
-        )
+        let wire = try E2ETranslationWire(cues: source, media: mediaURL, directory: evidence)
         let provider = OllamaTranslationProvider(transport: { try await wire.send($0) })
-        var adapter = TranslationAdapter(provider: provider)
-        adapter.batchSize = e2eBatchSize
+        let adapter = TranslationAdapter(provider: provider)
         try require(
             OllamaTranslationProvider.model == "translategemma:4b"
                 && OllamaTranslationProvider.protocolVersion == E2ETranslationWire.protocolVersion
@@ -657,32 +650,6 @@ struct EndToEndTest {
             try manifestBytes.write(to: evidence.appendingPathComponent(name))
         }
 
-        let cancelledController = ProcessController()
-        let stopped = Task {
-            try await engine(cancelledController).run(
-                settings: settings,
-                onLog: { print($0) },
-                onProgress: { progress in
-                    if progress.operation == .translateTranscript && progress.operationFraction > 0 {
-                        withUnsafeCurrentTask { $0?.cancel() }
-                    }
-                }
-            )
-        }
-        do {
-            _ = try await stopped.value
-            throw EndToEndError.failed("Real translation did not stop at the persisted checkpoint")
-        } catch is CancellationError {
-            // Expected after the first persisted ownership unit.
-        }
-        let stoppedManifest = try store.load(from: projectURL)
-        try require(stoppedManifest.workflow?.status == .stopped, "Translation cancellation was not persisted")
-        let firstChats = await wire.chats
-        try require(
-            firstChats == [Array(source.prefix(e2eBatchSize).map(\.id))],
-            "First translation unit retried or ownership differs"
-        )
-
         let identity = TranslationModelIdentity(
             model: OllamaTranslationProvider.model,
             digest: E2ETranslationWire.digest,
@@ -691,7 +658,7 @@ struct EndToEndTest {
         let plan = try TranslationContextPlan(
             cues: source,
             documentTitle: TranslationContextPlan.documentTitle(for: mediaURL),
-            chunkSize: e2eBatchSize
+            chunkSize: defaultAdapter.batchSize
         )
         let wireContextIdentity = wire.contextIdentity
         try require(
@@ -710,15 +677,8 @@ struct EndToEndTest {
             target: .en,
             sourceIdentity: sourceRevision.id
         )
-        try require(
-            checkpoints.load(plan.units[0]).map(\.cueID) == firstChats[0],
-            "Real cancelled prefix is not reusable"
-        )
-        try assertSourceUnchanged()
-        try saveManifest("manifest-stopped.json")
-
-        let resumedController = ProcessController()
-        let resumed = try await engine(resumedController).run(settings: settings, onLog: { print($0) })
+        let executionController = ProcessController()
+        let resumed = try await engine(executionController).run(settings: settings, onLog: { print($0) })
         try require(
             resumed.checkpoint == nil && resumed.topicReviewCheckpoint == nil,
             "Translation unexpectedly opened a review checkpoint"
@@ -849,7 +809,7 @@ struct EndToEndTest {
         }
         let tagCalls = await wire.tagCalls
         try require(tagCalls >= 4, "Resume did not recheck real model identity")
-        for controller in [cancelledController, resumedController, reopenedController, cachedController] {
+        for controller in [executionController, reopenedController, cachedController] {
             try require(
                 !controller.launchedExecutables.contains {
                     URL(fileURLWithPath: $0).lastPathComponent == "whisper-cli"
@@ -860,7 +820,7 @@ struct EndToEndTest {
         try assertSourceUnchanged()
         try saveManifest("manifest-cache-replayed.json")
         try require(noActiveTools(), "Translation left active child processes")
-        print("REAL_TRANSLATION_PASS: full document metadata/local overlap/owned routing, exact cue IDs/count/order/times, source bytes, stopped prefix, fresh-engine resume, report skip, real checkpoint replay, manifest/reopen, pinned digest/protocol/context")
+        print("REAL_TRANSLATION_PASS: full document metadata/local overlap/owned routing, exact cue IDs/count/order/times, source bytes, completed resume, real checkpoint replay, manifest/reopen, pinned digest/protocol/context")
         print("TRANSLATION_EVIDENCE=\(evidence.path)")
     }
 

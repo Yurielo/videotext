@@ -217,7 +217,9 @@ assert_snapshot
 
 for run in 1 2; do
   log="$RUN_DIR/e2e-$run.log"
-  if ! "$ROOT/scripts/test_e2e.sh" "$VIDEO_PATH" "$MODEL_PATH" > "$log" 2>&1; then
+  e2e_evidence="$RUN_DIR/e2e-$run-evidence"
+  mkdir -p "$e2e_evidence"
+  if ! QA_E2E_EVIDENCE_DIR="$e2e_evidence" "$ROOT/scripts/test_e2e.sh" "$VIDEO_PATH" "$MODEL_PATH" > "$log" 2>&1; then
     record "e2e_${run}_command" "$ROOT/scripts/test_e2e.sh $VIDEO_PATH $MODEL_PATH"
     record "e2e_${run}_exit_status" 1
     record "e2e_${run}_log" "$log"
@@ -228,6 +230,7 @@ for run in 1 2; do
   record "e2e_${run}_exit_status" 0
   record "e2e_${run}_status" PASS
   record "e2e_${run}_log" "$log"
+  record "e2e_${run}_evidence" "$e2e_evidence"
   assert_snapshot
   require_no_active_tools
 done

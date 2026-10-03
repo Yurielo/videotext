@@ -28,6 +28,7 @@ trap cleanup_source EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 export VIDEOTEXT_HISTORY_PATH="${SOURCE_PATH}/history.json"
+export QA_E2E_EVIDENCE_DIR="${QA_E2E_EVIDENCE_DIR:-${SOURCE_PATH}/evidence}"
 EXTENSION="${VIDEO_PATH##*.}"
 TEST_VIDEO="${SOURCE_PATH}/Короткое видео Юрий's test.${EXTENSION}"
 cp "${VIDEO_PATH}" "${TEST_VIDEO}"
