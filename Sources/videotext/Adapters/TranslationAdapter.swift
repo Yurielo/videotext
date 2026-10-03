@@ -3,6 +3,7 @@ import Foundation
 struct TranslationRequestCue: Codable, Equatable {
     var id: Int
     var text: String
+    var context: TranslationCueContext? = nil
 }
 
 struct TranslationIssue: Equatable {
@@ -17,6 +18,7 @@ struct TranslationAdapterResult {
     var model: String
     var modelDigest: String?
     var protocolVersion: String
+    var contextIdentity: String? = nil
 }
 
 struct TranslationModelIdentity: Codable, Equatable {
@@ -64,6 +66,9 @@ struct TranslationAdapter {
         cues: [SubtitleCue],
         source: ArtifactLanguage,
         target: ArtifactLanguage,
+        documentTitle: String? = nil,
+        sourceIdentity: String? = nil,
+        checkpointDirectory: URL? = nil,
         onProgress: @escaping (Double) -> Void,
         onLog: @escaping (String) -> Void
     ) async throws -> TranslationAdapterResult {
@@ -73,61 +78,70 @@ struct TranslationAdapter {
         guard !cues.isEmpty else { throw WorkflowError.missingFullSRT }
         let identity = try await provider.preferredIdentity()
         let model = identity.model
+        let plan = try TranslationContextPlan(cues: cues, documentTitle: documentTitle, chunkSize: batchSize)
+        let checkpoints = try TranslationCheckpointStore(directory: checkpointDirectory, plan: plan,
+            identity: identity, source: source, target: target, sourceIdentity: sourceIdentity)
         var translatedByID: [Int: String] = [:]
         var issues: [TranslationIssue] = []
-        let batches = stride(from: 0, to: cues.count, by: max(batchSize, 1)).map {
-            Array(cues[$0..<min($0 + max(batchSize, 1), cues.count)])
-        }
-
-        for (batchIndex, batch) in batches.enumerated() {
+        for unit in plan.units {
             try Task.checkCancellation()
-            let request = batch.map { TranslationRequestCue(id: $0.id, text: $0.text) }
-            var lastResponse: [Int: String] = [:]
+            var completed: [TranslationCheckpointEntry] = []
+            for entry in checkpoints.load(unit) {
+                let request = unit.owned[completed.count]
+                guard validate(response: [entry.cueID: entry.text], sourceCues: [request], target: target).isEmpty else { break }
+                completed.append(entry)
+                translatedByID[entry.cueID] = entry.text
+            }
+            if !completed.isEmpty { onLog("Перевод: восстановлено cue из checkpoint — \(completed.count).") }
+            var pending = Array(unit.owned.dropFirst(completed.count))
+            var candidates: [Int: String] = [:]
             var reasonsByID: [Int: [String]] = [:]
-            var pending = request
             for attempt in 1...max(maximumAttempts, 1) {
                 guard !pending.isEmpty else { break }
+                try Task.checkCancellation()
+                var receivedResponse = false
                 do {
-                    let response = try await provider.translate(
-                        cues: pending,
-                        source: source,
-                        target: target,
-                        model: model,
-                        correction: nil
-                    )
-                    let newReasons = validate(response: response, sourceCues: pending, target: target)
-                    for cue in pending where newReasons[cue.id] == nil {
-                        if let translated = response[cue.id] { translatedByID[cue.id] = translated }
+                    let response = try await provider.translate(cues: pending, source: source, target: target, model: model, correction: nil)
+                    try Task.checkCancellation()
+                    reasonsByID = validate(response: response, sourceCues: pending, target: target)
+                    for request in pending {
+                        if let text = response[request.id] {
+                            if reasonsByID[request.id] == nil { translatedByID[request.id] = text }
+                            else { candidates[request.id] = text }
+                        }
                     }
-                    for cue in pending where newReasons[cue.id] != nil {
-                        if let translated = response[cue.id] { lastResponse[cue.id] = translated }
-                    }
-                    reasonsByID = newReasons
-                    pending = pending.filter { newReasons[$0.id] != nil }
+                    pending = pending.filter { reasonsByID[$0.id] != nil }
+                    receivedResponse = true
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
-                    let reason = "provider-error: \(error.localizedDescription)"
-                    reasonsByID = Dictionary(uniqueKeysWithValues: pending.map { ($0.id, [reason]) })
+                    try Task.checkCancellation()
+                    reasonsByID = Dictionary(uniqueKeysWithValues: pending.map { ($0.id, ["provider-error: \(error.localizedDescription)"]) })
+                }
+                if receivedResponse {
+                    completed = []
+                    for request in unit.owned {
+                        guard let text = translatedByID[request.id] else { break }
+                        completed.append(TranslationCheckpointEntry(cueID: request.id, text: text))
+                    }
+                    do { try checkpoints.save(completed, unit: unit) }
+                    catch { throw WorkflowError.processFailed("Не удалось сохранить checkpoint перевода: \(error.localizedDescription)") }
                 }
                 if !pending.isEmpty {
-                    let reasons = pending.flatMap { reasonsByID[$0.id] ?? [] }.sorted()
-                    onLog("Пакет перевода \(batchIndex + 1)/\(batches.count), попытка \(attempt), отклонён только для cueId \(pending.map(\.id).map(String.init).joined(separator: ", ")): \(reasons.joined(separator: "; ")).")
+                    onLog("Перевод unit \(unit.index), попытка \(attempt), отклонены cueId: \(pending.map(\.id)).")
                 }
+                onProgress(Double(translatedByID.count) / Double(cues.count))
             }
-
-            for cue in pending {
-                let reasons = reasonsByID[cue.id] ?? ["translation-invalid"]
-                issues.append(TranslationIssue(
-                    cueID: cue.id,
-                    reasonCodes: reasons,
-                    candidateText: lastResponse[cue.id]
-                ))
-                translatedByID[cue.id] = lastResponse[cue.id]?.trimmingCharacters(in: .whitespacesAndNewlines).nonempty ?? cue.text
+            for request in pending {
+                issues.append(TranslationIssue(cueID: request.id, reasonCodes: reasonsByID[request.id] ?? ["translation-invalid"], candidateText: candidates[request.id]))
+                translatedByID[request.id] = candidates[request.id]?.trimmingCharacters(in: .whitespacesAndNewlines).nonempty ?? request.text
             }
-            onProgress(Double(batchIndex + 1) / Double(max(batches.count, 1)))
+            onProgress(Double(translatedByID.count) / Double(cues.count))
         }
-
+        guard Set(translatedByID.keys) == Set(cues.map(\.id)) else {
+            throw WorkflowError.processFailed("Сборка перевода нарушает покрытие cueId.")
+        }
+        try Task.checkCancellation()
         let translated = cues.map { cue in
             SubtitleCue(id: cue.id, start: cue.start, end: cue.end, text: translatedByID[cue.id] ?? cue.text)
         }
@@ -136,7 +150,8 @@ struct TranslationAdapter {
             issues: issues,
             model: model,
             modelDigest: identity.digest,
-            protocolVersion: identity.protocolVersion
+            protocolVersion: identity.protocolVersion,
+            contextIdentity: plan.contextIdentity
         )
     }
 
@@ -160,10 +175,17 @@ struct TranslationAdapter {
             }
             let ratio = Double(translated.count) / Double(max(cue.text.count, 1))
             if ratio < 0.12 || ratio > 7 { reasons.append("length-outlier") }
+            let words = cue.text.split(whereSeparator: { !$0.isLetter })
+            let nameLike = words.count >= 2 && words.allSatisfy { $0.first?.isUppercase == true }
+            let evidence = linguisticEvidence(translated, source: cue.text)
+            if !nameLike && evidence.contains(where: \.isLetter) && !looksLike(evidence, language: target)
+                && (evidence.count >= 12 || (translated == cue.text && words.count >= 2)) {
+                reasons.append("target-language-mismatch")
+            }
             if !reasons.isEmpty { reasonsByID[cue.id] = reasons.sorted() }
         }
-        let combined = response.values.joined(separator: " ")
-        if combined.count >= 40 && !looksLike(combined, language: target) {
+        let combined = sourceCues.map { linguisticEvidence(response[$0.id] ?? "", source: $0.text) }.joined(separator: " ")
+        if combined.count >= 40 && combined.contains(where: \.isLetter) && !looksLike(combined, language: target) {
             for cue in sourceCues {
                 reasonsByID[cue.id, default: []].append("target-language-mismatch")
             }
@@ -177,6 +199,12 @@ struct TranslationAdapter {
         return expression.matches(in: text, range: range).compactMap {
             Range($0.range, in: text).map { String(text[$0]).replacingOccurrences(of: ",", with: ".") }
         }.sorted()
+    }
+
+    private func linguisticEvidence(_ text: String, source: String) -> String {
+        protectedTerms(source).reduce(text) { result, token in
+            result.replacingOccurrences(of: token, with: "", options: .caseInsensitive)
+        }
     }
 
     private func protectedTerms(_ text: String) -> [String] {
@@ -209,8 +237,8 @@ struct TranslationAdapter {
 struct OllamaTranslationProvider: TranslationAIProvider {
     private let baseURL = URL(string: "http://127.0.0.1:11434")!
     static let model = "translategemma:4b"
-    static let protocolVersion = "translategemma-cue-safe-v2"
-    private let maximumOutputTokens = 384
+    static let protocolVersion = "translategemma-booktext-owned-cues-v4-docmeta512-lineage2-overlap2x600-id-array-grammar2-ctx8k"
+    private let maximumOutputTokens = 4096
 
     func preferredModel() async throws -> String {
         (try await preferredIdentity()).model
@@ -235,59 +263,98 @@ struct OllamaTranslationProvider: TranslationAIProvider {
         model: String,
         correction: String?
     ) async throws -> [Int: String] {
-        var result: [Int: String] = [:]
-        for cue in cues {
-            try Task.checkCancellation()
-            let prompt = translationPrompt(
-                cue: cue,
-                source: source,
-                target: target,
-                correction: correction
-            )
+        guard !cues.isEmpty, Set(cues.map(\.id)).count == cues.count else {
+            throw WorkflowError.processFailed("TranslateGemma получила некорректный набор владельцев cueId.")
+        }
+        try Task.checkCancellation()
+        let prompt = translationPrompt(cues: cues, source: source, target: target, correction: correction)
+        let schema: [String: Any] = [
+            "type": "array", "minItems": cues.count, "maxItems": cues.count,
+            "items": ["type": "object", "properties": [
+                "cueId": ["type": "integer", "enum": cues.map(\.id)],
+                "text": ["type": "string"]
+            ], "required": ["cueId", "text"], "additionalProperties": false]
+        ]
             let body: [String: Any] = [
                 "model": model,
                 "stream": false,
+                "format": schema,
                 "messages": [["role": "user", "content": prompt]],
-                "options": ["temperature": 0, "num_predict": outputBudget(for: cue.text)]
+                "options": ["temperature": 0, "num_ctx": 8192, "num_predict": outputBudget(for: cues)]
             ]
-            let data = try await post(path: "api/chat", body: body, timeout: 180)
+            let data = try await post(path: "api/chat", body: body, timeout: 300)
             guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let message = root["message"] as? [String: Any],
                   let content = message["content"] as? String else {
                 throw WorkflowError.processFailed("TranslateGemma вернула ответ без текста перевода.")
             }
             let translated = normalize(content)
-            guard !translated.isEmpty, !translated.contains("```"), !hasUnexpectedLabel(translated) else {
-                throw WorkflowError.processFailed("TranslateGemma вернула непригодный формат перевода для cueId \(cue.id).")
+            guard root["done"] as? Bool != false,
+                  root["done_reason"] as? String == nil || root["done_reason"] as? String == "stop",
+                  !translated.isEmpty, !translated.contains("```"), !hasUnexpectedLabel(translated) else {
+                throw WorkflowError.processFailed("TranslateGemma вернула неполный ответ OWNED_CONTENT.")
             }
-            result[cue.id] = translated
+        let rows = try JSONDecoder().decode([OwnedTranslation].self, from: Data(translated.utf8))
+        guard rows.count == cues.count, Set(rows.map(\.cueId)).count == rows.count,
+              Set(rows.map(\.cueId)) == Set(cues.map(\.id)) else {
+            throw WorkflowError.processFailed("TranslateGemma нарушила ownership cueId в ответе.")
         }
-        return result
+        return Dictionary(uniqueKeysWithValues: rows.map { ($0.cueId, $0.text.trimmingCharacters(in: .whitespacesAndNewlines)) })
     }
 
-    private func translationPrompt(
-        cue: TranslationRequestCue,
+    func translationPrompt(
+        cues: [TranslationRequestCue],
         source: ArtifactLanguage,
         target: ArtifactLanguage,
         correction: String?
     ) -> String {
         let sourceName = source == .ru ? "Russian" : "English"
         let targetName = target == .ru ? "Russian" : "English"
-        let protected = protectedTokens(in: cue.text)
+        let protected = protectedTokens(in: cues.map(\.text).joined(separator: " "))
         let protectedInstruction = protected.isEmpty
             ? ""
             : "Reproduce these tokens exactly, without translating or changing them: \(protected.joined(separator: ", "))."
+        let ownedIDs = Set(cues.map(\.id))
+        let before = Dictionary(uniqueKeysWithValues: cues.map { cue in
+            (String(cue.id), (cue.context?.before ?? []).filter { !ownedIDs.contains($0.id) })
+        })
+        let after = Dictionary(uniqueKeysWithValues: cues.map { cue in
+            (String(cue.id), (cue.context?.after ?? []).filter { !ownedIDs.contains($0.id) })
+        })
+        let owned = cues.map { TranslationContextCue(id: $0.id, text: $0.text) }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let ownedJSON = String(decoding: try! encoder.encode(owned), as: UTF8.self)
+        // Read-only context precedes the owned logical content. The identity
+        // envelope is necessary for SRT assembly, never approximate reflow.
         return """
-        You are TranslateGemma. Translate TEXT from \(sourceName) to \(targetName).
-        Return only the translation of TEXT. Do not return labels, explanations, markdown, or JSON.
-        Preserve meaning, names, terminology, numbers, punctuation, and natural repetitions.
+        You are a professional \(sourceName) (\(source.rawValue)) to \(targetName) (\(target.rawValue)) translator. Your goal is to accurately convey the meaning and nuances of the original \(sourceName) text while adhering to \(targetName) grammar, vocabulary, and cultural sensitivities.
+        For spoken transcripts, preserving the source's incompleteness takes priority over creating a complete grammatical target-language sentence. Never repair the speaker's sentence. Translate incomplete phrases as incomplete phrases.
+        DOCUMENT_CONTEXT (read-only quoted data): \(quoted(cues.first?.context?.document ?? "Timecoded spoken transcript."))
+        CONTEXT_BEFORE (read-only data, keys identify the owner whose context this is): \(String(decoding: try! encoder.encode(before), as: UTF8.self))
+        CONTEXT_AFTER (read-only data, keys identify the owner whose context this is): \(String(decoding: try! encoder.encode(after), as: UTF8.self))
+        Use context only to interpret meaning. Translate only OWNED_CONTENT after the two blank lines. Return a JSON array with exactly one object per owned id: {"cueId": original id, "text": translated text}. Preserve each owned id; context ids have zero output ownership. Never include context-only text, explanations or commentary. Preserve numbers, names, referents, punctuation and natural repetitions. Translate each owned text without importing another cue's words. If speech is incomplete and context does not explicitly supply its continuation, preserve the incomplete fragment; do not add an implied completion or another speaker's words.
+        A pronoun with an adverb but no stated predicate can be unfinished speech. Preserve its unfinished grammatical form, using an ellipsis if necessary. Do not invent a predicate from a neighboring speaker's statement.
         \(protectedInstruction)
-        TEXT: \(cue.text)
+        Produce only the \(targetName) translations in the specified identity envelope. Please translate the following \(sourceName) OWNED_CONTENT into \(targetName):
+
+
+        \(ownedJSON)
         """
     }
 
-    private func outputBudget(for text: String) -> Int {
-        min(maximumOutputTokens, max(96, text.count * 2))
+    func outputBudget(for cues: [TranslationRequestCue]) -> Int {
+        // Reserve the identity envelope even when every utterance is tiny.
+        min(maximumOutputTokens, max(256, cues.reduce(0) { $0 + $1.text.count * 2 + 32 }))
+    }
+
+    private func quoted(_ text: String) -> String {
+        String(decoding: try! JSONEncoder().encode(text), as: UTF8.self)
+    }
+
+    private struct OwnedTranslation: Decodable {
+        var cueId: Int
+        var text: String
     }
 
     private func normalize(_ text: String) -> String {
@@ -341,7 +408,7 @@ struct OllamaTranslationProvider: TranslationAIProvider {
     }
 
     private func matches(_ actual: String, requested: String) -> Bool {
-        actual == requested || actual.split(separator: ":").first == requested.split(separator: ":").first
+        actual == requested
     }
 
     private struct InstalledModel {
@@ -362,6 +429,7 @@ struct OllamaTranslationProvider: TranslationAIProvider {
         } catch let error as WorkflowError {
             throw error
         } catch {
+            if Task.isCancelled || (error as? URLError)?.code == .cancelled { throw CancellationError() }
             throw WorkflowError.topicServiceUnavailable("Ollama не отвечает: \(error.localizedDescription)")
         }
     }

@@ -45,6 +45,10 @@ struct ProjectLayout {
     func translationReportURL(source: ArtifactLanguage, target: ArtifactLanguage) -> URL {
         languageDirectory.appendingPathComponent("translation.\(source.rawValue)-\(target.rawValue).json")
     }
+    func translationCacheDirectory(source: ArtifactLanguage, target: ArtifactLanguage) -> URL {
+        languageDirectory.appendingPathComponent("Translation cache", isDirectory: true)
+            .appendingPathComponent("\(source.rawValue)-\(target.rawValue)", isDirectory: true)
+    }
     var transcriptionQualityURL: URL { qualityDirectory.appendingPathComponent("transcription_quality.json") }
     var reviewTasksURL: URL { supportReviewDirectory.appendingPathComponent("review_tasks.json") }
     var transcriptReviewHTMLURL: URL { reviewDirectory.appendingPathComponent("transcript_review.html") }

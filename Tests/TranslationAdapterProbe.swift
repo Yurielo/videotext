@@ -9,7 +9,7 @@ struct TranslationAdapterProbe {
         ]
         let provider = ScriptedTranslationProvider(responses: [
             [7: "", 9: "We check the line order."],
-            [7: "Version 2 has ten functions."]
+            [7: "Version 2 has ten functions.", 9: "We check the line order."]
         ])
         let result = try await TranslationAdapter(provider: provider).translate(
             cues: source,
@@ -19,7 +19,7 @@ struct TranslationAdapterProbe {
             onLog: { _ in }
         )
         let providerCallCount = await provider.callCount
-        try require(providerCallCount == 2, "невалидный пакет не был повторен ровно один раз")
+        try require(providerCallCount == 2, "невалидный cue не был повторен ровно один раз, либо соседний cue пересчитан")
         try require(result.issues.isEmpty, "валидный повтор оставил ReviewTask")
         try require(result.cues.map(\.id) == [7, 9], "перевод изменил cue ID")
         try require(result.cues.map(\.start) == source.map(\.start), "перевод изменил таймкоды")
@@ -39,7 +39,7 @@ struct TranslationAdapterProbe {
 
         let bad = try await TranslationAdapter(provider: ScriptedTranslationProvider(responses: [
             [7: "Version 3 has ten functions.", 9: "We check the line order."],
-            [7: "Version 3 has ten functions."]
+            [7: "Version 3 has ten functions.", 9: "We check the line order."]
         ])).translate(
             cues: source,
             source: .ru,
@@ -160,7 +160,8 @@ private actor ScriptedTranslationProvider: TranslationAIProvider {
     ) async throws -> [Int: String] {
         let index = min(callCount, max(responses.count - 1, 0))
         callCount += 1
-        return responses[index]
+        let owned = Set(cues.map(\.id))
+        return responses[index].filter { owned.contains($0.key) }
     }
 }
 

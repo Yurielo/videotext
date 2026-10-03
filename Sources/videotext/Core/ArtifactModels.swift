@@ -251,6 +251,9 @@ struct TranslationReport: Codable, Equatable {
     var cueCount: Int
     var reviewTaskIDs: [String]
     var status: ArtifactValidationStatus
+    var contextIdentity: String? = nil
+    var subtitleSHA256: String? = nil
+    var transcriptSHA256: String? = nil
 }
 
 struct SpeedAdjustmentRecord: Codable, Equatable {

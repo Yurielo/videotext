@@ -5,9 +5,12 @@
 `HUMAN_TRANSLATION_REVIEW: FAIL`. The owner rejected semantic outputs from
 `a16ae0c016e94c76b78a5bb2f6fb7e05012c4d78`. The structural benchmark results
 below are historical engineering evidence, not semantic acceptance. PR #9
-remains draft and the previous Candidate must not be promoted. Contextual
-experiments did not satisfy the repair gate and were withdrawn from production.
-See [the investigation and failure evidence](TRANSLATION_CONTEXT_REPAIR_EVIDENCE.md).
+remains draft and the previous Candidate must not be promoted. The earlier V2
+context experiment was rejected and withdrawn. The later owner-selected
+BookText architecture is now implemented, but real V3 validation still flags
+unsupported completion in ID 17. V3 human review is pending; semantic PASS is
+not claimed. See [current V3 evidence](TRANSLATION_OWNERSHIP_V3_EVIDENCE.md) and
+[historical investigation](TRANSLATION_CONTEXT_REPAIR_EVIDENCE.md).
 
 ## Active model map
 
@@ -35,7 +38,7 @@ The translation adapter records the exact translation-model digest and protocol
 version in `TranslationReport`. A changed model, digest or protocol invalidates
 resume for a new translation run while preserving historical revisions.
 
-## Before and after translation evidence
+## Historical before and after translation evidence
 
 The prior Qwen benchmark completed the five-cue synthetic suite in `82.03 s`
 for both directions with `qwen3:8b`. The final TranslateGemma run uses a

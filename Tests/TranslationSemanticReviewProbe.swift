@@ -2,6 +2,7 @@ import Foundation
 
 private struct ReviewFixture: Codable {
     var cues: [SubtitleCue]
+    var documentTitle: String? = nil
 }
 
 private struct ReviewProbeReport: Codable {
@@ -11,6 +12,7 @@ private struct ReviewProbeReport: Codable {
     var cues: [SubtitleCue]
     var structuralIssueCount: Int
     var failedChecks: [String]
+    var contextIdentity: String?
 }
 
 @main
@@ -26,14 +28,14 @@ struct TranslationSemanticReviewProbe {
                 throw WorkflowError.processFailed("Usage: semantic-probe <review-fixture.json> <output.json>")
             }
             let fixture = try JSONDecoder().decode(ReviewFixture.self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1])))
-            let result = try await TranslationAdapter().translate(cues: fixture.cues, source: .ru, target: .en, onProgress: { _ in }, onLog: { print($0) })
+            let result = try await TranslationAdapter().translate(cues: fixture.cues, source: .ru, target: .en, documentTitle: fixture.documentTitle, onProgress: { _ in }, onLog: { print($0) })
             var failures: [String] = []
             if !result.issues.isEmpty { failures.append("structural-validator-issues") }
             if !zip(fixture.cues, result.cues).allSatisfy({ $0.id == $1.id && $0.start == $1.start && $0.end == $1.end }) || fixture.cues.count != result.cues.count {
                 failures.append("cue-alignment-changed")
             }
             failures.append(contentsOf: failureClassChecks(Dictionary(uniqueKeysWithValues: result.cues.map { ($0.id, $0.text) })))
-            let report = ReviewProbeReport(model: result.model, digest: result.modelDigest, protocolVersion: result.protocolVersion, cues: result.cues, structuralIssueCount: result.issues.count, failedChecks: failures)
+            let report = ReviewProbeReport(model: result.model, digest: result.modelDigest, protocolVersion: result.protocolVersion, cues: result.cues, structuralIssueCount: result.issues.count, failedChecks: failures, contextIdentity: result.contextIdentity)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try encoder.encode(report).write(to: URL(fileURLWithPath: CommandLine.arguments[2]), options: .atomic)

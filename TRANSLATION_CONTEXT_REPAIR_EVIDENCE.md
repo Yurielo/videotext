@@ -1,5 +1,13 @@
 # PR #9: Contextual Translation Repair
 
+## Historical checkpoint / current continuation
+
+This document records the rejected V2 experiment at `e6586460e6323a650f6bb139654ee87b1e6fce02`.
+Statements below about active a16 production bytes apply to that checkpoint,
+not the subsequent BookText-architecture implementation. The failed artifacts
+remain unchanged. Current implementation, V3 results and the remaining ID 17
+semantic failure are in [V3 evidence](TRANSLATION_OWNERSHIP_V3_EVIDENCE.md).
+
 ## Owner gate
 
 `HUMAN_TRANSLATION_REVIEW: FAIL` applies to the previously reviewed

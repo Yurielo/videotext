@@ -1385,13 +1385,20 @@ final class WorkflowEngine: @unchecked Sendable {
                     )
                     let sourceSRT = layout.subtitlesURL(language: sourceLanguage)
                     let sourceCues = try srt.load(from: sourceSRT)
+                    if current.activeTranscriptRevision(for: targetLanguage)?.origin == .userEdited {
+                        throw WorkflowError.processFailed("Перевод содержит ручные правки. Новый профиль перевода не будет автоматически заменять принятую пользователем ревизию.")
+                    }
                     let result = try await translationAdapter.translate(
                         cues: sourceCues,
                         source: sourceLanguage,
                         target: targetLanguage,
+                        documentTitle: TranslationContextPlan.documentTitle(for: mediaURL),
+                        sourceIdentity: sourceRevision.id,
+                        checkpointDirectory: layout.translationCacheDirectory(source: sourceLanguage, target: targetLanguage),
                         onProgress: { tracker.update(operation, fraction: $0) },
                         onLog: log
                     )
+                    try Task.checkCancellation()
                     let report = try registerTranslation(
                         result,
                         sourceRevision: sourceRevision,
@@ -2541,13 +2548,20 @@ final class WorkflowEngine: @unchecked Sendable {
                   let report = try? store.decoder.decode(TranslationReport.self, from: Data(contentsOf: reportURL)) else {
                 return false
             }
-            guard let identity = try? await translationAdapter.currentIdentity() else {
+            guard let identity = try? await translationAdapter.currentIdentity(), identity.digest?.isEmpty == false,
+                  let sourceCues = try? srt.load(from: layout.subtitlesURL(language: sourceLanguage)),
+                  let plan = try? TranslationContextPlan(cues: sourceCues, documentTitle: TranslationContextPlan.documentTitle(for: mediaURL), chunkSize: translationAdapter.batchSize),
+                  let targetCues = try? srt.load(from: layout.subtitlesURL(language: targetLanguage)),
+                  sourceCues.count == targetCues.count,
+                  zip(sourceCues, targetCues).allSatisfy({ $0.id == $1.id && $0.start == $1.start && $0.end == $1.end }),
+                  TranslationResumeValidator.outputsMatch(report: report, manifest: manifest, layout: layout) else {
                 return false
             }
             return report.sourceRevisionID == sourceRevision.id
                 && report.model == identity.model
                 && report.modelDigest == identity.digest
                 && report.protocolVersion == identity.protocolVersion
+                && report.contextIdentity == plan.contextIdentity
         case .validateTimeline:
             guard settings.mode != .newProject else { return false }
             guard isAtLeastAsNew(layout.timelineValidationURL, as: layout.fullSRTURL),
@@ -3289,7 +3303,7 @@ final class WorkflowEngine: @unchecked Sendable {
         let subtitleText = try String(contentsOf: subtitleURL, encoding: .utf8)
         let transcriptText = try String(contentsOf: transcriptURL, encoding: .utf8)
         let revisionHash = StableTopicHash.string(
-            "\(sourceRevision.id)|\(result.model)|\(result.modelDigest ?? "unknown")|\(result.protocolVersion)|\(subtitleText)"
+            "\(sourceRevision.id)|\(result.model)|\(result.modelDigest ?? "unknown")|\(result.protocolVersion)|\(result.contextIdentity ?? "legacy")|\(subtitleText)"
         )
         let revisionID = "translation-\(sourceLanguage.rawValue)-\(targetLanguage.rawValue)-\(revisionHash)"
         let transcriptArtifactID = "artifact-\(revisionID)-txt"
@@ -3390,7 +3404,7 @@ final class WorkflowEngine: @unchecked Sendable {
         encoder.dateEncodingStrategy = .iso8601
         try encoder.encode(allTasks).write(to: layout.reviewTasksURL, options: .atomic)
         return TranslationReport(
-            schemaVersion: 2,
+            schemaVersion: 3,
             sourceRevisionID: sourceRevision.id,
             targetRevisionID: revisionID,
             sourceLanguage: sourceLanguage,
@@ -3401,7 +3415,10 @@ final class WorkflowEngine: @unchecked Sendable {
             translatedAt: Date(),
             cueCount: result.cues.count,
             reviewTaskIDs: tasks.map(\.id),
-            status: validation
+            status: validation,
+            contextIdentity: result.contextIdentity,
+            subtitleSHA256: TranslationFingerprint.data(try Data(contentsOf: subtitleURL)),
+            transcriptSHA256: TranslationFingerprint.data(try Data(contentsOf: transcriptURL))
         )
     }
 
