@@ -40,7 +40,7 @@ jobs:
           VIDEOTEXT_APP_PATH: ${{ runner.temp }}/videotext-pr-head.app
         run: |
           codesign --verify --deep --strict "$VIDEOTEXT_APP_PATH"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$VIDEOTEXT_APP_PATH/Contents/Info.plist")" = "com.videotext.app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$VIDEOTEXT_APP_PATH/Contents/Info.plist")" = "local.codex.videotext.v3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$VIDEOTEXT_APP_PATH/Contents/Info.plist")" = "0.6.8"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$VIDEOTEXT_APP_PATH/Contents/Info.plist")" = "2026.09.25.1"
 
