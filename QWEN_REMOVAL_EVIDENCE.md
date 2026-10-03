@@ -2,6 +2,14 @@
 
 ## Current acceptance status
 
+The Product Owner has superseded the semantic interpretation below:
+[`HUMAN_TRANSLATION_REVIEW: PASS`](analysis/pr9_release_acceptance/OWNER_SEMANTIC_DECISION.md).
+ID 17 is accepted as contextually supported elliptical translation. Prior
+automated failures remain historical evidence, not retroactive PASS executions.
+Final technical release readiness is a separate gate; PR #9 remains draft.
+
+### Historical acceptance status before the owner decision
+
 The subsequent v5 source-anchor repair and two real enforcement attempts are
 documented in [new execution evidence](analysis/pr9_source_anchor_attempts/README.md).
 The joint semantic gate still fails; V4 was not created. Earlier V3 evidence

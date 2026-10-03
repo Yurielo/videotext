@@ -1,5 +1,10 @@
 # PR #9: BookText ownership/context implementation and V3
 
+The later Product Owner decision records
+[`HUMAN_TRANSLATION_REVIEW: PASS`](analysis/pr9_release_acceptance/OWNER_SEMANTIC_DECISION.md).
+The V3 failures and execution records below remain historical; they are not
+rewritten as successful automated tests. Technical release gates remain separate.
+
 This is the historical V3 checkpoint at `c37c1c1`. For the subsequent executed
 v5 source-anchor repair and rejected enforcement attempts see
 [new evidence](analysis/pr9_source_anchor_attempts/README.md). No V4 was created
