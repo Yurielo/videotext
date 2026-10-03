@@ -15,7 +15,13 @@ printf 'evidence_directory=%s\ncommand=bash scripts/test_translation_ownership.s
 date -u '+started_at=%Y-%m-%dT%H:%M:%SZ'
 while IFS= read -r source; do
   SWIFT_SOURCES+=("$source")
-done < <(rg --files "${ROOT}/Sources/videotext" -g '*.swift' -g '!**/App/**' -g '!**/UI/**' | sort)
+done < <(
+  if command -v rg >/dev/null 2>&1; then
+    rg --files "${ROOT}/Sources/videotext" -g '*.swift' -g '!**/App/**' -g '!**/UI/**'
+  else
+    find "${ROOT}/Sources/videotext" -name '*.swift' ! -path '*/App/*' ! -path '*/UI/*'
+  fi | sort
+)
 
 INPUT_SIGNATURE="$(shasum -a 256 "${SWIFT_SOURCES[@]}" "${TEST_SOURCE}")"
 printf '%s\n' "${INPUT_SIGNATURE}" > "${EVIDENCE_DIR}/inputs-sha256.before"
