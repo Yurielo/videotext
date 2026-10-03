@@ -288,6 +288,15 @@ for _ in 1 2 3 4 5; do
   sleep 1
 done
 require_no_active_tools
+record smoke_metadata_cleanup_command "xattr -cr $CANDIDATE"
+if ! xattr -cr "$CANDIDATE" > "$RUN_DIR/smoke-metadata-cleanup.log" 2>&1; then
+  record smoke_metadata_cleanup_exit_status 1
+  record smoke_metadata_cleanup_log "$RUN_DIR/smoke-metadata-cleanup.log"
+  fail "не удалось удалить служебные xattr после smoke-запуска"
+fi
+record smoke_metadata_cleanup_exit_status 0
+record smoke_metadata_cleanup_log "$RUN_DIR/smoke-metadata-cleanup.log"
+assert_snapshot
 record codesign_after_command "codesign --verify --deep --strict $CANDIDATE"
 if ! codesign --verify --deep --strict "$CANDIDATE" > "$RUN_DIR/codesign-after.log" 2>&1; then
   record codesign_after_exit_status 1
@@ -368,6 +377,7 @@ required_evidence=(
   e2e_1_command e2e_1_exit_status e2e_1_log
   e2e_2_command e2e_2_exit_status e2e_2_log
   smoke_command smoke_open_exit_status smoke_log
+  smoke_metadata_cleanup_command smoke_metadata_cleanup_exit_status smoke_metadata_cleanup_log
   codesign_before_command codesign_before_exit_status codesign_before_log
   codesign_after_command codesign_after_exit_status codesign_after_log
 )
