@@ -816,11 +816,12 @@ struct EndToEndTest {
             "Initial translation and checkpoint replay did not perform the expected model identity checks"
         )
         for controller in [executionController, reopenedController, cachedController] {
+            let whisperLaunches = controller.launchedExecutables.filter {
+                URL(fileURLWithPath: $0).lastPathComponent == "whisper-cli"
+            }
             try require(
-                !controller.launchedExecutables.contains {
-                    URL(fileURLWithPath: $0).lastPathComponent == "whisper-cli"
-                },
-                "Translation resume unnecessarily launched Whisper"
+                whisperLaunches.count == 1,
+                "Translation resume performed Whisper work beyond the mandatory diagnostics probe"
             )
         }
         try assertSourceUnchanged()
