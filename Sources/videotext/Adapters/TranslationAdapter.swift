@@ -236,9 +236,14 @@ struct TranslationAdapter {
 
 struct OllamaTranslationProvider: TranslationAIProvider {
     private let baseURL = URL(string: "http://127.0.0.1:11434")!
+    private let transport: ((URLRequest) async throws -> Data)?
     static let model = "translategemma:4b"
-    static let protocolVersion = "translategemma-booktext-owned-cues-v4-docmeta512-lineage2-overlap2x600-id-array-grammar2-ctx8k"
+    static let protocolVersion = "translategemma-booktext-owned-cues-v5-docmeta512-lineage2-overlap2x600-source-anchor1-ctx8k"
     private let maximumOutputTokens = 4096
+
+    init(transport: ((URLRequest) async throws -> Data)? = nil) {
+        self.transport = transport
+    }
 
     func preferredModel() async throws -> String {
         (try await preferredIdentity()).model
@@ -333,7 +338,8 @@ struct OllamaTranslationProvider: TranslationAIProvider {
         DOCUMENT_CONTEXT (read-only quoted data): \(quoted(cues.first?.context?.document ?? "Timecoded spoken transcript."))
         CONTEXT_BEFORE (read-only data, keys identify the owner whose context this is): \(String(decoding: try! encoder.encode(before), as: UTF8.self))
         CONTEXT_AFTER (read-only data, keys identify the owner whose context this is): \(String(decoding: try! encoder.encode(after), as: UTF8.self))
-        Use context only to interpret meaning. Translate only OWNED_CONTENT after the two blank lines. Return a JSON array with exactly one object per owned id: {"cueId": original id, "text": translated text}. Preserve each owned id; context ids have zero output ownership. Never include context-only text, explanations or commentary. Preserve numbers, names, referents, punctuation and natural repetitions. Translate each owned text without importing another cue's words. If speech is incomplete and context does not explicitly supply its continuation, preserve the incomplete fragment; do not add an implied completion or another speaker's words.
+        SOURCE ANCHOR CONTRACT: Context may disambiguate meaning, but context may not supply missing content to owned output. For each output cueId, its own source text is the only authority for what is said. Other owned cues are also context, not a source of additional content for this cueId. Interpret an ambiguous expression or an explicit referent using context, but do not add a missing predicate, object, location, action, state or completion from context. If a source cue is incomplete or elliptical, its translation must remain incomplete even when context suggests an obvious continuation. Only semantic material actually present inside that cue's owned source span may appear in its translation. Grammatical adaptation does not authorize adding meaning. Translate what was said, not what the speaker probably intended to say next.
+        Use context only to interpret meaning. Translate only OWNED_CONTENT after the two blank lines. Return a JSON array with exactly one object per owned id: {"cueId": original id, "text": translated text}. Preserve each owned id; context ids have zero output ownership. Never include context-only text, explanations or commentary. Preserve numbers, names, referents, punctuation and natural repetitions. Translate each owned text without importing another cue's words. Incomplete source speech must stay incomplete; no neighboring continuation may be copied or inferred into the owned translation.
         A pronoun with an adverb but no stated predicate can be unfinished speech. Preserve its unfinished grammatical form, using an ellipsis if necessary. Do not invent a predicate from a neighboring speaker's statement.
         \(protectedInstruction)
         Produce only the \(targetName) translations in the specified identity envelope. Please translate the following \(sourceName) OWNED_CONTENT into \(targetName):
@@ -419,10 +425,18 @@ struct OllamaTranslationProvider: TranslationAIProvider {
 
     private func data(for request: URLRequest) async throws -> Data {
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                throw WorkflowError.topicServiceUnavailable("Ollama вернула ошибку HTTP.")
+            try Task.checkCancellation()
+            let data: Data
+            if let transport {
+                data = try await transport(request)
+            } else {
+                let (received, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                    throw WorkflowError.topicServiceUnavailable("Ollama вернула ошибку HTTP.")
+                }
+                data = received
             }
+            try Task.checkCancellation()
             return data
         } catch is CancellationError {
             throw CancellationError()

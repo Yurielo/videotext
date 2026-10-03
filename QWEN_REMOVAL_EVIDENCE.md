@@ -2,6 +2,11 @@
 
 ## Current acceptance status
 
+The subsequent v5 source-anchor repair and two real enforcement attempts are
+documented in [new execution evidence](analysis/pr9_source_anchor_attempts/README.md).
+The joint semantic gate still fails; V4 was not created. Earlier V3 evidence
+below is historical, not the new repair result.
+
 `HUMAN_TRANSLATION_REVIEW: FAIL`. The owner rejected semantic outputs from
 `a16ae0c016e94c76b78a5bb2f6fb7e05012c4d78`. The structural benchmark results
 below are historical engineering evidence, not semantic acceptance. PR #9

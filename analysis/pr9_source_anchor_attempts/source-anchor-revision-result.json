@@ -1,0 +1,156 @@
+{
+  "contextIdentity" : "022950cbaabd0d755af89cf4f85a8b683a7fd1afd66d7da182a7e081c2084b59",
+  "cues" : [
+    {
+      "end" : 1.34,
+      "id" : 1,
+      "start" : 0.16,
+      "text" : "Okay, I'll ask later."
+    },
+    {
+      "end" : 3.06,
+      "id" : 2,
+      "start" : 1.86,
+      "text" : "Irina Adamovich."
+    },
+    {
+      "end" : 12.49,
+      "id" : 3,
+      "start" : 10.76,
+      "text" : "I'm here. Hello."
+    },
+    {
+      "end" : 24.1,
+      "id" : 4,
+      "start" : 12.91,
+      "text" : "Hello. Ready. Thank you."
+    },
+    {
+      "end" : 26.85,
+      "id" : 5,
+      "start" : 25.59,
+      "text" : "Lyubov Zueva."
+    },
+    {
+      "end" : 31.83,
+      "id" : 6,
+      "start" : 28.52,
+      "text" : "Hello. I'm here."
+    },
+    {
+      "end" : 42.55,
+      "id" : 7,
+      "start" : 32.28,
+      "text" : "Hello. Ready. Thank you."
+    },
+    {
+      "end" : 44.16,
+      "id" : 8,
+      "start" : 43.06,
+      "text" : "Margarita Miroshchenko."
+    },
+    {
+      "end" : 47.37,
+      "id" : 9,
+      "start" : 46.05,
+      "text" : "Good afternoon. I am here."
+    },
+    {
+      "end" : 58.1,
+      "id" : 10,
+      "start" : 53.29,
+      "text" : "Ready. Thank you."
+    },
+    {
+      "end" : 62.07,
+      "id" : 11,
+      "start" : 59.3,
+      "text" : "Marina Kushnareva."
+    },
+    {
+      "end" : 66.43,
+      "id" : 12,
+      "start" : 63.8,
+      "text" : "Good evening. I'm here."
+    },
+    {
+      "end" : 81.82,
+      "id" : 13,
+      "start" : 76.95,
+      "text" : "Tatiana."
+    },
+    {
+      "end" : 88.04,
+      "id" : 14,
+      "start" : 84.77,
+      "text" : "I'm here."
+    },
+    {
+      "end" : 98.34,
+      "id" : 15,
+      "start" : 97.86,
+      "text" : "Ready."
+    },
+    {
+      "end" : 100,
+      "id" : 16,
+      "start" : 98.76,
+      "text" : "So, we now have distance learners."
+    },
+    {
+      "end" : 104.17,
+      "id" : 17,
+      "start" : 102.99,
+      "text" : "Yuri, and I am still here."
+    },
+    {
+      "end" : 105.92,
+      "id" : 18,
+      "start" : 105.07,
+      "text" : "Oh, yes, Svetlana."
+    },
+    {
+      "end" : 108.16,
+      "id" : 19,
+      "start" : 106.78,
+      "text" : "Hello. I'm here."
+    },
+    {
+      "end" : 109.03,
+      "id" : 20,
+      "start" : 108.16,
+      "text" : "Hello."
+    },
+    {
+      "end" : 112.3,
+      "id" : 21,
+      "start" : 110.12,
+      "text" : "Something keeps disconnecting me today."
+    },
+    {
+      "end" : 114.06,
+      "id" : 22,
+      "start" : 112.44,
+      "text" : "It's just awful every minute."
+    },
+    {
+      "end" : 138.73,
+      "id" : 23,
+      "start" : 116.25,
+      "text" : "Well, I'm ready."
+    },
+    {
+      "end" : 144.24,
+      "id" : 24,
+      "start" : 142.5,
+      "text" : "Now definitely distance learners, right?"
+    }
+  ],
+  "digest" : "c49d986b0764f5881c476eb21435bb62b7abc62347aab3d4a6071e811be510a1",
+  "failedChecks" : [
+    "17-unsupported-completion"
+  ],
+  "model" : "translategemma:4b",
+  "protocolVersion" : "translategemma-booktext-owned-cues-v5-docmeta512-lineage2-overlap2x600-source-anchor-revision1-ctx8k",
+  "structuralIssueCount" : 0
+}

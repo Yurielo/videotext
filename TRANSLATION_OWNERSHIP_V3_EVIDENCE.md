@@ -1,5 +1,10 @@
 # PR #9: BookText ownership/context implementation and V3
 
+This is the historical V3 checkpoint at `c37c1c1`. For the subsequent executed
+v5 source-anchor repair and rejected enforcement attempts see
+[new evidence](analysis/pr9_source_anchor_attempts/README.md). No V4 was created
+because the new real semantic tests failed.
+
 ## Decision and actual gate
 
 The Product Owner selected DOCUMENT CONTEXT + LOCAL BEFORE/AFTER OVERLAP +

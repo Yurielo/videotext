@@ -9,6 +9,11 @@ struct TranslationOwnershipProbe {
 
         try verifyDocumentMetadata()
         print("path_metadata_lineage=PASS metadata_bound=PASS no_guessed_description=PASS")
+        try await verifySourceAnchorContractWiring()
+        try await verifyProductionSingleBatchContract()
+        try await verifyProductionBatchFailures()
+        print("source_anchor_prompt=PASS source_span_isolation=PASS scripted_context_routing=PASS scripted_alignment=PASS live_semantics=NOT_TESTED")
+        print("scripted_http_single_batch_contract=PASS production_schema_truncation_failure_cancellation=PASS")
         try await verifyOwnershipAndBoundaries()
         print("ownership=PASS boundary_context=PASS alignment=PASS duplicate_input=PASS")
         try await verifyContextResponseRejection()
@@ -29,7 +34,7 @@ struct TranslationOwnershipProbe {
         try await verifyNeutralTokens()
         print("numeric_only=PASS protected_token_passthrough=PASS token_changes_rejected=PASS")
         try await verifyInvalidation(directory: root.appendingPathComponent("invalidation"))
-        print("unchanged_cache=PASS ancestor_context_invalidation=PASS title_source_overlap_digest_protocol_identity_invalidation=PASS")
+        print("unchanged_cache=PASS ancestor_context_invalidation=PASS v4_to_v5_protocol_invalidation=PASS title_source_overlap_digest_protocol_identity_invalidation=PASS")
         try await verifyCheckpointCorruption(directory: root.appendingPathComponent("corruption"))
         print("corrupt_checkpoint=PASS tampered_checkpoint=PASS")
         try verifyReportCompatibilityAndResume(directory: root.appendingPathComponent("report-resume"))
@@ -337,6 +342,205 @@ struct TranslationOwnershipProbe {
         return try JSONDecoder().decode([String: [TranslationContextCue]].self, from: Data(line.dropFirst(prefix.count).utf8))
     }
 
+    private static func sourceAnchorScenarios() -> [(name: String, source: [String], outputs: [String])] {
+        [
+            ("incomplete-predicate",
+             ["Мы ждем автобус у северного входа.", "А мы пока...", "Отправление задерживается."],
+             ["We are waiting for the bus at the north entrance.", "And we, for now...", "The departure is delayed."]),
+            ("incomplete-object",
+             ["Для покупок нужен большой пакет.", "Я принес...", "Положи пакет на стол."],
+             ["A large bag is needed for the shopping.", "I brought...", "Put the bag on the table."]),
+            ("ambiguous-lock",
+             ["Замок на двери заедает.", "Это ключ.", "Он подходит к замку."],
+             ["The door lock sticks.", "It is a key.", "It fits the lock."]),
+            ("ambiguous-water",
+             ["Из земли течет холодная вода.", "Это ключ.", "Вода поступает из подземного источника."],
+             ["Cold water flows out of the ground.", "It is a spring.", "The water comes from an underground source."]),
+            ("explicit-referent-manuscript",
+             ["Рукопись прошла последнюю проверку.", "Она уже готова.", "Можно отправлять текст в печать."],
+             ["The manuscript has passed the final check.", "It is already ready.", "The text can be sent to print."]),
+            ("explicit-referent-person",
+             ["Исследовательница закончила подготовку.", "Она уже готова.", "Можно начинать обсуждение."],
+             ["The researcher has finished preparing.", "She is already ready.", "The discussion can begin."]),
+            ("context-only-detail",
+             ["Поезд отправляется с восточной платформы.", "Да.", "После остановки мы пойдем в библиотеку."],
+             ["The train leaves from the east platform.", "Yes.", "After the stop we will go to the library."])
+        ]
+    }
+
+    private static func verifySourceAnchorContractWiring() async throws {
+        // Scripted responses exercise transport and assembly, not model semantics.
+        let scenarios = sourceAnchorScenarios()
+        try require(OllamaTranslationProvider.protocolVersion.contains("owned-cues-v5-") && OllamaTranslationProvider.protocolVersion.contains("source-anchor1"), "Source-anchor contract lacks new protocol provenance")
+        var contextByScenario: [String: String] = [:]
+        for scenario in scenarios {
+            let ids = [601, 304, 892]
+            let source = ids.enumerated().map { index, id in
+                SubtitleCue(id: id, start: Double(index * 3) + 0.125, end: Double(index * 3) + 1.625, text: scenario.source[index])
+            }
+            var config = configuration(source)
+            config.identity.protocolVersion = OllamaTranslationProvider.protocolVersion
+            let responses = Dictionary(uniqueKeysWithValues: zip(ids, scenario.outputs).map { ($0.0, $0.1) })
+            for size in [1, 2, 3] {
+                let plan = try TranslationContextPlan(cues: source, documentTitle: config.title, chunkSize: size)
+                contextByScenario[scenario.name] = plan.contextIdentity
+                let provider = OwnershipProvider(identity: config.identity, behavior: .scriptedOutputs(responses))
+                let result = try await run(config, provider: provider, batchSize: size)
+                let calls = await provider.calls
+                try assertAlignment(result, source: source)
+                try require(result.issues.isEmpty, "\(scenario.name) scripted valid output was rejected")
+                try require(result.cues.map(\.text) == scenario.outputs, "\(scenario.name) adapter rewrote or merged scripted responses")
+                try require(result.protocolVersion == config.identity.protocolVersion && result.contextIdentity == plan.contextIdentity, "Source-anchor mock lost protocol/context provenance")
+                try require(calls == plan.units.map(\.owned), "\(scenario.name) provider did not receive exact planned owned source spans")
+                try require(calls.flatMap { $0 }.first { $0.id == ids[1] }?.text == scenario.source[1], "Neighboring semantic material was passed as the target's owned source")
+                for call in calls {
+                    let prompt = OllamaTranslationProvider().translationPrompt(cues: call, source: .ru, target: .en, correction: nil)
+                    try assertSourceAnchorPrompt(prompt)
+                    guard let json = prompt.components(separatedBy: "\n\n").last else {
+                        throw OwnershipFailure(message: "Source-anchor owned JSON is absent")
+                    }
+                    let owned = try JSONDecoder().decode([TranslationContextCue].self, from: Data(json.utf8))
+                    try require(owned == call.map { TranslationContextCue(id: $0.id, text: $0.text) }, "\(scenario.name) prompt imported context into an owned span")
+                    let ownerIDs = Set(call.map(\.id))
+                    let before = try promptContext(prompt, label: "CONTEXT_BEFORE")
+                    let after = try promptContext(prompt, label: "CONTEXT_AFTER")
+                    try require(Set(before.keys) == Set(call.map { String($0.id) }) && Set(after.keys) == Set(before.keys), "Source-anchor context has incorrect owner associations")
+                    for request in call {
+                        try require(before[String(request.id)] == request.context!.before.filter { !ownerIDs.contains($0.id) }, "Source-anchor prompt lost before-context interpretation data")
+                        try require(after[String(request.id)] == request.context!.after.filter { !ownerIDs.contains($0.id) }, "Source-anchor prompt lost after-context interpretation data")
+                    }
+                }
+            }
+            if scenario.name.hasPrefix("incomplete-") {
+                try require(scenario.outputs[1].hasSuffix("..."), "Incomplete scripted fixture is not an incomplete fragment")
+            }
+        }
+        try require(contextByScenario["ambiguous-lock"] != contextByScenario["ambiguous-water"], "Ambiguous-expression scenarios did not retain distinct contextual identities")
+        try require(contextByScenario["explicit-referent-manuscript"] != contextByScenario["explicit-referent-person"], "Explicit-referent scenarios did not retain distinct contextual identities")
+    }
+
+    private static func assertSourceAnchorPrompt(_ prompt: String) throws {
+        let marker = "SOURCE ANCHOR CONTRACT: "
+        let sections = prompt.components(separatedBy: "\n").filter { $0.hasPrefix(marker) }
+        guard sections.count == 1, let contract = sections.first else {
+            throw OwnershipFailure(message: "Prompt must contain exactly one source-anchor contract")
+        }
+        for rule in [
+            "Context may disambiguate meaning, but context may not supply missing content to owned output.",
+            "For each output cueId, its own source text is the only authority for what is said.",
+            "Other owned cues are also context, not a source of additional content for this cueId.",
+            "Interpret an ambiguous expression or an explicit referent using context",
+            "do not add a missing predicate, object, location, action, state or completion from context.",
+            "its translation must remain incomplete even when context suggests an obvious continuation.",
+            "Only semantic material actually present inside that cue's owned source span may appear in its translation.",
+            "Grammatical adaptation does not authorize adding meaning."
+        ] {
+            try require(contract.contains(rule), "Source-anchor prompt is missing rule: \(rule)")
+        }
+        try require(!prompt.contains("context does not explicitly supply its continuation") && !prompt.contains("unless context"), "Prompt restored a context-supplied completion exception")
+    }
+
+    private static func verifyProductionSingleBatchContract() async throws {
+        // Real provider, scripted HTTP: this checks protocol wiring, not semantic enforcement.
+        let ids = [601, 304, 892, 115, 708]
+        let texts = ["Мы ждем автобус.", "А мы пока...", "Отправление задерживается.", "Поездка запланирована на завтра.", "Собираемся у северного входа."]
+        let source = ids.enumerated().map { index, id in
+            SubtitleCue(id: id, start: Double(index * 3) + 0.125, end: Double(index * 3) + 1.625, text: texts[index])
+        }
+        let config = configuration(source)
+        let plan = try TranslationContextPlan(cues: source, documentTitle: config.title, chunkSize: 3)
+        let owned = plan.units[0].owned
+        let scripted = ["We are waiting for the bus.", "And we, for now...", "The departure is delayed."]
+        let rows = owned.indices.reversed().map { ["cueId": owned[$0].id, "text": scripted[$0]] as [String: Any] }
+        let content = String(decoding: try JSONSerialization.data(withJSONObject: rows), as: UTF8.self)
+        let reply = try JSONSerialization.data(withJSONObject: ["done": true, "done_reason": "stop", "message": ["role": "assistant", "content": content]])
+        let transport = OwnershipBatchTransport(reply: reply)
+        let provider = OllamaTranslationProvider(transport: { request in try await transport.respond(to: request) })
+        let identity = try await provider.preferredIdentity()
+        try require(identity.model == OllamaTranslationProvider.model && identity.digest == OwnershipBatchTransport.digest && identity.protocolVersion == OllamaTranslationProvider.protocolVersion, "Scripted production identity lost model/digest/protocol provenance")
+        let response = try await provider.translate(cues: owned, source: .ru, target: .en, model: identity.model, correction: nil)
+        try require(Set(response.keys) == Set(owned.map(\.id)), "Production batch returned context-only IDs or lost ownership")
+        try require(owned.indices.allSatisfy { response[owned[$0].id] == scripted[$0] }, "Production batch parser misassociated reordered response IDs/text")
+        let requests = await transport.requests
+        try require(requests.count == 2 && requests[0].url?.path == "/api/tags", "Production provider did not use exactly one identity request and one batch request")
+        let request = requests[1]
+        guard request.url?.path == "/api/chat", request.httpMethod == "POST", let data = request.httpBody,
+              let body = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let messages = body["messages"] as? [[String: Any]], messages.count == 1,
+              let prompt = messages[0]["content"] as? String,
+              let schema = body["format"] as? [String: Any], let items = schema["items"] as? [String: Any],
+              let properties = items["properties"] as? [String: Any], let idSchema = properties["cueId"] as? [String: Any] else {
+            throw OwnershipFailure(message: "Production single batch lacks its JSON chat/schema envelope")
+        }
+        try require(schema["type"] as? String == "array" && schema["minItems"] as? Int == owned.count && schema["maxItems"] as? Int == owned.count, "Production schema does not require the exact owned row count")
+        try require(idSchema["enum"] as? [Int] == owned.map(\.id) && items["additionalProperties"] as? Bool == false, "Production schema permits wrong owner IDs or extra fields")
+        try require(Set(items["required"] as? [String] ?? []) == Set(["cueId", "text"]), "Production schema lost required identity/text fields")
+        try assertSourceAnchorPrompt(prompt)
+        guard let json = prompt.components(separatedBy: "\n\n").last else {
+            throw OwnershipFailure(message: "Production owned source block is absent")
+        }
+        let sourceRows = try JSONDecoder().decode([TranslationContextCue].self, from: Data(json.utf8))
+        try require(sourceRows == owned.map { TranslationContextCue(id: $0.id, text: $0.text) }, "Production prompt imported context-only semantic material into owned source")
+        let documentPrefix = "DOCUMENT_CONTEXT (read-only quoted data): "
+        guard let documentLine = prompt.components(separatedBy: "\n").first(where: { $0.hasPrefix(documentPrefix) }) else {
+            throw OwnershipFailure(message: "Production document metadata is absent")
+        }
+        let document = try JSONDecoder().decode(String.self, from: Data(documentLine.dropFirst(documentPrefix.count).utf8))
+        try require(document == owned[0].context!.document, "Production prompt changed the immutable document metadata")
+        let before = try promptContext(prompt, label: "CONTEXT_BEFORE")
+        let after = try promptContext(prompt, label: "CONTEXT_AFTER")
+        let ownerIDs = Set(owned.map(\.id))
+        try require(Set(before.keys) == Set(owned.map { String($0.id) }) && Set(after.keys) == Set(before.keys), "Production prompt changed context-owner associations")
+        for cue in owned {
+            try require(before[String(cue.id)] == cue.context!.before.filter { !ownerIDs.contains($0.id) }, "Production prompt changed source before-context")
+            try require(after[String(cue.id)] == cue.context!.after.filter { !ownerIDs.contains($0.id) }, "Production prompt changed source after-context")
+        }
+        try require(after["892"]?.map(\.id) == [115, 708], "Single-batch fixture did not preserve non-owned overlap")
+    }
+
+    private static func verifyProductionBatchFailures() async throws {
+        let config = configuration(Array(fixture().prefix(2)))
+        let plan = try TranslationContextPlan(cues: config.cues, documentTitle: config.title, chunkSize: 2)
+        let owned = plan.units[0].owned
+        for failure in OwnershipBatchFailure.allCases {
+            var ids = owned.map(\.id)
+            switch failure {
+            case .unexpectedID: ids[1] = 999
+            case .duplicateID: ids[1] = ids[0]
+            case .missingID: ids.removeLast()
+            case .extraID: ids.append(999)
+            default: break
+            }
+            let rows = ids.map { ["cueId": $0, "text": "Scripted translation."] as [String: Any] }
+            let content = String(decoding: try JSONSerialization.data(withJSONObject: rows), as: UTF8.self)
+            let reply: Data
+            if failure == .malformed { reply = Data("not JSON".utf8) }
+            else {
+                reply = try JSONSerialization.data(withJSONObject: [
+                    "done": failure != .truncated, "done_reason": "stop", "message": ["content": content]
+                ])
+            }
+            let transport = OwnershipBatchTransport(reply: reply, cancel: failure == .cancellation, fail: failure == .transport, urlCancel: failure == .urlCancellation)
+            let provider = OllamaTranslationProvider(transport: { request in try await transport.respond(to: request) })
+            let task = Task { try await provider.translate(cues: owned, source: .ru, target: .en, model: OllamaTranslationProvider.model, correction: nil) }
+            var failed = false
+            do { _ = try await task.value }
+            catch {
+                let expectedCancellation = failure == .cancellation || failure == .urlCancellation
+                try require((error is CancellationError) == expectedCancellation, "Scripted batch failure/cancellation was misclassified")
+                if failure == .transport {
+                    guard let workflowError = error as? WorkflowError, case .topicServiceUnavailable = workflowError else {
+                        throw OwnershipFailure(message: "Injected transport error bypassed production service-error normalization")
+                    }
+                }
+                failed = true
+            }
+            try require(failed, "\(failure.rawValue) production batch published an invalid response")
+            let requests = await transport.requests
+            try require(requests.count == 1 && requests[0].url?.path == "/api/chat", "Failed production batch retried or made unexpected requests")
+        }
+    }
+
     private static func verifySparseContextPrompt() throws {
         let config = configuration()
         let plan = try TranslationContextPlan(cues: config.cues, documentTitle: config.title, chunkSize: 5)
@@ -421,7 +625,8 @@ struct TranslationOwnershipProbe {
     private static func verifyInvalidation(directory: URL) async throws {
         var source = fixture()
         source[0].text = "Opening excerpt " + String(repeating: "x", count: 760)
-        let base = configuration(source)
+        var base = configuration(source)
+        base.identity.protocolVersion = "translategemma-booktext-owned-cues-v4-docmeta512-lineage2-overlap2x600-id-array-grammar2-ctx8k"
         let seed = OwnershipProvider(identity: base.identity)
         try assertSuccessful(try await run(base, provider: seed, directory: directory), source: source)
         let unchanged = OwnershipProvider(identity: base.identity)
@@ -460,8 +665,8 @@ struct TranslationOwnershipProbe {
         changed.identity.model = "ownership-mock-b"
         cases.append(("model-name", changed))
         changed = base
-        changed.identity.protocolVersion = "ownership-test-protocol-b"
-        cases.append(("protocol", changed))
+        changed.identity.protocolVersion = OllamaTranslationProvider.protocolVersion
+        cases.append(("v4-to-v5-source-anchor-protocol", changed))
         changed = base
         changed.sourceIdentity = "source-revision-b"
         cases.append(("source-identity", changed))
@@ -473,6 +678,7 @@ struct TranslationOwnershipProbe {
             let result = try await run(config, provider: provider, directory: directory)
             let calls = await provider.calls
             try assertSuccessful(result, source: config.cues)
+            try require(result.protocolVersion == config.identity.protocolVersion, "Changed \(name) lost its current protocol provenance")
             let plan = try TranslationContextPlan(cues: config.cues, documentTitle: config.title, chunkSize: 3)
             try require(calls.map { $0.map(\.id) } == plan.units.map { $0.owned.map(\.id) }, "Changed \(name) reused stale checkpoints")
         }
@@ -674,6 +880,45 @@ private enum OwnershipCheckpointMutation: String, CaseIterable {
     case duplicateEntry, outOfOrder, contextOnlyEntry, invalidTextWithValidHash
 }
 
+private enum OwnershipBatchFailure: String, CaseIterable {
+    case transport, malformed, truncated, unexpectedID, duplicateID, missingID, extraID, cancellation, urlCancellation
+}
+
+private actor OwnershipBatchTransport {
+    nonisolated static let digest = "verified-scripted-http-digest"
+    private let reply: Data
+    private let cancelReply: Bool
+    private let failReply: Bool
+    private let urlCancelReply: Bool
+    private var chatCalls = 0
+    private(set) var requests: [URLRequest] = []
+
+    init(reply: Data, cancel: Bool = false, fail: Bool = false, urlCancel: Bool = false) {
+        self.reply = reply
+        cancelReply = cancel
+        failReply = fail
+        urlCancelReply = urlCancel
+    }
+
+    func respond(to request: URLRequest) throws -> Data {
+        requests.append(request)
+        if request.url?.path == "/api/tags", request.httpMethod != "POST" {
+            return try JSONSerialization.data(withJSONObject: ["models": [[
+                "name": OllamaTranslationProvider.model, "model": OllamaTranslationProvider.model,
+                "digest": Self.digest
+            ]]])
+        }
+        guard request.url?.path == "/api/chat", request.httpMethod == "POST", chatCalls == 0 else {
+            throw OwnershipFailure(message: "Unexpected request to single-batch scripted HTTP transport")
+        }
+        chatCalls += 1
+        if failReply { throw URLError(.badServerResponse) }
+        if urlCancelReply { throw URLError(.cancelled) }
+        if cancelReply { withUnsafeCurrentTask { $0?.cancel() } }
+        return reply
+    }
+}
+
 private actor OwnershipProvider: TranslationAIProvider {
     enum Behavior {
         case valid
@@ -684,6 +929,7 @@ private actor OwnershipProvider: TranslationAIProvider {
         case throwOnCallOnce(Int)
         case cancelOnCall(Int, throwError: Bool)
         case fixedText(String)
+        case scriptedOutputs([Int: String])
     }
 
     let identity: TranslationModelIdentity
@@ -734,6 +980,13 @@ private actor OwnershipProvider: TranslationAIProvider {
             }
         case let .fixedText(text):
             for cue in cues { response[cue.id] = text }
+        case let .scriptedOutputs(outputs):
+            for cue in cues {
+                guard let output = outputs[cue.id] else {
+                    throw OwnershipFailure(message: "Scripted source-anchor fixture lacks an owned response")
+                }
+                response[cue.id] = output
+            }
         }
         return response
     }
