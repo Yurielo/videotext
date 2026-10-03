@@ -57,7 +57,6 @@ import Darwin
             }
             return (count, bytes)
         }
-        let before = try FileManager.default.contentsOfDirectory(atPath: base.path).count
         let beforeSnapshot = snapshot()
         let runner = ToolRunner()
         for _ in 0..<12 {
@@ -74,7 +73,7 @@ import Darwin
         try await Task.sleep(nanoseconds: 100_000_000)
         task.cancel()
         do { _ = try await task.value; preconditionFailure("cancel passed") } catch is CancellationError { }
-        let unknown = base.appendingPathComponent("foreign-unknown")
+        let unknown = base.appendingPathComponent("foreign-unknown-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: unknown, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: unknown) }
         let live = try OwnedTemporaryWorkspace()
@@ -82,8 +81,8 @@ import Darwin
         precondition(FileManager.default.fileExists(atPath: live.url.path))
         precondition(FileManager.default.fileExists(atPath: unknown.path))
         live.close()
-        let after = try FileManager.default.contentsOfDirectory(atPath: base.path).count
-        precondition(after == before + 1)
+        precondition(!FileManager.default.fileExists(atPath: live.url.path))
+        precondition(FileManager.default.fileExists(atPath: unknown.path))
         let afterSnapshot = snapshot()
         precondition(beforeSnapshot == afterSnapshot)
         print("OWNED_TMP_PASS cycles=12 owned_before=\(beforeSnapshot.0) owned_after=\(afterSnapshot.0) bytes_before=\(beforeSnapshot.1) bytes_after=\(afterSnapshot.1) success/failure/cancel/launch-failure/unknown/live")
