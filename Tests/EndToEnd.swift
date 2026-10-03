@@ -98,6 +98,7 @@ private actor E2ETranslationWire {
 
     private let directory: URL
     private let scripted: ((URLRequest) throws -> Data)?
+    private let ownershipUnitSize: Int
     private let started = Date()
     private var sequence = 0
 
@@ -105,10 +106,12 @@ private actor E2ETranslationWire {
         cues: [SubtitleCue],
         media: URL,
         directory: URL,
+        ownershipUnitSize: Int = 32,
         scripted: ((URLRequest) throws -> Data)? = nil
     ) throws {
         self.directory = directory
         self.scripted = scripted
+        self.ownershipUnitSize = ownershipUnitSize
         let parent = media.deletingLastPathComponent()
         let title = [
             parent.deletingLastPathComponent().lastPathComponent,
@@ -248,14 +251,20 @@ private actor E2ETranslationWire {
         let ownedData = Data((prompt.components(separatedBy: "\n\n\n").last ?? "").utf8)
         let owned = try JSONDecoder().decode([TranslationContextCue].self, from: ownedData)
         let ids = owned.map(\.id)
-        try check(!ids.isEmpty && ids.count <= 32 && Set(ids).count == ids.count, "Invalid owned content")
+        try check(
+            !ids.isEmpty && ids.count <= ownershipUnitSize && Set(ids).count == ids.count,
+            "Invalid owned content"
+        )
         let expected = requests.filter { ids.contains($0.id) }
         try check(
             expected.map(\.id) == ids && zip(owned, expected).allSatisfy { $0.text == $1.text },
             "Owned source/order changed"
         )
         let indices = ids.compactMap { id in requests.firstIndex { $0.id == id } }
-        try check(Set(indices.map { $0 / 32 }).count == 1, "Cross-checkpoint ownership routing")
+        try check(
+            Set(indices.map { $0 / ownershipUnitSize }).count == 1,
+            "Cross-checkpoint ownership routing"
+        )
         let schema = body["format"] as? [String: Any] ?? [:]
         let properties = (schema["items"] as? [String: Any])?["properties"] as? [String: Any] ?? [:]
         let idSchema = properties["cueId"] as? [String: Any] ?? [:]
@@ -295,7 +304,10 @@ private actor E2ETranslationWire {
             )
         }
         chats.append(ids)
-        try check(chats.count <= ((requests.count + 31) / 32) * 2, "Unexpected extra translation chats")
+        try check(
+            chats.count <= ((requests.count + ownershipUnitSize - 1) / ownershipUnitSize) * 2,
+            "Unexpected extra translation chats"
+        )
         return ids
     }
 
@@ -577,10 +589,7 @@ struct EndToEndTest {
 
         let sourceURL = layout.subtitlesURL(language: .ru)
         let source = try SRTService().load(from: sourceURL)
-        try require(
-            (33...128).contains(source.count),
-            "Bounded full-document translation needs 33...128 cues to exercise the default checkpoint boundary"
-        )
+        try require((2...128).contains(source.count), "Bounded full-document translation needs 2...128 cues")
         let sourceFiles = [
             layout.fullSRTURL,
             layout.transcriptURL,
@@ -591,13 +600,22 @@ struct EndToEndTest {
         let sourceDates = sourceFiles.map { modificationDate($0) }
         let evidence = mediaURL.deletingLastPathComponent()
             .appendingPathComponent("translation-evidence", isDirectory: true)
-        let wire = try E2ETranslationWire(cues: source, media: mediaURL, directory: evidence)
-        let provider = OllamaTranslationProvider(transport: { try await wire.send($0) })
-        let adapter = TranslationAdapter(provider: provider)
+        let defaultAdapter = TranslationAdapter()
         try require(
-            adapter.batchSize == 32 && adapter.maximumAttempts == 2,
+            defaultAdapter.batchSize == 32 && defaultAdapter.maximumAttempts == 2,
             "Default translation execution policy changed"
         )
+        let e2eBatchSize = min(defaultAdapter.batchSize, max(1, source.count / 2))
+        try require(e2eBatchSize < source.count, "Bounded translation did not create multiple ownership units")
+        let wire = try E2ETranslationWire(
+            cues: source,
+            media: mediaURL,
+            directory: evidence,
+            ownershipUnitSize: e2eBatchSize
+        )
+        let provider = OllamaTranslationProvider(transport: { try await wire.send($0) })
+        var adapter = TranslationAdapter(provider: provider)
+        adapter.batchSize = e2eBatchSize
         try require(
             OllamaTranslationProvider.model == "translategemma:4b"
                 && OllamaTranslationProvider.protocolVersion == E2ETranslationWire.protocolVersion
@@ -661,7 +679,7 @@ struct EndToEndTest {
         try require(stoppedManifest.workflow?.status == .stopped, "Translation cancellation was not persisted")
         let firstChats = await wire.chats
         try require(
-            firstChats == [Array(source.prefix(32).map(\.id))],
+            firstChats == [Array(source.prefix(e2eBatchSize).map(\.id))],
             "First translation unit retried or ownership differs"
         )
 
@@ -673,7 +691,7 @@ struct EndToEndTest {
         let plan = try TranslationContextPlan(
             cues: source,
             documentTitle: TranslationContextPlan.documentTitle(for: mediaURL),
-            chunkSize: 32
+            chunkSize: e2eBatchSize
         )
         let wireContextIdentity = wire.contextIdentity
         try require(
