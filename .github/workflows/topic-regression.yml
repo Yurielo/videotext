@@ -37,6 +37,7 @@ jobs:
           scripts/test_translation_ownership.sh
           scripts/test_translation_semantic_review.sh --check-alarms
           scripts/test_no_retired_translation_models.sh
+          scripts/test_selected_timing_vertical_slice.sh
       - name: Build standalone PR source
         env:
           VIDEOTEXT_APP_PATH: ${{ runner.temp }}/videotext-pr-head.app
@@ -63,6 +64,8 @@ jobs:
         run: scripts/test_baseline_guard.sh
       - name: Validate Whisper VAD and long-form recovery
         run: scripts/test_whisper_vad.sh
+      - name: Validate selected native timing vertical slice
+        run: scripts/test_selected_timing_vertical_slice.sh
       - name: Validate transcription quality
         run: scripts/test_transcription_quality.sh
       - name: Validate project schema

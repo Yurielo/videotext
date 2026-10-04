@@ -90,6 +90,7 @@ release_files() {
     "$ROOT/scripts/test_no_retired_translation_models.sh" \
     "$ROOT/scripts/test_translation_ownership.sh" \
     "$ROOT/scripts/test_translation_semantic_review.sh" \
+    "$ROOT/scripts/test_selected_timing_vertical_slice.sh" \
     "$ROOT/scripts/test_owned_tmp.sh" \
     "$ROOT/scripts/test_process_shutdown.sh" \
     "$ROOT/scripts/test_application_lifecycle.sh" \
@@ -110,6 +111,7 @@ release_files() {
     "$ROOT/Tests/OllamaMemoryManagerProbe.swift" \
     "$ROOT/Tests/TranslationOwnershipProbe.swift" \
     "$ROOT/Tests/TranslationSemanticReviewProbe.swift" \
+    "$ROOT/Tests/SelectedTimingVerticalSliceProbe.swift" \
     "$ROOT/Tests/OwnedTMPProbe.swift" \
     "$ROOT/Tests/ProcessShutdownProbe.swift" \
     "$ROOT/Tests/ApplicationLifecycleProbe.swift" \
@@ -213,6 +215,7 @@ for focused in \
   test_ollama_topics.sh \
   test_translation.sh \
   test_translation_ownership.sh \
+  test_selected_timing_vertical_slice.sh \
   test_no_retired_translation_models.sh \
   test_owned_tmp.sh \
   test_process_shutdown.sh \

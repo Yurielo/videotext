@@ -57,6 +57,16 @@ struct ProjectLayout {
     var fullSRTURL: URL { textsDirectory.appendingPathComponent("full.srt") }
     var transcriptURL: URL { textsDirectory.appendingPathComponent("transcript.txt") }
     var whisperJSONURL: URL { supportDirectory.appendingPathComponent("whisper.json") }
+    /// Opt-in evidence imported from SeminarText selected-attempt JSON-full.
+    /// This is deliberately separate from the legacy VideoText Whisper outputs.
+    var selectedTimingDirectory: URL { supportDirectory.appendingPathComponent("Selected timing", isDirectory: true) }
+    var selectedTimingSourceUnitsURL: URL { selectedTimingDirectory.appendingPathComponent("source_units.json") }
+    func selectedTimingTranslationsURL(source: ArtifactLanguage, target: ArtifactLanguage) -> URL {
+        selectedTimingDirectory.appendingPathComponent("translations.\(source.rawValue)-\(target.rawValue).json")
+    }
+    var selectedTimingTranslationCacheDirectory: URL {
+        selectedTimingDirectory.appendingPathComponent("Translation cache", isDirectory: true)
+    }
     var topicsURL: URL { textsDirectory.appendingPathComponent("topics.json") }
     var topicsTextURL: URL { textsDirectory.appendingPathComponent("topics.txt") }
     var topicCacheDirectory: URL { supportDirectory.appendingPathComponent("Topic cache", isDirectory: true) }
