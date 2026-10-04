@@ -23,6 +23,16 @@ logs/
 *.srt
 !Tests/Fixtures/**
 
+# Local diagnostic / experiment evidence
+# Keep raw model traces, wire dumps, temporary experiments, and generated QA
+# evidence outside Git. Commit only compact, intentional reports/fixtures.
+analysis/
+evidence/
+artifacts/
+*.bin
+*.jsonl
+*.patch.gz
+
 # Local models and credentials
 models/
 .env
