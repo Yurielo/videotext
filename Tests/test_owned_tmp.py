@@ -154,10 +154,21 @@ class OwnedTMPTests(unittest.TestCase):
         runner = Path(owned.__file__)
         child = subprocess.Popen([os.sys.executable, str(runner), '/bin/sleep', '10'], env=env)
         base = Path(self.parent.name).resolve() / f'videotext-shell-owned-v1-{os.getuid()}'
+        ready = False
         for _ in range(100):
-            if base.exists() and list(base.iterdir()):
+            if base.exists():
+                for path in base.iterdir():
+                    try:
+                        record = json.loads((path / 'owner.json').read_text())
+                    except (OSError, ValueError):
+                        continue
+                    if record.get('launch_pending') is False and record.get('child_group'):
+                        ready = True
+                        break
+            if ready:
                 break
             time.sleep(.02)
+        self.assertTrue(ready, 'supervisor did not finish registering its child')
         child.send_signal(signal.SIGTERM)
         self.assertEqual(143, child.wait(timeout=5))
         self.assertEqual([], list(base.iterdir()))
