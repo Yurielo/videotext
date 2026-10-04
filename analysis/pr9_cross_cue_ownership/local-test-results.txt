@@ -1,0 +1,53 @@
+PR #9 pre-human-review local validation
+Date: 2026-10-04
+
+PASS scripts/test_translation_ownership.sh
+Evidence: /Users/yurielokhin/Documents/Codex/work/translation-ownership-evidence.nBVt2T
+Result: TRANSLATION_OWNERSHIP_PROBE_PASS
+Includes: stable request bytes, sourceEcho rejection, adaptive request batches,
+context isolation, cancellation, resume, checkpoint integrity, v5-to-v6 cache
+invalidation, provenance, and legacy report compatibility.
+
+PASS scripts/test_no_retired_translation_models.sh
+Result: RETIRED_MODEL_RUNTIME_CHECK_PASS
+
+PASS scripts/test_translation.sh
+Result: TRANSLATION_ADAPTER_PROBE_PASS
+
+PASS ../work/videotext-translation-semantic-review-probe --check-alarms
+Result: TRANSLATION_FAILURE_CLASS_CONTROLS_PASS
+Includes negative controls for cross-cue migration, proposition loss,
+duplication, and context-only leakage.
+
+PASS real translategemma:4b EN-to-RU probe
+Command: scripts/test_translation_semantic_review.sh analysis/pr9_cross_cue_ownership/en-to-ru-fixture.json analysis/pr9_cross_cue_ownership/en-to-ru-output.json
+Result: TRANSLATION_SEMANTIC_REVIEW_PROBE_PASS
+Structural issues: 0
+
+PASS real translategemma:4b RU-to-EN probe
+Command: ../work/videotext-translation-semantic-review-probe analysis/pr9_translation_context/v3/source-fixture.json analysis/pr9_cross_cue_ownership/ru-to-en-output.json
+Result: TRANSLATION_SEMANTIC_REVIEW_PROBE_PASS
+Structural issues: 0
+
+PASS EndToEnd.swift translation-wire mock
+Result: TRANSLATION_WIRE_MOCK_PASS
+The mock forces context-safe transport splitting, validates contiguous complete
+ownership partitions and checkpoint replay, and performs no network/model work.
+The full release E2E path was not executed.
+
+PASS scripts/test_translation_causal_trace.sh --self-test
+Evidence: /Users/yurielokhin/Documents/Codex/work/translation-causal-trace-build.AI8x9A
+Result: TRANSLATION_CAUSAL_TRACE_SELF_TEST_PASS
+The diagnostic mock now uses the exact v6 sourceEcho response contract.
+
+DEFERRED final two release E2Es
+DEFERRED Candidate build, codesign, and smoke
+Reason: new bidirectional Human Translation Review is required first.
+
+EXTERNAL BLOCKER GitHub Actions
+Run: 37156042095
+Job: 111302732385
+runner_id: 0
+steps: []
+Annotation: The job was not started because recent account payments have
+failed or the spending limit needs to be increased.

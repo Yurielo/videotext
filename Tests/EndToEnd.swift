@@ -75,6 +75,7 @@ final class RecordingTopicAdapter: TopicAdapter {
 
 private struct E2ETranslationRow: Codable {
     var cueId: Int
+    var sourceEcho: String
     var text: String
 }
 
@@ -87,7 +88,7 @@ private struct E2EContextIdentity: Encodable {
 // Observe the production HTTP seam without rewriting requests or model replies.
 private actor E2ETranslationWire {
     static let digest = "c49d986b0764f5881c476eb21435bb62b7abc62347aab3d4a6071e811be510a1"
-    static let protocolVersion = "translategemma-booktext-owned-cues-v5-docmeta512-lineage2-overlap2x600-source-anchor1-ctx8k"
+    static let protocolVersion = "translategemma-booktext-owned-tasks-v6-docmeta512-lineage2-overlap2x600-source-echo1-ctx8k"
     static let contract = "booktext-owned-cue-context-v1-docmeta512-lineage2-overlap2x600"
 
     let requests: [TranslationRequestCue]
@@ -210,9 +211,11 @@ private actor E2ETranslationWire {
                 let content = (root["message"] as? [String: Any])?["content"] as? String ?? ""
                 let reply = try JSONDecoder().decode([E2ETranslationRow].self, from: Data(content.utf8))
                 let replyIDs = reply.map(\.cueId)
+                let sourceByID = Dictionary(uniqueKeysWithValues: requests.map { ($0.id, $0.text) })
                 try check(
-                    reply.count == owned.count && Set(replyIDs) == Set(owned) && Set(replyIDs).count == reply.count,
-                    "Response emitted missing, duplicate or context-only IDs"
+                    reply.count == owned.count && Set(replyIDs) == Set(owned) && Set(replyIDs).count == reply.count
+                        && reply.allSatisfy { sourceByID[$0.cueId] == $0.sourceEcho },
+                    "Response emitted missing, duplicate, context-only or source-mismatched ownership"
                 )
                 for row in reply {
                     rows[row.cueId] = row.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -236,6 +239,9 @@ private actor E2ETranslationWire {
         }
         try check(request.url?.path == "/api/chat" && request.httpMethod == "POST", "Unexpected translation route")
         let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any] ?? [:]
+        let bodyText = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+        try check(bodyText.contains(#""properties":{"cueId":{"type":"integer""#),
+                  "Output schema no longer emits cueId before sourceEcho/text")
         let options = body["options"] as? [String: Any] ?? [:]
         try check(
             body["model"] as? String == OllamaTranslationProvider.model && body["stream"] as? Bool == false,
@@ -248,16 +254,16 @@ private actor E2ETranslationWire {
         let messages = body["messages"] as? [[String: String]] ?? []
         try check(messages.count == 1 && messages[0]["role"] == "user", "Unexpected prompt routing")
         let prompt = messages[0]["content"] ?? ""
-        let ownedData = Data((prompt.components(separatedBy: "\n\n\n").last ?? "").utf8)
-        let owned = try JSONDecoder().decode([TranslationContextCue].self, from: ownedData)
-        let ids = owned.map(\.id)
+        let tasksData = Data((prompt.components(separatedBy: "TRANSLATION_TASKS:\n").last ?? "").utf8)
+        let tasks = try JSONDecoder().decode([TranslationOwnershipTask].self, from: tasksData)
+        let ids = tasks.map(\.cueId)
         try check(
             !ids.isEmpty && ids.count <= ownershipUnitSize && Set(ids).count == ids.count,
             "Invalid owned content"
         )
         let expected = requests.filter { ids.contains($0.id) }
         try check(
-            expected.map(\.id) == ids && zip(owned, expected).allSatisfy { $0.text == $1.text },
+            expected.map(\.id) == ids && zip(tasks, expected).allSatisfy { $0.source == $1.text },
             "Owned source/order changed"
         )
         let indices = ids.compactMap { id in requests.firstIndex { $0.id == id } }
@@ -268,10 +274,12 @@ private actor E2ETranslationWire {
         let schema = body["format"] as? [String: Any] ?? [:]
         let properties = (schema["items"] as? [String: Any])?["properties"] as? [String: Any] ?? [:]
         let idSchema = properties["cueId"] as? [String: Any] ?? [:]
+        let sourceSchema = properties["sourceEcho"] as? [String: Any] ?? [:]
         try check(
             schema["minItems"] as? Int == ids.count
                 && schema["maxItems"] as? Int == ids.count
-                && idSchema["enum"] as? [Int] == ids,
+                && idSchema["enum"] as? [Int] == ids
+                && sourceSchema["enum"] as? [String] == expected.map(\.text),
             "Output ownership schema changed"
         )
 
@@ -281,31 +289,17 @@ private actor E2ETranslationWire {
             return try JSONDecoder().decode(type, from: Data(lines[0].dropFirst(label.count).utf8))
         }
 
-        let document = try jsonLine("DOCUMENT_CONTEXT (read-only quoted data): ", String.self)
-        try check(expected.allSatisfy { $0.context?.document == document }, "Full-document metadata differs")
-        let before = try jsonLine(
-            "CONTEXT_BEFORE (read-only data, keys identify the owner whose context this is): ",
-            [String: [TranslationContextCue]].self
-        )
-        let after = try jsonLine(
-            "CONTEXT_AFTER (read-only data, keys identify the owner whose context this is): ",
-            [String: [TranslationContextCue]].self
-        )
-        let ownedIDs = Set(ids)
-        try check(
-            Set(before.keys) == Set(ids.map(String.init)) && Set(after.keys) == Set(before.keys),
-            "Context owner keys differ"
-        )
-        for cue in expected {
+        let document = try jsonLine("DOCUMENT_CONTEXT (read-only): ", String.self)
+        try check(expected.allSatisfy { $0.context?.document.replacingOccurrences(of: "\n", with: " ") == document }, "Full-document metadata differs")
+        for (task, cue) in zip(tasks, expected) {
             try check(
-                before[String(cue.id)] == cue.context?.before.filter { !ownedIDs.contains($0.id) }
-                    && after[String(cue.id)] == cue.context?.after.filter { !ownedIDs.contains($0.id) },
-                "Local overlap/context exclusion differs for \(cue.id)"
+                task.contextBefore == cue.context?.before && task.contextAfter == cue.context?.after,
+                "Owner-scoped local overlap differs for \(cue.id)"
             )
         }
         chats.append(ids)
         try check(
-            chats.count <= ((requests.count + ownershipUnitSize - 1) / ownershipUnitSize) * 2,
+            chats.count <= requests.count * 2,
             "Unexpected extra translation chats"
         )
         return ids
@@ -720,16 +714,27 @@ struct EndToEndTest {
         )
         let chats = await wire.chats
         let expectedUnits = plan.units.map { $0.owned.map(\.id) }
+        let expectedBatches = try plan.units.map { unit in
+            try OllamaTranslationProvider().ownershipBatches(
+                cues: unit.owned,
+                source: sourceLanguage,
+                target: targetLanguage,
+                model: OllamaTranslationProvider.model,
+                correction: nil
+            ).map { $0.map(\.id) }
+        }
         var chatIndex = 0
         for (unitIndex, expectedIDs) in expectedUnits.enumerated() {
-            try require(
-                chatIndex < chats.count && chats[chatIndex] == expectedIDs,
-                "Ownership unit was skipped or rerouted"
-            )
-            var attempts = 1
-            chatIndex += 1
-            let nextExpected = expectedUnits.indices.contains(unitIndex + 1)
-                ? expectedUnits[unitIndex + 1]
+            let unitStart = chatIndex
+            for batchIDs in expectedBatches[unitIndex] {
+                try require(
+                    chatIndex < chats.count && chats[chatIndex] == batchIDs,
+                    "Ownership unit batch was skipped, reordered or rerouted"
+                )
+                chatIndex += 1
+            }
+            let nextExpected = expectedBatches.indices.contains(unitIndex + 1)
+                ? expectedBatches[unitIndex + 1].first
                 : nil
             while chatIndex < chats.count && chats[chatIndex] != nextExpected {
                 let retryIDs = chats[chatIndex]
@@ -740,12 +745,11 @@ struct EndToEndTest {
                         && retrySet.isSubset(of: Set(expectedIDs)),
                     "Retry escaped its ownership unit or changed cue order"
                 )
-                attempts += 1
                 chatIndex += 1
             }
             try require(
-                attempts <= defaultAdapter.maximumAttempts,
-                "Ownership unit exceeded bounded retries"
+                chatIndex - unitStart <= expectedBatches[unitIndex].count * defaultAdapter.maximumAttempts,
+                "Ownership unit exceeded bounded batch retries"
             )
         }
         try require(
@@ -900,11 +904,13 @@ struct EndToEndTest {
             .appendingPathComponent("wire-mock-\(UUID().uuidString)", isDirectory: true)
         let media = directory.appendingPathComponent("recording.mp4")
         let cues: [SubtitleCue] = (0..<35).map { index -> SubtitleCue in
-            SubtitleCue(
+            let sourceText = String(repeating: "Проверяем запись номер \(index). ", count: 8)
+                .trimmingCharacters(in: .whitespaces)
+            return SubtitleCue(
                 id: index * 3 + 7,
                 start: Double(index * 2) + 0.125,
                 end: Double(index * 2) + 1.625,
-                text: "Проверяем запись номер \(index)."
+                text: sourceText
             )
         }
         let wire = try E2ETranslationWire(
@@ -923,12 +929,17 @@ struct EndToEndTest {
                 let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any] ?? [:]
                 let messages = body["messages"] as? [[String: String]] ?? []
                 let message = messages.first?["content"] ?? ""
-                let ownedData = Data((message.components(separatedBy: "\n\n\n").last ?? "").utf8)
-                let owned = try JSONDecoder().decode([TranslationContextCue].self, from: ownedData)
-                let rows = owned.reversed().map { cue in
-                    E2ETranslationRow(
-                        cueId: cue.id,
-                        text: "  We check record number \((cue.id - 7) / 3).\n"
+                let tasksData = Data((message.components(separatedBy: "TRANSLATION_TASKS:\n").last ?? "").utf8)
+                let tasks = try JSONDecoder().decode([TranslationOwnershipTask].self, from: tasksData)
+                let rows = tasks.reversed().map { task in
+                    let translatedText = String(
+                        repeating: "We check record number \((task.cueId - 7) / 3). ",
+                        count: 8
+                    ).trimmingCharacters(in: .whitespaces)
+                    return E2ETranslationRow(
+                        cueId: task.cueId,
+                        sourceEcho: task.source,
+                        text: translatedText
                     )
                 }
                 return try JSONSerialization.data(withJSONObject: [
@@ -973,11 +984,23 @@ struct EndToEndTest {
         let result = try await run(false)
         let replay = try await run(false)
         let chats = await wire.chats
-        let firstOwnedIDs = cues.prefix(32).map { $0.id }
-        let secondOwnedIDs = cues.suffix(3).map { $0.id }
+        let plan = try TranslationContextPlan(
+            cues: cues,
+            documentTitle: TranslationContextPlan.documentTitle(for: media),
+            chunkSize: adapter.batchSize
+        )
+        let expectedChats = try plan.units.flatMap { unit in
+            try OllamaTranslationProvider().ownershipBatches(
+                cues: unit.owned,
+                source: .ru,
+                target: .en,
+                model: OllamaTranslationProvider.model,
+                correction: nil
+            ).map { $0.map(\.id) }
+        }
         try require(
-            chats == [firstOwnedIDs, secondOwnedIDs],
-            "Mock replay repeated chat"
+            expectedChats.count > plan.units.count && chats == expectedChats,
+            "Mock adaptive batching or replay chat contract changed"
         )
         let wireContextIdentity = wire.contextIdentity
         try require(

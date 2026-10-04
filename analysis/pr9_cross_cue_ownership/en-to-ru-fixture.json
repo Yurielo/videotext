@@ -1,0 +1,81 @@
+{
+  "documentTitle": "Independent English long-form translation ownership fixture",
+  "sourceLanguage": "en",
+  "targetLanguage": "ru",
+  "cues": [
+    {
+      "id": 1,
+      "start": 3.71,
+      "end": 11.39,
+      "text": "an issue on the same level as asbestos this is a public health issue and it's big leds came in"
+    },
+    {
+      "id": 2,
+      "start": 11.39,
+      "end": 18.96,
+      "text": "and people won the nobel prize for this very rightly at the time because they save a lot of"
+    },
+    {
+      "id": 3,
+      "start": 18.96,
+      "end": 24.8,
+      "text": "energy the led has got a big blue spike in it although we tend not to see that and that is"
+    },
+    {
+      "id": 4,
+      "start": 24.8,
+      "end": 32.23,
+      "text": "even true of warm leds and there is no red the light found in leds when we use them certainly"
+    },
+    {
+      "id": 5,
+      "start": 32.23,
+      "end": 38.99,
+      "text": "we'll be using them on the retina looking at mice we can watch the mitochondria gently go downhill"
+    },
+    {
+      "id": 6,
+      "start": 38.99,
+      "end": 45.17,
+      "text": "far less responsive they their membrane potentials are coming down the mitochondria"
+    },
+    {
+      "id": 7,
+      "start": 45.17,
+      "end": 51.36,
+      "text": "are not breathing very well watch that in real time under led lighting and led lighting at the"
+    },
+    {
+      "id": 8,
+      "start": 51.36,
+      "end": 56.43,
+      "text": "same energy levels that we would find in a domestic or a commercial environment"
+    }
+  ],
+  "semanticExpectations": {
+    "3": {
+      "requiredAny": [["энерг"], ["син"], ["пик"]],
+      "forbidden": ["теплов", "красн", "сетчат", "мыш"]
+    },
+    "4": {
+      "requiredAny": [["тепл"], ["красн"]],
+      "forbidden": ["сетчат", "мыш", "митохондр"]
+    },
+    "5": {
+      "requiredAny": [["сетчат"], ["мыш"], ["митохондр"]],
+      "forbidden": ["мембран", "освещен", "освещён"]
+    },
+    "6": {
+      "requiredAny": [["чувств", "реаг"], ["мембран"], ["митохондр"]],
+      "forbidden": ["освещен", "освещён", "домаш", "коммерч"]
+    },
+    "7": {
+      "requiredAny": [["дыш"], ["реальн"], ["светодиод"]],
+      "forbidden": ["домаш", "коммерч"]
+    },
+    "8": {
+      "requiredAny": [["энерг"], ["домаш"], ["коммерч"]],
+      "forbidden": ["дыш", "митохондр", "сетчат"]
+    }
+  }
+}

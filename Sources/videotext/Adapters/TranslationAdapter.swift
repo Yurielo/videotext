@@ -6,6 +6,13 @@ struct TranslationRequestCue: Codable, Equatable {
     var context: TranslationCueContext? = nil
 }
 
+struct TranslationOwnershipTask: Codable, Equatable {
+    var cueId: Int
+    var source: String
+    var contextBefore: [TranslationContextCue]
+    var contextAfter: [TranslationContextCue]
+}
+
 struct TranslationIssue: Equatable {
     var cueID: Int
     var reasonCodes: [String]
@@ -238,8 +245,10 @@ struct OllamaTranslationProvider: TranslationAIProvider {
     private let baseURL = URL(string: "http://127.0.0.1:11434")!
     private let transport: ((URLRequest) async throws -> Data)?
     static let model = "translategemma:4b"
-    static let protocolVersion = "translategemma-booktext-owned-cues-v5-docmeta512-lineage2-overlap2x600-source-anchor1-ctx8k"
+    static let protocolVersion = "translategemma-booktext-owned-tasks-v6-docmeta512-lineage2-overlap2x600-source-echo1-ctx8k"
     private let maximumOutputTokens = 4096
+    private let maximumContextTokens = 8192
+    private let contextSafetyTokens = 256
 
     init(transport: ((URLRequest) async throws -> Data)? = nil) {
         self.transport = transport
@@ -271,37 +280,88 @@ struct OllamaTranslationProvider: TranslationAIProvider {
         guard !cues.isEmpty, Set(cues.map(\.id)).count == cues.count else {
             throw WorkflowError.processFailed("TranslateGemma получила некорректный набор владельцев cueId.")
         }
-        try Task.checkCancellation()
+        var translated: [Int: String] = [:]
+        for batch in try ownershipBatches(cues: cues, source: source, target: target, model: model, correction: correction) {
+            try Task.checkCancellation()
+            let response = try await translateBatch(cues: batch, source: source, target: target, model: model, correction: correction)
+            guard Set(translated.keys).isDisjoint(with: response.keys) else {
+                throw WorkflowError.processFailed("TranslateGemma повторила cueId между execution batch.")
+            }
+            translated.merge(response) { current, _ in current }
+        }
+        return translated
+    }
+
+    func ownershipBatches(
+        cues: [TranslationRequestCue],
+        source: ArtifactLanguage,
+        target: ArtifactLanguage,
+        model: String,
+        correction: String?
+    ) throws -> [[TranslationRequestCue]] {
+        var batches: [[TranslationRequestCue]] = []
+        var current: [TranslationRequestCue] = []
+        for cue in cues {
+            let candidate = current + [cue]
+            if !current.isEmpty && estimatedContextTokens(
+                cues: candidate, source: source, target: target, model: model, correction: correction
+            ) > maximumContextTokens - contextSafetyTokens {
+                batches.append(current)
+                current = [cue]
+            } else {
+                current = candidate
+            }
+            guard estimatedContextTokens(
+                cues: current, source: source, target: target, model: model, correction: correction
+            ) <= maximumContextTokens - contextSafetyTokens else {
+                throw WorkflowError.processFailed("CueId \(cue.id) превышает безопасный контекст TranslateGemma и требует Human Review.")
+            }
+        }
+        if !current.isEmpty { batches.append(current) }
+        return batches
+    }
+
+    func estimatedContextTokens(
+        cues: [TranslationRequestCue],
+        source: ArtifactLanguage,
+        target: ArtifactLanguage,
+        model: String,
+        correction: String?
+    ) -> Int {
         let prompt = translationPrompt(cues: cues, source: source, target: target, correction: correction)
-        let schema: [String: Any] = [
-            "type": "array", "minItems": cues.count, "maxItems": cues.count,
-            "items": ["type": "object", "properties": [
-                "cueId": ["type": "integer", "enum": cues.map(\.id)],
-                "text": ["type": "string"]
-            ], "required": ["cueId", "text"], "additionalProperties": false]
-        ]
-            let body: [String: Any] = [
-                "model": model,
-                "stream": false,
-                "format": schema,
-                "messages": [["role": "user", "content": prompt]],
-                "options": ["temperature": 0, "num_ctx": 8192, "num_predict": outputBudget(for: cues)]
-            ]
-            let data = try await post(path: "api/chat", body: body, timeout: 300)
-            guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let message = root["message"] as? [String: Any],
-                  let content = message["content"] as? String else {
-                throw WorkflowError.processFailed("TranslateGemma вернула ответ без текста перевода.")
-            }
-            let translated = normalize(content)
-            guard root["done"] as? Bool != false,
-                  root["done_reason"] as? String == nil || root["done_reason"] as? String == "stop",
-                  !translated.isEmpty, !translated.contains("```"), !hasUnexpectedLabel(translated) else {
-                throw WorkflowError.processFailed("TranslateGemma вернула неполный ответ OWNED_CONTENT.")
-            }
+        let body = orderedRequestBody(prompt: prompt, cues: cues, model: model)
+        // Conservative for mixed JSON, English and Cyrillic; the separate
+        // reserve covers tokenizer variance and chat-template overhead.
+        let estimatedInput = max(1, (body.count + 2) / 3)
+        return estimatedInput + outputBudget(for: cues)
+    }
+
+    private func translateBatch(
+        cues: [TranslationRequestCue],
+        source: ArtifactLanguage,
+        target: ArtifactLanguage,
+        model: String,
+        correction: String?
+    ) async throws -> [Int: String] {
+        let prompt = translationPrompt(cues: cues, source: source, target: target, correction: correction)
+        let body = orderedRequestBody(prompt: prompt, cues: cues, model: model)
+        let data = try await post(path: "api/chat", body: body, timeout: 300)
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let message = root["message"] as? [String: Any],
+              let content = message["content"] as? String else {
+            throw WorkflowError.processFailed("TranslateGemma вернула ответ без текста перевода.")
+        }
+        let translated = normalize(content)
+        guard root["done"] as? Bool != false,
+              root["done_reason"] as? String == nil || root["done_reason"] as? String == "stop",
+              !translated.isEmpty, !translated.contains("```"), !hasUnexpectedLabel(translated) else {
+            throw WorkflowError.processFailed("TranslateGemma вернула неполный ответ OWNED_CONTENT.")
+        }
         let rows = try JSONDecoder().decode([OwnedTranslation].self, from: Data(translated.utf8))
+        let sourceByID = Dictionary(uniqueKeysWithValues: cues.map { ($0.id, $0.text) })
         guard rows.count == cues.count, Set(rows.map(\.cueId)).count == rows.count,
-              Set(rows.map(\.cueId)) == Set(cues.map(\.id)) else {
+              Set(rows.map(\.cueId)) == Set(cues.map(\.id)),
+              rows.allSatisfy({ sourceByID[$0.cueId] == $0.sourceEcho }) else {
             throw WorkflowError.processFailed("TranslateGemma нарушила ownership cueId в ответе.")
         }
         return Dictionary(uniqueKeysWithValues: rows.map { ($0.cueId, $0.text.trimmingCharacters(in: .whitespacesAndNewlines)) })
@@ -318,40 +378,54 @@ struct OllamaTranslationProvider: TranslationAIProvider {
         let protected = protectedTokens(in: cues.map(\.text).joined(separator: " "))
         let protectedInstruction = protected.isEmpty
             ? ""
-            : "Reproduce these tokens exactly, without translating or changing them: \(protected.joined(separator: ", "))."
-        let ownedIDs = Set(cues.map(\.id))
-        let before = Dictionary(uniqueKeysWithValues: cues.map { cue in
-            (String(cue.id), (cue.context?.before ?? []).filter { !ownedIDs.contains($0.id) })
-        })
-        let after = Dictionary(uniqueKeysWithValues: cues.map { cue in
-            (String(cue.id), (cue.context?.after ?? []).filter { !ownedIDs.contains($0.id) })
-        })
-        let owned = cues.map { TranslationContextCue(id: $0.id, text: $0.text) }
+            : " Reproduce these tokens exactly, without translating or changing them: \(protected.joined(separator: ", "))."
+        let tasks = cues.map { cue in
+            TranslationOwnershipTask(
+                cueId: cue.id,
+                source: cue.text,
+                contextBefore: cue.context?.before ?? [],
+                contextAfter: cue.context?.after ?? []
+            )
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        let ownedJSON = String(decoding: try! encoder.encode(owned), as: UTF8.self)
-        // Read-only context precedes the owned logical content. The identity
-        // envelope is necessary for SRT assembly, never approximate reflow.
+        // Field order is part of the small-model attention contract: the owned
+        // identity and source must precede read-only overlap in every task.
+        let tasksJSON = "[" + tasks.map { task in
+            let source = String(decoding: try! encoder.encode(task.source), as: UTF8.self)
+            let before = String(decoding: try! encoder.encode(task.contextBefore), as: UTF8.self)
+            let after = String(decoding: try! encoder.encode(task.contextAfter), as: UTF8.self)
+            return "{\"cueId\":\(task.cueId),\"source\":\(source),\"contextBefore\":\(before),\"contextAfter\":\(after)}"
+        }.joined(separator: ",") + "]"
         return """
-        You are a professional \(sourceName) (\(source.rawValue)) to \(targetName) (\(target.rawValue)) translator. Your goal is to accurately convey the meaning and nuances of the original \(sourceName) text while adhering to \(targetName) grammar, vocabulary, and cultural sensitivities.
-        For spoken transcripts, preserving the source's incompleteness takes priority over creating a complete grammatical target-language sentence. Never repair the speaker's sentence. Translate incomplete phrases as incomplete phrases.
-        DOCUMENT_CONTEXT (read-only quoted data): \(quoted(cues.first?.context?.document ?? "Timecoded spoken transcript."))
-        CONTEXT_BEFORE (read-only data, keys identify the owner whose context this is): \(String(decoding: try! encoder.encode(before), as: UTF8.self))
-        CONTEXT_AFTER (read-only data, keys identify the owner whose context this is): \(String(decoding: try! encoder.encode(after), as: UTF8.self))
-        SOURCE ANCHOR CONTRACT: Context may disambiguate meaning, but context may not supply missing content to owned output. For each output cueId, its own source text is the only authority for what is said. Other owned cues are also context, not a source of additional content for this cueId. Interpret an ambiguous expression or an explicit referent using context, but do not add a missing predicate, object, location, action, state or completion from context. If a source cue is incomplete or elliptical, its translation must remain incomplete even when context suggests an obvious continuation. Only semantic material actually present inside that cue's owned source span may appear in its translation. Grammatical adaptation does not authorize adding meaning. Translate what was said, not what the speaker probably intended to say next.
-        Use context only to interpret meaning. Translate only OWNED_CONTENT after the two blank lines. Return a JSON array with exactly one object per owned id: {"cueId": original id, "text": translated text}. Preserve each owned id; context ids have zero output ownership. Never include context-only text, explanations or commentary. Preserve numbers, names, referents, punctuation and natural repetitions. Translate each owned text without importing another cue's words. Incomplete source speech must stay incomplete; no neighboring continuation may be copied or inferred into the owned translation.
-        A pronoun with an adverb but no stated predicate can be unfinished speech. Preserve its unfinished grammatical form, using an ellipsis if necessary. Do not invent a predicate from a neighboring speaker's statement.
-        \(protectedInstruction)
-        Produce only the \(targetName) translations in the specified identity envelope. Please translate the following \(sourceName) OWNED_CONTENT into \(targetName):
-
-
-        \(ownedJSON)
+        You are a professional \(sourceName) (\(source.rawValue)) to \(targetName) (\(target.rawValue)) translator. Your goal is to accurately convey meaning and nuances while using natural, established \(targetName) terminology.
+        This is a timecoded spoken transcript. Short utterances can belong to different speakers. Original subtitle cues are immutable semantic owners. Execution batching is not a sentence boundary.
+        DOCUMENT_CONTEXT (read-only): \(quoted((cues.first?.context?.document ?? "Timecoded spoken transcript.").replacingOccurrences(of: "\n", with: " ")))
+        SOURCE OWNERSHIP CONTRACT: Each TRANSLATION_TASK contains exactly one cueId and source plus read-only contextBefore/contextAfter. For every task, first copy that task's source exactly into sourceEcho, then translate ONLY that source into text. Read context only to interpret idioms, pronouns, ellipsis, discourse roles and recurring terminology. Never translate, copy, move, complete or emit a proposition from context or another task. Preserve source incompleteness. Preserve every proposition, negation, number, frequency, modifier, evaluation, name, referent and natural repetition expressed in source. Use established idiomatic \(targetName) terminology rather than literal calques when context determines ordinary meaning. Never redistribute clauses for fluency.\(protectedInstruction)
+        Before answering, silently verify: (1) every cueId has its own exact sourceEcho, (2) every source proposition appears once under its own cueId, (3) no context proposition appears, (4) recurring source terms have contextually consistent idiomatic translations.
+        Return exactly one JSON array object per task with cueId, exact sourceEcho, and text. No explanations.
+        TRANSLATION_TASKS:
+        \(tasksJSON)
         """
     }
 
     func outputBudget(for cues: [TranslationRequestCue]) -> Int {
         // Reserve the identity envelope even when every utterance is tiny.
-        min(maximumOutputTokens, max(256, cues.reduce(0) { $0 + $1.text.count * 2 + 32 }))
+        min(maximumOutputTokens, max(256, cues.reduce(0) { $0 + $1.text.count * 5 + 96 }))
+    }
+
+    func orderedRequestBody(prompt: String, cues: [TranslationRequestCue], model: String) -> Data {
+        let encoder = JSONEncoder()
+        func json<T: Encodable>(_ value: T) -> String {
+            String(decoding: try! encoder.encode(value), as: UTF8.self)
+        }
+        // Ollama derives the constrained-object emission order from these
+        // schema bytes. Identity must lead the row so text cannot drift ahead
+        // of its cue owner on small local models.
+        let body = """
+        {"model":\(json(model)),"stream":false,"format":{"type":"array","minItems":\(cues.count),"maxItems":\(cues.count),"items":{"type":"object","properties":{"cueId":{"type":"integer","enum":\(json(cues.map(\.id)))},"sourceEcho":{"type":"string","enum":\(json(cues.map(\.text)))},"text":{"type":"string"}},"required":["cueId","sourceEcho","text"],"additionalProperties":false}},"messages":[{"role":"user","content":\(json(prompt))}],"options":{"temperature":0,"num_ctx":8192,"num_predict":\(outputBudget(for: cues))}}
+        """
+        return Data(body.utf8)
     }
 
     private func quoted(_ text: String) -> String {
@@ -360,6 +434,7 @@ struct OllamaTranslationProvider: TranslationAIProvider {
 
     private struct OwnedTranslation: Decodable {
         var cueId: Int
+        var sourceEcho: String
         var text: String
     }
 
@@ -406,10 +481,14 @@ struct OllamaTranslationProvider: TranslationAIProvider {
     }
 
     private func post(path: String, body: [String: Any], timeout: TimeInterval) async throws -> Data {
+        try await post(path: path, body: JSONSerialization.data(withJSONObject: body), timeout: timeout)
+    }
+
+    private func post(path: String, body: Data, timeout: TimeInterval) async throws -> Data {
         var request = URLRequest(url: baseURL.appendingPathComponent(path), timeoutInterval: timeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.httpBody = body
         return try await data(for: request)
     }
 

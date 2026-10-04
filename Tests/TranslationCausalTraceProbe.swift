@@ -11,6 +11,7 @@ private struct TraceFixture: Codable {
 
 private struct TraceRow: Codable, Equatable {
     var cueId: Int
+    var sourceEcho: String
     var text: String
 }
 
@@ -321,7 +322,11 @@ struct TranslationCausalTraceProbe {
         let requestOverride = Data("{\"model\":\"translategemma:4b\",\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"Controlled diagnostic only\"}]}\n".utf8)
         for mode in TraceSelfTestMode.allCases {
             let middle = mode == .scriptedCompletion ? "  And I am staying beside the gate.\n" : "  And I, for now...\n"
-            let rows = [TraceRow(cueId: 704, text: "The departure is delayed."), TraceRow(cueId: 87, text: middle), TraceRow(cueId: 501, text: "We are waiting for the bus.")]
+            let rows = [
+                TraceRow(cueId: 704, sourceEcho: "Отправление задерживается.", text: "The departure is delayed."),
+                TraceRow(cueId: 87, sourceEcho: "А я пока...", text: middle),
+                TraceRow(cueId: 501, sourceEcho: "Мы ждем автобус.", text: "We are waiting for the bus.")
+            ]
             let content = String(decoding: try JSONEncoder().encode(rows), as: UTF8.self)
             let replyData: Data
             if mode == .malformed { replyData = Data("not JSON\n".utf8) }
