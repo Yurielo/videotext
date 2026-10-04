@@ -24,14 +24,11 @@ logs/
 !Tests/Fixtures/**
 
 # Local diagnostic / experiment evidence
-# Keep raw model traces, wire dumps, temporary experiments, and generated QA
-# evidence outside Git. Commit only compact, intentional reports/fixtures.
-analysis/
-evidence/
-artifacts/
-*.bin
-*.jsonl
-*.patch.gz
+# Put generated traces, wire dumps, temporary experiments, and QA evidence here
+# instead of committing them. Canonical tests/fixtures and reviewed reports may
+# still use normal repository paths and formats.
+.local-evidence/
+tmp-evidence/
 
 # Local models and credentials
 models/
