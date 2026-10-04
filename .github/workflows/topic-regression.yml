@@ -6,6 +6,12 @@ on:
   push:
     branches: [main]
 
+# A newer commit on the same PR makes the older PR validation obsolete.
+# Keep canonical main validations non-cancellable.
+concurrency:
+  group: videotext-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   pr-head-build:
     if: github.event_name == 'pull_request'
