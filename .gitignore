@@ -23,6 +23,13 @@ logs/
 *.srt
 !Tests/Fixtures/**
 
+# Local diagnostic / experiment evidence
+# Put generated traces, wire dumps, temporary experiments, and QA evidence here
+# instead of committing them. Canonical tests/fixtures and reviewed reports may
+# still use normal repository paths and formats.
+.local-evidence/
+tmp-evidence/
+
 # Local models and credentials
 models/
 .env
