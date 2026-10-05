@@ -266,8 +266,8 @@ for run in 1 2; do
   /usr/bin/grep -Fq 'E2E PASS' "$log" || fail "E2E #$run не содержит E2E PASS"
   [[ "$(/usr/bin/grep -Fc 'REAL_TRANSLATION_PASS ru->en:' "$log")" -eq 1 ]] || \
     fail "E2E #$run не доказал единственный RU->EN production-проход"
-  [[ "$(/usr/bin/grep -Fc 'REAL_TRANSLATION_FAIL_CLOSED_PASS en->ru:' "$log")" -eq 1 ]] || \
-    fail "E2E #$run не доказал fail-closed поведение EN->RU valid-full.srt"
+  [[ "$(/usr/bin/grep -Fc 'REAL_TRANSLATION_PASS en->ru:' "$log")" -eq 1 ]] || \
+    fail "E2E #$run не доказал успешный EN->RU valid-full.srt проход"
   [[ "$(shasum -a 256 "$VIDEO_PATH" | awk '{print $1}')" == "$VIDEO_SHA256" ]] || \
     fail "E2E #$run изменил RU-видео"
   [[ "$(shasum -a 256 "$EN_VIDEO_PATH" | awk '{print $1}')" == "$EN_VIDEO_SHA256" ]] || \
