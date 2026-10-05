@@ -2627,6 +2627,12 @@ final class WorkflowEngine: @unchecked Sendable {
                   let report = try? store.decoder.decode(TranslationReport.self, from: Data(contentsOf: reportURL)) else {
                 return false
             }
+            let approvedUserEdit = manifest.activeTranscriptRevision(for: targetLanguage).map { revision in
+                revision.origin == .userEdited && revision.reviewStatus == .approved
+            } ?? false
+            guard (report.status == .ready && report.reviewTaskIDs.isEmpty) || approvedUserEdit else {
+                return false
+            }
             // An approved translation is intentionally not byte-identical to
             // the machine selected-timing document. Its immutable approved
             // revision is validated by the established lineage validator;
@@ -3441,16 +3447,6 @@ final class WorkflowEngine: @unchecked Sendable {
         try Data(contentsOf: transcriptURL).write(to: revisionTranscriptURL, options: .atomic)
         try Data(contentsOf: subtitleURL).write(to: revisionSubtitleURL, options: .atomic)
 
-        let revision = TranscriptRevision(
-            id: revisionID,
-            language: targetLanguage,
-            origin: .translated,
-            parentRevisionID: sourceRevision.id,
-            transcriptArtifactID: transcriptArtifactID,
-            subtitleArtifactID: subtitleArtifactID,
-            contentHash: revisionHash,
-            createdAt: Date()
-        )
         let sourceCues = try srt.load(from: layout.subtitlesURL(language: sourceLanguage))
         let sourceByID = Dictionary(uniqueKeysWithValues: sourceCues.map { ($0.id, $0) })
         let translatedByID = Dictionary(uniqueKeysWithValues: result.cues.map { ($0.id, $0) })
@@ -3473,6 +3469,17 @@ final class WorkflowEngine: @unchecked Sendable {
                 dependentArtifactIDs: [transcriptArtifactID, subtitleArtifactID]
             )
         }
+        let revision = TranscriptRevision(
+            id: revisionID,
+            language: targetLanguage,
+            origin: .translated,
+            parentRevisionID: sourceRevision.id,
+            transcriptArtifactID: transcriptArtifactID,
+            subtitleArtifactID: subtitleArtifactID,
+            contentHash: revisionHash,
+            createdAt: Date(),
+            reviewStatus: tasks.isEmpty ? nil : .pending
+        )
         let validation: ArtifactValidationStatus = tasks.isEmpty ? .ready : .needsReview
         let transcriptArtifact = ProjectArtifactRecord(
             id: transcriptArtifactID,

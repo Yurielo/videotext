@@ -65,6 +65,8 @@ struct TranslationAdapterProbe {
         )
 
         try verifyTranslatedReviewDoesNotChangeSource()
+        try verifyDisabledTranslationReviewDoesNotApproveFallback()
+        try verifyDisabledTranslationReviewApprovesValidResult()
         print("TRANSLATION_ADAPTER_PROBE_PASS")
     }
 
@@ -134,6 +136,163 @@ struct TranslationAdapterProbe {
         let edited = try SRTService().load(from: layout.subtitlesURL(language: .en))
         try require(unchanged.first?.text == "Исходный текст", "правка перевода изменила full.srt")
         try require(edited.first?.text == "Good translation", "правка не попала в EN SRT")
+    }
+
+    private static func verifyDisabledTranslationReviewDoesNotApproveFallback() throws {
+        let fixture = try translationReviewFixture(hasUnresolvedTask: true)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        do {
+            _ = try HumanReviewService(store: fixture.store).transitionAfterGeneration(
+                projectURL: fixture.project,
+                kind: .translatedTranscript,
+                language: .en,
+                revisionID: fixture.revision.id,
+                pendingOperations: [],
+                sourceReviewEnabled: false,
+                translationReviewEnabled: false
+            )
+            throw ProbeFailure(message: "неполученный перевод был автоматически утвержден")
+        } catch WorkflowError.processFailed(let message) {
+            try require(message.contains("не может быть автоматически утверждён"), "неправильная ошибка для неполученного перевода")
+        }
+
+        let manifest = try fixture.store.load(from: fixture.project)
+        let translated = try SRTService().load(from: fixture.layout.subtitlesURL(language: .en))
+        try require(
+            manifest.activeTranscriptRevision(for: .en) == nil
+                && manifest.transcriptRevisions?.first?.reviewStatus != .approved,
+            "fallback-перевод стал активной утвержденной ревизией"
+        )
+        try require(
+            manifest.reviewTasks?.contains(where: { $0.status == .needsReview }) == true
+                && (manifest.artifacts ?? []).allSatisfy { $0.validationStatus == .needsReview },
+            "fallback-перевод потерял статус needsReview"
+        )
+        try require(
+            translated.first?.text == fixture.sourceText,
+            "probe не сохранил контролируемый source-text fallback"
+        )
+    }
+
+    private static func verifyDisabledTranslationReviewApprovesValidResult() throws {
+        let fixture = try translationReviewFixture(hasUnresolvedTask: false)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let checkpoint = try HumanReviewService(store: fixture.store).transitionAfterGeneration(
+            projectURL: fixture.project,
+            kind: .translatedTranscript,
+            language: .en,
+            revisionID: fixture.revision.id,
+            pendingOperations: [],
+            sourceReviewEnabled: false,
+            translationReviewEnabled: false
+        )
+        let manifest = try fixture.store.load(from: fixture.project)
+        try require(checkpoint == nil, "валидный перевод ошибочно потребовал Human Review")
+        try require(
+            manifest.activeTranscriptRevision(for: .en)?.id == fixture.revision.id
+                && manifest.transcriptRevisions?.first?.reviewStatus == .approved
+                && (manifest.artifacts ?? []).allSatisfy { $0.validationStatus == .ready },
+            "валидный перевод не стал готовым при выключенном optional review"
+        )
+    }
+
+    private static func translationReviewFixture(hasUnresolvedTask: Bool) throws -> (
+        root: URL,
+        project: URL,
+        layout: ProjectLayout,
+        store: ProjectStore,
+        revision: TranscriptRevision,
+        sourceText: String
+    ) {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("videotext-translation-approval-\(UUID().uuidString)", isDirectory: true)
+        let project = root.appendingPathComponent("project", isDirectory: true)
+        let media = root.appendingPathComponent("source.mp4")
+        try fm.createDirectory(at: project, withIntermediateDirectories: true)
+        try Data("media".utf8).write(to: media)
+        let store = ProjectStore(history: ProjectHistoryStore(indexURL: root.appendingPathComponent("history.json")))
+        var manifest = try store.ensureProject(at: project, mediaURL: media, mode: .newProject)
+        let layout = ProjectLayout(root: project)
+        let sourceText = "The untranslated fallback must not be approved."
+        let cue = SubtitleCue(id: 7, start: 1, end: 2, text: sourceText)
+        try SRTService().writePreservingIDs([cue], to: layout.subtitlesURL(language: .en))
+        try sourceText.write(to: layout.transcriptURL(language: .en), atomically: true, encoding: .utf8)
+        let revision = TranscriptRevision(
+            id: "translation-approval-probe",
+            language: .en,
+            origin: .translated,
+            parentRevisionID: "source-probe",
+            transcriptArtifactID: "translation-txt",
+            subtitleArtifactID: "translation-srt",
+            contentHash: nil,
+            createdAt: Date(),
+            reviewStatus: hasUnresolvedTask ? .pending : nil
+        )
+        manifest.transcriptRevisions = [revision]
+        manifest.artifacts = [
+            ProjectArtifactRecord(
+                id: revision.transcriptArtifactID,
+                kind: .transcript,
+                path: layout.transcriptURL(language: .en).path,
+                language: .en,
+                origin: .translated,
+                granularity: nil,
+                sourceArtifactID: nil,
+                sourceRevision: revision.id,
+                dependencyIDs: [],
+                contentHash: nil,
+                createdAt: Date(),
+                generator: "probe",
+                generatorVersion: "1",
+                model: "probe",
+                validationStatus: .needsReview,
+                qualityStatus: .needsReview,
+                reviewTaskCount: hasUnresolvedTask ? 1 : 0
+            ),
+            ProjectArtifactRecord(
+                id: revision.subtitleArtifactID,
+                kind: .subtitles,
+                path: layout.subtitlesURL(language: .en).path,
+                language: .en,
+                origin: .translated,
+                granularity: nil,
+                sourceArtifactID: revision.transcriptArtifactID,
+                sourceRevision: revision.id,
+                dependencyIDs: [revision.transcriptArtifactID],
+                contentHash: nil,
+                createdAt: Date(),
+                generator: "probe",
+                generatorVersion: "1",
+                model: "probe",
+                validationStatus: .needsReview,
+                qualityStatus: .needsReview,
+                reviewTaskCount: hasUnresolvedTask ? 1 : 0
+            )
+        ]
+        if hasUnresolvedTask {
+            manifest.reviewTasks = [ReviewTask(
+                id: "fallback-task",
+                transcriptRevisionID: revision.id,
+                status: .needsReview,
+                language: .en,
+                start: cue.start,
+                end: cue.end,
+                cueIDs: [cue.id],
+                reasonCodes: ["translation-invalid"],
+                confidence: nil,
+                originalText: sourceText,
+                suggestedText: sourceText,
+                createdAt: Date(),
+                resolvedAt: nil,
+                dependentArtifactIDs: [revision.transcriptArtifactID, revision.subtitleArtifactID]
+            )]
+        } else {
+            manifest.reviewTasks = []
+        }
+        try store.save(manifest, to: project)
+        return (root, project, layout, store, revision, sourceText)
     }
 
     private static func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {

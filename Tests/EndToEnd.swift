@@ -706,12 +706,154 @@ struct EndToEndTest {
             target: targetLanguage,
             sourceIdentity: sourceRevision.id
         )
+        let usesSelectedTiming = try SelectedTimingVerticalSlice().loadPersistedSource(
+            projectURL: projectURL,
+            mediaURL: mediaURL
+        ) != nil
         let executionController = ProcessController()
-        let resumed = try await engine(executionController).run(settings: settings, onLog: { print($0) })
+        let resumed: WorkflowResult
+        do {
+            resumed = try await engine(executionController).run(settings: settings, onLog: { print($0) })
+        } catch {
+            guard !usesSelectedTiming else { throw error }
+            try require(
+                error.localizedDescription.contains("не может быть автоматически утверждён"),
+                "Legacy full.srt rejected a translation without a fail-closed error"
+            )
+            let failedManifest = try store.load(from: projectURL)
+            let targetRevision = failedManifest.transcriptRevisions?.last(where: {
+                $0.language == targetLanguage && $0.origin == .translated
+            })
+            let report = try store.decoder.decode(
+                TranslationReport.self,
+                from: Data(contentsOf: layout.translationReportURL(source: sourceLanguage, target: targetLanguage))
+            )
+            let fallback = try SRTService().load(from: layout.subtitlesURL(language: targetLanguage))
+            try require(
+                targetRevision?.reviewStatus == .pending
+                    && failedManifest.activeTranscriptRevision(for: targetLanguage) == nil
+                    && report.status == .needsReview
+                    && !report.reviewTaskIDs.isEmpty,
+                "Legacy full.srt promoted an untranslated fallback revision"
+            )
+            let targetArtifacts = (failedManifest.artifacts ?? []).filter {
+                $0.sourceRevision == targetRevision?.id
+            }
+            try require(
+                !targetArtifacts.isEmpty
+                    && targetArtifacts.allSatisfy { $0.validationStatus == .needsReview }
+                    && fallback.count == source.count
+                    && zip(fallback, source).allSatisfy { $0.id == $1.id && $0.text == $1.text },
+                "Legacy full.srt exposed source fallback as a ready translation"
+            )
+            try require(
+                failedManifest.workflow?.status == .failed
+                    && failedManifest.workflow?.operations[WorkflowOperation.translateTranscript.rawValue]?.status == .failed,
+                "Legacy full.srt did not record failed translation state"
+            )
+            do {
+                _ = try await engine(ProcessController()).run(settings: settings, onLog: { print($0) })
+                throw EndToEndError.failed("Legacy full.srt resume converted source fallback into success")
+            } catch {
+                try require(
+                    error.localizedDescription.contains("не может быть автоматически утверждён"),
+                    "Legacy full.srt resume changed the fail-closed outcome"
+                )
+            }
+            try assertSourceUnchanged()
+            try saveManifest("manifest-legacy-fallback-failed.json")
+            try require(noActiveTools(), "Legacy full.srt fail-closed translation left active child processes")
+            print("REAL_TRANSLATION_FAIL_CLOSED_PASS \(sourceLanguage.rawValue)->\(targetLanguage.rawValue): valid full.srt preserved, unresolved source fallback is pending/needsReview and cannot become ready through resume")
+            print("TRANSLATION_EVIDENCE=\(evidence.path)")
+            return
+        }
         try require(
             resumed.checkpoint == nil && resumed.topicReviewCheckpoint == nil,
             "Translation unexpectedly opened a review checkpoint"
         )
+        if let persistedSelectedSource = try SelectedTimingVerticalSlice().loadPersistedSource(
+            projectURL: projectURL,
+            mediaURL: mediaURL
+        ) {
+            let selectedSlice = SelectedTimingVerticalSlice()
+            let selectedSource = try selectedSlice.sourceDocument(
+                persistedSelectedSource,
+                reconciledWith: source
+            )
+            let selectedURL = layout.selectedTimingTranslationsURL(source: sourceLanguage, target: targetLanguage)
+            let selected = try store.decoder.decode(
+                TimedTranslationDocument.self,
+                from: Data(contentsOf: selectedURL)
+            )
+            try selected.validate()
+            try require(
+                selected.source == selectedSource
+                    && selected.units.map(\.sourceUnitID) == selectedSource.units.map(\.id),
+                "Selected timing translation lost source-unit ownership"
+            )
+            let translated = try SRTService().load(from: layout.subtitlesURL(language: targetLanguage))
+            let expectedCues = try selected.subtitleCues()
+            try require(
+                translated.count == expectedCues.count
+                    && zip(translated, expectedCues).allSatisfy {
+                        $0.id == $1.id && $0.start == $1.start && $0.end == $1.end && $0.text == $1.text
+                    },
+                "Selected timing translation changed unit order, source ranges or text"
+            )
+            let initialSelectedChats = await wire.chats
+            try require(initialSelectedChats.isEmpty, "Selected timing translation fell back to retired ownership routing")
+
+            let reportURL = layout.translationReportURL(source: sourceLanguage, target: targetLanguage)
+            let report = try store.decoder.decode(TranslationReport.self, from: Data(contentsOf: reportURL))
+            let (_, reopenedMedia) = try ProjectStore().openProject(at: projectURL)
+            try require(
+                reopenedMedia.standardizedFileURL == mediaURL.standardizedFileURL
+                    && report.schemaVersion == 3
+                    && report.sourceRevisionID == sourceRevision.id
+                    && report.cueCount == expectedCues.count
+                    && report.sourceLanguage == sourceLanguage
+                    && report.targetLanguage == targetLanguage
+                    && report.status == .ready
+                    && report.reviewTaskIDs.isEmpty
+                    && report.model == selected.model.model
+                    && report.modelDigest == selected.model.digest
+                    && report.protocolVersion == selected.model.protocolVersion
+                    && report.contextIdentity == selectedSource.upstreamManifestSHA256,
+                "Selected timing translation report lost exact provenance"
+            )
+            let outputs = [layout.subtitlesURL(language: targetLanguage), layout.transcriptURL(language: targetLanguage), reportURL, selectedURL]
+            let outputBytes = try outputs.map { try Data(contentsOf: $0) }
+            let outputDates = outputs.map { modificationDate($0) }
+            let reopenedController = ProcessController()
+            _ = try await engine(reopenedController).run(settings: settings, onLog: { print($0) })
+            let completedSelectedChats = await wire.chats
+            try require(completedSelectedChats.isEmpty, "Selected timing completed resume used ownership routing")
+            for (index, url) in outputs.enumerated() {
+                let currentBytes = try Data(contentsOf: url)
+                let currentDate = modificationDate(url)
+                try require(currentBytes == outputBytes[index] && currentDate == outputDates[index], "Selected timing completed resume rewrote translation output")
+            }
+            try FileManager.default.removeItem(at: reportURL)
+            let cachedController = ProcessController()
+            _ = try await engine(cachedController).run(settings: settings, onLog: { print($0) })
+            let replaySelectedChats = await wire.chats
+            try require(replaySelectedChats.isEmpty, "Selected timing cache replay used ownership routing")
+            let rebuilt = try store.decoder.decode(TranslationReport.self, from: Data(contentsOf: reportURL))
+            try require(
+                rebuilt.targetRevisionID == report.targetRevisionID
+                    && rebuilt.modelDigest == report.modelDigest
+                    && rebuilt.protocolVersion == report.protocolVersion
+                    && rebuilt.contextIdentity == report.contextIdentity
+                    && rebuilt.status == .ready,
+                "Selected timing cache replay changed provenance"
+            )
+            try assertSourceUnchanged()
+            try saveManifest("manifest-selected-timing-cache-replayed.json")
+            try require(noActiveTools(), "Selected timing translation left active child processes")
+            print("REAL_TRANSLATION_PASS \(sourceLanguage.rawValue)->\(targetLanguage.rawValue): selected JSON-full source units, text-only TranslateGemma, exact source ranges, source bytes, resume/cache, manifest/reopen")
+            print("TRANSLATION_EVIDENCE=\(evidence.path)")
+            return
+        }
         let chats = await wire.chats
         let expectedUnits = plan.units.map { $0.owned.map(\.id) }
         let expectedBatches = try plan.units.map { unit in
