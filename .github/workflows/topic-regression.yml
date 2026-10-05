@@ -1,16 +1,27 @@
 name: Topic Regression
 
+# macOS runners are intentionally NOT triggered on every PR push.
+# Development regression runs locally; this hosted macOS gate is reserved for
+# explicit Candidate/pre-merge validation and canonical main verification.
 on:
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why the hosted macOS gate is required (candidate/pre-merge)"
+        required: true
+        type: choice
+        options:
+          - candidate
+          - pre-merge
+          - exceptional
   push:
     branches: [main]
 
-# A newer commit on the same PR makes the older PR validation obsolete.
-# Keep canonical main validations non-cancellable.
+# Manual validation for the same ref supersedes an older in-progress run.
+# Canonical main validations remain non-cancellable.
 concurrency:
-  group: videotext-ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: videotext-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 
 jobs:
   topic-regression:
