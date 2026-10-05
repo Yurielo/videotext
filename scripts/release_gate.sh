@@ -84,6 +84,7 @@ release_files() {
     "$ROOT/scripts/test_topics.sh" \
     "$ROOT/scripts/test_topic_matrix.sh" \
     "$ROOT/scripts/test_ollama_topics.sh" \
+    "$ROOT/scripts/test_candidate_lifecycle.sh" \
     "$ROOT/scripts/test_translation.sh" \
     "$ROOT/scripts/test_translation_models.sh" \
     "$ROOT/scripts/test_ollama_memory_shutdown.sh" \
@@ -114,6 +115,7 @@ release_files() {
     "$ROOT/Tests/SelectedTimingVerticalSliceProbe.swift" \
     "$ROOT/Tests/OwnedTMPProbe.swift" \
     "$ROOT/Tests/ProcessShutdownProbe.swift" \
+    "$ROOT/Tests/CandidateLifecycleProbe.swift" \
     "$ROOT/Tests/ApplicationLifecycleProbe.swift" \
     "$ROOT/Tests/test_owned_tmp.py" \
     "$ROOT/Tests/ToolRunnerProbe.swift" \
@@ -157,15 +159,6 @@ assert_snapshot() {
   candidate_current="$(bundle_hash "$CANDIDATE")"
   [[ "$candidate_current" == "$CANDIDATE_HASH" ]] || fail "release candidate изменился после сборки"
 }
-
-stop_smoke_app() {
-  local pid
-  for pid in ${SMOKE_PIDS:-}; do
-    kill "$pid" 2>/dev/null || true
-  done
-}
-
-trap stop_smoke_app EXIT
 
 : > "$EVIDENCE"
 record status RUNNING
@@ -222,6 +215,7 @@ for focused in \
   test_topics.sh \
   test_topic_matrix.sh \
   test_ollama_topics.sh \
+  test_ollama_memory_shutdown.sh \
   test_translation.sh \
   test_translation_ownership.sh \
   test_selected_timing_vertical_slice.sh \
@@ -327,27 +321,14 @@ record candidate_path "$CANDIDATE"
 record candidate_sha256 "$CANDIDATE_HASH"
 assert_snapshot
 
-record smoke_command "open -n $CANDIDATE"
-if ! open -n "$CANDIDATE" > "$RUN_DIR/smoke-open.log" 2>&1; then
-  record smoke_open_exit_status 1
-  record smoke_log "$RUN_DIR/smoke-open.log"
-  fail "candidate не запускается"
+record candidate_lifecycle_command "$ROOT/scripts/test_candidate_lifecycle.sh $CANDIDATE"
+if ! "$ROOT/scripts/test_candidate_lifecycle.sh" "$CANDIDATE" > "$RUN_DIR/candidate-lifecycle.log" 2>&1; then
+  record candidate_lifecycle_exit_status 1
+  record candidate_lifecycle_log "$RUN_DIR/candidate-lifecycle.log"
+  fail "candidate не прошел normal Quit/reopen lifecycle"
 fi
-record smoke_open_exit_status 0
-record smoke_log "$RUN_DIR/smoke-open.log"
-sleep 5
-SMOKE_PIDS="$(pgrep -x videotext 2>/dev/null || true)"
-[[ -n "$SMOKE_PIDS" ]] || fail "после smoke-запуска не найден процесс videotext"
-for pid in $SMOKE_PIDS; do
-  kill -0 "$pid" 2>/dev/null || fail "smoke-процесс videotext завершился преждевременно"
-done
-stop_smoke_app
-SMOKE_PIDS=""
-
-for _ in 1 2 3 4 5; do
-  pgrep -x videotext >/dev/null || break
-  sleep 1
-done
+record candidate_lifecycle_exit_status 0
+record candidate_lifecycle_log "$RUN_DIR/candidate-lifecycle.log"
 require_no_active_tools
 record smoke_metadata_cleanup_command "xattr -cr $CANDIDATE"
 if ! xattr -cr "$CANDIDATE" > "$RUN_DIR/smoke-metadata-cleanup.log" 2>&1; then
@@ -437,7 +418,7 @@ required_evidence=(
   build_command build_exit_status build_log
   e2e_1_command e2e_1_exit_status e2e_1_log
   e2e_2_command e2e_2_exit_status e2e_2_log
-  smoke_command smoke_open_exit_status smoke_log
+  candidate_lifecycle_command candidate_lifecycle_exit_status candidate_lifecycle_log
   smoke_metadata_cleanup_command smoke_metadata_cleanup_exit_status smoke_metadata_cleanup_log
   codesign_before_command codesign_before_exit_status codesign_before_log
   codesign_after_command codesign_after_exit_status codesign_after_log
