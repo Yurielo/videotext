@@ -203,6 +203,18 @@ record ffmpeg_version "$(ffmpeg -version 2>/dev/null | sed -n '1p')"
 record ffprobe_version "$(ffprobe -version 2>/dev/null | sed -n '1p')"
 record whisper_version "$(whisper-cli --version 2>&1 | sed -n '1p')"
 
+# The selected-timing route consumes the canonical SeminarText capability. A
+# release gate must never accidentally exercise an older similarly named CLI.
+SEMINARTEXT_EXECUTABLE="${VIDEOTEXT_SEMINARTEXT_EXECUTABLE:-}"
+[[ -n "$SEMINARTEXT_EXECUTABLE" ]] || fail "задайте VIDEOTEXT_SEMINARTEXT_EXECUTABLE для canonical SeminarText selected timing"
+[[ -x "$SEMINARTEXT_EXECUTABLE" ]] || fail "SeminarText не исполняемый: $SEMINARTEXT_EXECUTABLE"
+SEMINARTEXT_HELP="$("$SEMINARTEXT_EXECUTABLE" transcribe --help 2>&1)" || fail "не удалось проверить SeminarText: $SEMINARTEXT_EXECUTABLE"
+printf '%s\n' "$SEMINARTEXT_HELP" | /usr/bin/grep -Fq -- '--language' || fail "SeminarText не поддерживает --language: $SEMINARTEXT_EXECUTABLE"
+printf '%s\n' "$SEMINARTEXT_HELP" | /usr/bin/grep -Fq -- '--structured-timing' || fail "SeminarText не поддерживает --structured-timing: $SEMINARTEXT_EXECUTABLE"
+record seminartext_executable "$SEMINARTEXT_EXECUTABLE"
+record seminartext_sha256 "$(shasum -a 256 "$SEMINARTEXT_EXECUTABLE" | awk '{print $1}')"
+record seminartext_runtime_identity "$("$SEMINARTEXT_EXECUTABLE" runtime-identity 2>&1)"
+
 require_no_active_tools
 SOURCE_HASH="$(release_inputs_hash)" || fail "не удалось вычислить hash release inputs"
 record release_inputs_sha256 "$SOURCE_HASH"
