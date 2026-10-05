@@ -61,9 +61,21 @@ enum WorkflowOperation: String, CaseIterable, Identifiable, Codable {
         }
     }
 
+    /// Translation is retained in the project for a later release, but is not a
+    /// supported product operation in the current core-only release.
+    static let translationEnabledForCurrentRelease = false
+
+    var isEnabledForCurrentRelease: Bool {
+        switch self {
+        case .translateTranscript, .createDubbing:
+            return Self.translationEnabledForCurrentRelease
+        default:
+            return true
+        }
+    }
+
     static let userSelectable: [WorkflowOperation] = [
         .transcribe,
-        .translateTranscript,
         .topicTimecoding,
         .burnSubtitles
     ]

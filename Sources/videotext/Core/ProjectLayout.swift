@@ -63,6 +63,10 @@ struct ProjectLayout {
     var selectedTimingSeminarTextDirectory: URL {
         selectedTimingDirectory.appendingPathComponent("SeminarText", isDirectory: true)
     }
+    /// SeminarText's ordinary transcription output retained as core provenance.
+    /// It intentionally does not require selected-timing translation evidence.
+    var seminarTextCoreDirectory: URL { supportDirectory.appendingPathComponent("SeminarText", isDirectory: true) }
+    var seminarTextCoreEvidenceURL: URL { seminarTextCoreDirectory.appendingPathComponent("core_transcription.json") }
     var selectedTimingSourceUnitsURL: URL { selectedTimingDirectory.appendingPathComponent("source_units.json") }
     func selectedTimingTranslationsURL(source: ArtifactLanguage, target: ArtifactLanguage) -> URL {
         selectedTimingDirectory.appendingPathComponent("translations.\(source.rawValue)-\(target.rawValue).json")

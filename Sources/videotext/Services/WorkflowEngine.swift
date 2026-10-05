@@ -1063,6 +1063,7 @@ final class WorkflowEngine: @unchecked Sendable {
     let topicReview: TopicReviewService
     let translationAdapter: TranslationAdapter
     let selectedTimingTranslation: SelectedTimingVerticalSlice
+    let coreSeminarTextTranscription: SeminarTextCoreTranscriptionRunner
     let localWhisperRetry: LocalWhisperRetryService
     let fillerWords = FillerWordService()
     let audioEnhancement: AudioEnhancementAdapter
@@ -1083,6 +1084,7 @@ final class WorkflowEngine: @unchecked Sendable {
         self.selectedTimingTranslation = selectedTimingTranslation ?? SelectedTimingVerticalSlice(
             runner: SeminarTextSelectedTimingRunner(runner: runner)
         )
+        coreSeminarTextTranscription = SeminarTextCoreTranscriptionRunner(runner: runner)
         diagnostics = DiagnosticsService(runner: runner)
         languageDetection = LanguageDetectionService(runner: runner)
         transcriber = WhisperCLITranscriber(runner: runner)
@@ -1109,6 +1111,10 @@ final class WorkflowEngine: @unchecked Sendable {
         onProgress: @escaping (WorkflowProgress) -> Void = { _ in }
     ) async throws -> WorkflowResult {
         guard let mediaURL = settings.mediaURL else { throw WorkflowError.missingMedia }
+        let disabledOperations = settings.selectedOperations.filter { !$0.isEnabledForCurrentRelease }
+        guard disabledOperations.isEmpty else {
+            throw WorkflowError.processFailed("Перевод и зависящий от него дубляж временно недоступны в текущей сборке VideoText.")
+        }
         let projectURL = try settings.projectURL ?? store.createAutomaticProject(for: mediaURL)
         let layout = ProjectLayout(root: projectURL)
         let operations = expanded(
@@ -1291,25 +1297,38 @@ final class WorkflowEngine: @unchecked Sendable {
                         log("Освобождена память Ollama перед SeminarText: \(unloadedModels.joined(separator: ", ")).")
                     }
                     let seminarText = try SeminarTextExecutableLocator().resolvedExecutable()
-                    log("Расшифровка SeminarText selected timing: \(seminarText.path)")
-                    log("SeminarText runtime identity:\n\(try SeminarTextExecutableLocator().runtimeIdentity(of: seminarText))")
+                    let runtimeIdentity = try SeminarTextExecutableLocator().runtimeIdentity(of: seminarText)
+                    log("Расшифровка bundled SeminarText: \(seminarText.path)")
+                    log("SeminarText runtime identity:\n\(runtimeIdentity)")
                     tracker.update(operation, fraction: 0.05, indeterminate: true)
-                    let sourceDocument = try await selectedTimingTranslation.transcribe(
+                    let coreResult = try await coreSeminarTextTranscription.transcribe(
                         mediaURL: mediaURL,
                         language: sourceLanguage,
                         executable: seminarText,
                         modelPath: modelPath,
-                        outputRoot: layout.selectedTimingSeminarTextDirectory,
+                        outputRoot: layout.seminarTextCoreDirectory,
                         onLog: { message in
                             tracker.update(operation, fraction: 0.5, indeterminate: true)
                             log(message)
                         }
                     )
-                    try selectedTimingTranslation.persistSource(sourceDocument, to: projectURL)
-                    let cues = try sourceDocument.subtitleCues()
+                    let importedCues = try coreSeminarTextTranscription.loadCoreSRT(from: coreResult.srtURL, srt: srt)
+                    let cues = try coreSeminarTextTranscription.reconcileForVideoTextTimeline(importedCues)
+                    if cues.map(\.start) != importedCues.map(\.start) {
+                        log("Скорректированы микроперекрытия на границах фрагментов SeminarText; исходный SRT сохранён в provenance.")
+                    }
                     try srt.writePreservingIDs(cues, to: layout.fullSRTURL)
                     try writeTranscript(from: cues, to: layout.transcriptURL)
-                    try store.registerOutput(kind: "selected-timing-source", url: layout.selectedTimingSourceUnitsURL, in: projectURL)
+                    let coreEvidence = SeminarTextCoreTranscriptionEvidence(
+                        schemaVersion: 1,
+                        runtimeIdentity: runtimeIdentity,
+                        sourceSRTSHA256: SelectedTimingHash.file(coreResult.srtURL),
+                        outputDirectory: coreResult.outputDirectory.path
+                    )
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+                    try encoder.encode(coreEvidence).write(to: layout.seminarTextCoreEvidenceURL, options: .atomic)
+                    try store.registerOutput(kind: "seminartext-core-transcription", url: layout.seminarTextCoreEvidenceURL, in: projectURL)
                     try store.registerOutput(kind: "full-srt", url: layout.fullSRTURL, in: projectURL)
                     try store.registerOutput(kind: "transcript", url: layout.transcriptURL, in: projectURL)
                     _ = try registerTranscriptRevision(
@@ -1322,7 +1341,7 @@ final class WorkflowEngine: @unchecked Sendable {
                         modelPath: modelPath
                     )
                     tracker.update(operation, fraction: 1)
-                    log("Созданы full.srt и transcript.txt из selected Whisper JSON-full той же попытки SeminarText.")
+                    log("Созданы full.srt и transcript.txt из обычного успешного запуска bundled SeminarText.")
 
                 case .assessTranscriptionQuality:
                     let parsed = try srt.loadWithReport(from: layout.fullSRTURL)
@@ -1354,8 +1373,9 @@ final class WorkflowEngine: @unchecked Sendable {
                         transcriptRevisionID: revision.id,
                         mediaDuration: try await timelinePermittedEnd(mediaURL: mediaURL, projectURL: projectURL)
                     )
+                    let coreSeminarText = nonemptyFile(layout.seminarTextCoreEvidenceURL)
                     if assessment.recoveryIssue == nil, !assessment.tasks.isEmpty,
-                       selectedSource == nil {
+                       selectedSource == nil, !coreSeminarText {
                         let modelPath = try WhisperModelLocator().resolvedModelPath(settings.whisperModelPath)
                         assessment.tasks = try await localWhisperRetry.addSuggestions(
                             to: assessment.tasks,
@@ -1371,7 +1391,7 @@ final class WorkflowEngine: @unchecked Sendable {
                             language: language
                         )
                     } else if !assessment.tasks.isEmpty {
-                        log("Selected timing: предложения локального Whisper retry не создаются; источником остаётся выбранная попытка SeminarText.")
+                        log("SeminarText остаётся владельцем расшифровки; VideoText не запускает локальный Whisper retry.")
                     }
                     let encoder = JSONEncoder()
                     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -2781,7 +2801,7 @@ final class WorkflowEngine: @unchecked Sendable {
         case .createManifest: return [layout.manifestURL.path]
         case .detectLanguage: return [layout.languageDetectionURL.path]
         case .transcribe:
-            return [layout.fullSRTURL, layout.transcriptURL, layout.whisperJSONURL, layout.sourceAudioURL, layout.selectedTimingSourceUnitsURL]
+            return [layout.fullSRTURL, layout.transcriptURL, layout.whisperJSONURL, layout.sourceAudioURL]
                 .filter { nonemptyFile($0) }
                 .map(\.path)
         case .assessTranscriptionQuality:

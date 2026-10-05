@@ -344,6 +344,144 @@ struct SeminarTextSelectedTimingRunner {
     }
 }
 
+/// Core VideoText transcription consumes ordinary SeminarText SRT output. The
+/// selected JSON-full package remains an opt-in translation capability only.
+struct SeminarTextCoreTranscriptionRunner {
+    struct Result {
+        let srtURL: URL
+        let outputDirectory: URL
+    }
+
+    let runner: ToolRunner
+
+    init(runner: ToolRunner = ToolRunner()) {
+        self.runner = runner
+    }
+
+    func transcribe(
+        mediaURL: URL,
+        language: ArtifactLanguage,
+        executable: URL,
+        modelPath: String,
+        outputRoot: URL,
+        onLog: @escaping (String) -> Void = { _ in }
+    ) async throws -> Result {
+        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
+            throw WorkflowError.missingTool("SeminarText: \(executable.path)")
+        }
+        try FileManager.default.createDirectory(at: outputRoot, withIntermediateDirectories: true)
+        let invocationRoot = outputRoot.appendingPathComponent("core-transcription-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: invocationRoot, withIntermediateDirectories: true)
+        var arguments = [
+            "SEMINARTEXT_OUTPUT=\(invocationRoot.path)",
+            "SEMINARTEXT_HEADLESS=1"
+        ]
+        if !modelPath.isEmpty {
+            arguments.append("SEMINARTEXT_MODEL=\(modelPath)")
+        }
+        arguments += [executable.path, "transcribe", mediaURL.path, "--language", language.rawValue, "--no-open"]
+        let result = try await runner.run("/usr/bin/env", arguments, currentDirectory: invocationRoot) { _, chunk in
+            onLog(chunk)
+        }
+        guard result.exitCode == 0 else {
+            throw WorkflowError.processFailed("SeminarText transcription завершился с кодом \(result.exitCode): \((result.stderr + result.stdout).trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        let srtURLs = Self.findCoreSRTs(in: invocationRoot)
+        guard srtURLs.count == 1, let srtURL = srtURLs.first else {
+            throw WorkflowError.processFailed("SeminarText не создал один core SRT (найдено: \(srtURLs.count)).")
+        }
+        return Result(srtURL: srtURL, outputDirectory: srtURL.deletingLastPathComponent())
+    }
+
+    private static func findCoreSRTs(in root: URL) -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+        return enumerator.compactMap { item in
+            guard let url = item as? URL,
+                  url.pathExtension.lowercased() == "srt",
+                  url.lastPathComponent.lowercased().hasPrefix("transcript"),
+                  (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { return nil }
+            return url
+        }.sorted { $0.path < $1.path }
+    }
+
+    /// SeminarText's ordinary CLI SRT deliberately omits numeric cue headers.
+    /// Keep VideoText's general SRT parser strict; this narrow adapter accepts
+    /// only that documented timestamp/text form and assigns local cue IDs.
+    func loadCoreSRT(from url: URL, srt: SRTService = SRTService()) throws -> [SubtitleCue] {
+        do {
+            return try srt.load(from: url)
+        } catch {
+            let normalized = try String(contentsOf: url, encoding: .utf8)
+                .replacingOccurrences(of: "\r\n", with: "\n")
+            let blocks = normalized.components(separatedBy: "\n\n")
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            guard !blocks.isEmpty else {
+                throw WorkflowError.invalidSRT("SeminarText core SRT не содержит субтитров.")
+            }
+            var cues: [SubtitleCue] = []
+            for (index, block) in blocks.enumerated() {
+                let lines = block.components(separatedBy: "\n")
+                guard lines.count >= 2 else {
+                    throw WorkflowError.invalidSRT("SeminarText core SRT: неполный блок \(index + 1).")
+                }
+                let times = lines[0].components(separatedBy: " --> ")
+                guard times.count == 2,
+                      let start = srt.parseTimestamp(times[0]),
+                      let end = srt.parseTimestamp(times[1]),
+                      end >= start else {
+                    throw WorkflowError.invalidSRT("SeminarText core SRT: некорректный временной диапазон в блоке \(index + 1).")
+                }
+                let text = lines.dropFirst().joined(separator: "\n")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else {
+                    throw WorkflowError.invalidSRT("SeminarText core SRT: пустой текст в блоке \(index + 1).")
+                }
+                guard end > start else { continue }
+                cues.append(SubtitleCue(id: index + 1, start: start, end: end, text: text))
+            }
+            guard !cues.isEmpty else {
+                throw WorkflowError.invalidSRT("SeminarText core SRT содержит только реплики нулевой длительности.")
+            }
+            return cues
+        }
+    }
+
+    /// SeminarText may leave a small overlap where adjacent prepared-media
+    /// chunks meet. Preserve the raw SRT as provenance and make only this
+    /// bounded boundary adjustment for VideoText's non-overlapping full.srt.
+    func reconcileForVideoTextTimeline(_ cues: [SubtitleCue]) throws -> [SubtitleCue] {
+        let maximumBoundaryOverlap: TimeInterval = 0.25
+        var reconciled: [SubtitleCue] = []
+        for cue in cues {
+            guard let previous = reconciled.last else {
+                reconciled.append(cue)
+                continue
+            }
+            guard cue.start < previous.end else {
+                reconciled.append(cue)
+                continue
+            }
+            let overlap = previous.end - cue.start
+            guard overlap <= maximumBoundaryOverlap, cue.end > previous.end else {
+                throw WorkflowError.invalidSRT("SeminarText core SRT: небезопасное пересечение реплик \(previous.id) и \(cue.id) (\(String(format: "%.3f", overlap)) с).")
+            }
+            reconciled.append(SubtitleCue(id: cue.id, start: previous.end, end: cue.end, text: cue.text))
+        }
+        return reconciled
+    }
+}
+
+struct SeminarTextCoreTranscriptionEvidence: Codable {
+    let schemaVersion: Int
+    let runtimeIdentity: String
+    let sourceSRTSHA256: String
+    let outputDirectory: String
+}
+
 struct TimedSourceUnit: Codable, Equatable {
     var id: Int
     var text: String

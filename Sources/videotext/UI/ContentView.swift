@@ -833,24 +833,8 @@ struct ContentView: View {
 
                 GroupBox("Нейтральный дубляж") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Picker("Язык", selection: $model.dubbingLanguage) {
-                            Text("RU · Yuri улучшенный").tag(ArtifactLanguage.ru)
-                            Text("EN · Daniel улучшенный").tag(ArtifactLanguage.en)
-                        }
-                        .pickerStyle(.segmented)
-                        Picker("Оригинальный звук", selection: $model.dubbingMixMode) {
-                            ForEach(DubbingMixMode.allCases) { mode in
-                                Text(mode.title).tag(mode)
-                            }
-                        }
-                        Button {
-                            model.createDubbing()
-                        } label: {
-                            Label("Создать дубляж", systemImage: "person.wave.2")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.projectURL == nil)
-                        .help(model.dubbingLanguage == .ru ? "Создать дубляж голосом Yuri (Enhanced)" : "Создать дубляж голосом Daniel (Enhanced)")
+                        Text("Недоступен в текущей сборке: для дубляжа требуется перевод.")
+                            .foregroundStyle(.secondary)
                     }
                     .padding(6)
                 }
