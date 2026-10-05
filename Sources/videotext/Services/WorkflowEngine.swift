@@ -1062,6 +1062,7 @@ final class WorkflowEngine: @unchecked Sendable {
     let humanReview: HumanReviewService
     let topicReview: TopicReviewService
     let translationAdapter: TranslationAdapter
+    let selectedTimingTranslation: SelectedTimingVerticalSlice
     let localWhisperRetry: LocalWhisperRetryService
     let fillerWords = FillerWordService()
     let audioEnhancement: AudioEnhancementAdapter
@@ -1071,13 +1072,17 @@ final class WorkflowEngine: @unchecked Sendable {
         store: ProjectStore = ProjectStore(),
         controller: ProcessController = ProcessController(),
         hybridTopicAdapter: TopicAdapter = HybridTopicAdapter(),
-        translationAdapter: TranslationAdapter = TranslationAdapter()
+        translationAdapter: TranslationAdapter = TranslationAdapter(),
+        selectedTimingTranslation: SelectedTimingVerticalSlice? = nil
     ) {
         self.store = store
         self.controller = controller
         self.hybridTopicAdapter = hybridTopicAdapter
         self.translationAdapter = translationAdapter
         runner = ToolRunner(controller: controller)
+        self.selectedTimingTranslation = selectedTimingTranslation ?? SelectedTimingVerticalSlice(
+            runner: SeminarTextSelectedTimingRunner(runner: runner)
+        )
         diagnostics = DiagnosticsService(runner: runner)
         languageDetection = LanguageDetectionService(runner: runner)
         transcriber = WhisperCLITranscriber(runner: runner)
@@ -1272,52 +1277,66 @@ final class WorkflowEngine: @unchecked Sendable {
                     log("Язык видео: \(profile.detected.rawValue); язык обработки: \(effective).")
 
                 case .transcribe:
+                    let current = try store.load(from: projectURL)
+                    guard let sourceLanguage = current.languageProfile?.effective else {
+                        throw WorkflowError.processFailed("Не определён исходный язык для расшифровки SeminarText.")
+                    }
+                    guard (settings.transcriptionContext ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        throw WorkflowError.processFailed("Canonical SeminarText не поддерживает пользовательский контекст расшифровки. Удалите контекст или используйте совместимый runtime; контекст не будет проигнорирован молча.")
+                    }
                     let modelPath = try WhisperModelLocator().resolvedModelPath(settings.whisperModelPath)
-                    let mediaDuration = try await requiredDuration(of: mediaURL, manifest: manifest)
                     let unloadedModels = await ollamaMemory.unloadTopicModels()
                     try Task.checkCancellation()
                     if !unloadedModels.isEmpty {
-                        log("Освобождена память Ollama перед Whisper: \(unloadedModels.joined(separator: ", ")).")
+                        log("Освобождена память Ollama перед SeminarText: \(unloadedModels.joined(separator: ", ")).")
                     }
-                    log("Модель Whisper: \(modelPath)")
-                    log("Подготовка звуковой дорожки: PCM WAV, 16 кГц, моно.")
-                    let detectedLanguage = try store.load(from: projectURL).languageProfile?.effective?.rawValue
-                    let transcriptionLanguage = settings.whisperLanguage.lowercased() == "auto"
-                        ? (detectedLanguage ?? "auto")
-                        : settings.whisperLanguage
-                    let transcription = try await transcriber.transcribe(
+                    let seminarText = try SeminarTextExecutableLocator().resolvedExecutable()
+                    log("Расшифровка SeminarText selected timing: \(seminarText.path)")
+                    tracker.update(operation, fraction: 0.05, indeterminate: true)
+                    let sourceDocument = try await selectedTimingTranslation.transcribe(
                         mediaURL: mediaURL,
-                        projectURL: projectURL,
-                        mediaDuration: mediaDuration,
+                        language: sourceLanguage,
+                        executable: seminarText,
                         modelPath: modelPath,
-                        language: transcriptionLanguage,
-                        contextHint: settings.transcriptionContext,
-                        onProgress: { fraction in
-                        tracker.update(operation, fraction: fraction)
-                    }, onLog: log)
-                    try store.registerOutput(kind: "full-srt", url: transcription.srtURL, in: projectURL)
-                    try store.registerOutput(kind: "whisper-json", url: transcription.jsonURL, in: projectURL)
-                    let cues = try srt.load(from: transcription.srtURL)
+                        outputRoot: layout.selectedTimingSeminarTextDirectory,
+                        onLog: { message in
+                            tracker.update(operation, fraction: 0.5, indeterminate: true)
+                            log(message)
+                        }
+                    )
+                    try selectedTimingTranslation.persistSource(sourceDocument, to: projectURL)
+                    let cues = try sourceDocument.subtitleCues()
+                    try srt.writePreservingIDs(cues, to: layout.fullSRTURL)
                     try writeTranscript(from: cues, to: layout.transcriptURL)
+                    try store.registerOutput(kind: "selected-timing-source", url: layout.selectedTimingSourceUnitsURL, in: projectURL)
+                    try store.registerOutput(kind: "full-srt", url: layout.fullSRTURL, in: projectURL)
                     try store.registerOutput(kind: "transcript", url: layout.transcriptURL, in: projectURL)
                     _ = try registerTranscriptRevision(
                         cues: cues,
-                        language: transcriptionQuality.inferLanguage(cues: cues, whisperJSONURL: transcription.jsonURL),
+                        language: sourceLanguage,
                         projectURL: projectURL,
                         layout: layout,
-                        sourceSRT: transcription.srtURL,
+                        sourceSRT: layout.fullSRTURL,
                         sourceTranscript: layout.transcriptURL,
                         modelPath: modelPath
                     )
-                    log("Созданы full.srt и transcript.txt.")
+                    tracker.update(operation, fraction: 1)
+                    log("Созданы full.srt и transcript.txt из selected Whisper JSON-full той же попытки SeminarText.")
 
                 case .assessTranscriptionQuality:
                     let parsed = try srt.loadWithReport(from: layout.fullSRTURL)
                     let manifest = try store.load(from: projectURL)
+                    let selectedSource = try selectedTimingTranslation.loadPersistedSource(
+                        projectURL: projectURL,
+                        mediaURL: mediaURL
+                    )
+                    let legacyWhisperJSON = selectedSource == nil && nonemptyFile(layout.whisperJSONURL)
+                        ? layout.whisperJSONURL
+                        : nil
                     let language = manifest.languageProfile?.effective
                         ?? transcriptionQuality.inferLanguage(
                             cues: parsed.cues,
-                            whisperJSONURL: nonemptyFile(layout.whisperJSONURL) ? layout.whisperJSONURL : nil
+                            whisperJSONURL: legacyWhisperJSON
                         )
                     let revision = try ensureTranscriptRevision(
                         cues: parsed.cues,
@@ -1328,12 +1347,14 @@ final class WorkflowEngine: @unchecked Sendable {
                     var assessment = transcriptionQuality.assess(
                         cues: parsed.cues,
                         skippedZeroDurationCount: parsed.skippedZeroDurationCount,
-                        whisperJSONURL: nonemptyFile(layout.whisperJSONURL) ? layout.whisperJSONURL : nil,
+                        whisperJSONURL: legacyWhisperJSON,
+                        selectedTimingEvidence: selectedSource?.qualityEvidence ?? [],
                         language: language,
                         transcriptRevisionID: revision.id,
-                        mediaDuration: try await requiredDuration(of: mediaURL, manifest: manifest)
+                        mediaDuration: try await timelinePermittedEnd(mediaURL: mediaURL, projectURL: projectURL)
                     )
-                    if assessment.recoveryIssue == nil, !assessment.tasks.isEmpty {
+                    if assessment.recoveryIssue == nil, !assessment.tasks.isEmpty,
+                       selectedSource == nil {
                         let modelPath = try WhisperModelLocator().resolvedModelPath(settings.whisperModelPath)
                         assessment.tasks = try await localWhisperRetry.addSuggestions(
                             to: assessment.tasks,
@@ -1348,6 +1369,8 @@ final class WorkflowEngine: @unchecked Sendable {
                             tasks: assessment.tasks,
                             language: language
                         )
+                    } else if !assessment.tasks.isEmpty {
+                        log("Selected timing: предложения локального Whisper retry не создаются; источником остаётся выбранная попытка SeminarText.")
                     }
                     let encoder = JSONEncoder()
                     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -1377,27 +1400,52 @@ final class WorkflowEngine: @unchecked Sendable {
                         throw WorkflowError.processFailed("Не определён исходный язык для перевода.")
                     }
                     let targetLanguage: ArtifactLanguage = sourceLanguage == .ru ? .en : .ru
+                    let activeSourceCues = try srt.load(from: layout.fullSRTURL)
                     let sourceRevision = try ensureTranscriptRevision(
-                        cues: try srt.load(from: layout.fullSRTURL),
+                        cues: activeSourceCues,
                         language: sourceLanguage,
                         projectURL: projectURL,
                         layout: layout
                     )
-                    let sourceSRT = layout.subtitlesURL(language: sourceLanguage)
-                    let sourceCues = try srt.load(from: sourceSRT)
                     if current.activeTranscriptRevision(for: targetLanguage)?.origin == .userEdited {
                         throw WorkflowError.processFailed("Перевод содержит ручные правки. Новый профиль перевода не будет автоматически заменять принятую пользователем ревизию.")
                     }
-                    let result = try await translationAdapter.translate(
-                        cues: sourceCues,
-                        source: sourceLanguage,
-                        target: targetLanguage,
-                        documentTitle: TranslationContextPlan.documentTitle(for: mediaURL),
-                        sourceIdentity: sourceRevision.id,
-                        checkpointDirectory: layout.translationCacheDirectory(source: sourceLanguage, target: targetLanguage),
-                        onProgress: { tracker.update(operation, fraction: $0) },
-                        onLog: log
-                    )
+                    let result: TranslationAdapterResult
+                    if let selectedSource = try selectedTimingTranslation.loadPersistedSource(projectURL: projectURL, mediaURL: mediaURL) {
+                        let sourceDocument = try selectedTimingTranslation.sourceDocument(
+                            selectedSource,
+                            reconciledWith: activeSourceCues
+                        )
+                        log("Перевод использует selected timing source units; TranslateGemma получает только текст unit.")
+                        let translated = try await selectedTimingTranslation.translate(
+                            sourceDocument: sourceDocument,
+                            source: sourceLanguage,
+                            target: targetLanguage,
+                            cacheDirectory: layout.selectedTimingTranslationCacheDirectory,
+                            onLog: log
+                        )
+                        try selectedTimingTranslation.persist(translated, to: projectURL)
+                        try store.registerOutput(
+                            kind: "selected-timing-translation-\(sourceLanguage.rawValue)-\(targetLanguage.rawValue)",
+                            url: layout.selectedTimingTranslationsURL(source: sourceLanguage, target: targetLanguage),
+                            in: projectURL
+                        )
+                        result = try translated.adapterResult()
+                        tracker.update(operation, fraction: 1)
+                    } else {
+                        let sourceSRT = layout.subtitlesURL(language: sourceLanguage)
+                        let sourceCues = try srt.load(from: sourceSRT)
+                        result = try await translationAdapter.translate(
+                            cues: sourceCues,
+                            source: sourceLanguage,
+                            target: targetLanguage,
+                            documentTitle: TranslationContextPlan.documentTitle(for: mediaURL),
+                            sourceIdentity: sourceRevision.id,
+                            checkpointDirectory: layout.translationCacheDirectory(source: sourceLanguage, target: targetLanguage),
+                            onProgress: { tracker.update(operation, fraction: $0) },
+                            onLog: log
+                        )
+                    }
                     try Task.checkCancellation()
                     let report = try registerTranslation(
                         result,
@@ -1447,7 +1495,7 @@ final class WorkflowEngine: @unchecked Sendable {
                     // A run produces only the language and detail level selected in the UI.
                     // Existing variants remain available, but are never recomputed implicitly.
                     let combinations = [(language, settings.topicGranularity)]
-                    let mediaDuration = try await requiredDuration(of: mediaURL, manifest: currentManifest)
+                    let mediaDuration = try await timelinePermittedEnd(mediaURL: mediaURL, projectURL: projectURL)
                     for (combinationIndex, combination) in combinations.enumerated() {
                         let (language, granularity) = combination
                         let srtURL = layout.subtitlesURL(language: language)
@@ -1670,12 +1718,23 @@ final class WorkflowEngine: @unchecked Sendable {
                           let revision = current.activeTranscriptRevision(for: language) else {
                         throw WorkflowError.processFailed("Не найдена актуальная ревизия расшифровки для анализа слов-паразитов.")
                     }
-                    let report = try fillerWords.analyze(
-                        whisperJSONURL: layout.whisperJSONURL,
-                        cues: try srt.load(from: layout.subtitlesURL(language: language)),
-                        language: language,
-                        transcriptRevisionID: revision.id
-                    )
+                    let cues = try srt.load(from: layout.subtitlesURL(language: language))
+                    let report: FillerAnalysisReport
+                    if let selectedSource = try selectedTimingTranslation.loadPersistedSource(projectURL: projectURL, mediaURL: mediaURL) {
+                        report = try fillerWords.analyze(
+                            selectedTiming: selectedSource,
+                            cues: cues,
+                            language: language,
+                            transcriptRevisionID: revision.id
+                        )
+                    } else {
+                        report = try fillerWords.analyze(
+                            whisperJSONURL: layout.whisperJSONURL,
+                            cues: cues,
+                            language: language,
+                            transcriptRevisionID: revision.id
+                        )
+                    }
                     try encoderForDerivedTimeline().encode(report).write(to: layout.fillerWordsURL, options: .atomic)
                     let reviewTasks = report.candidates.filter { !$0.highConfidence }.map { candidate in
                         ReviewTask(
@@ -2439,7 +2498,8 @@ final class WorkflowEngine: @unchecked Sendable {
     private func validateTimeline(mediaURL: URL, layout: ProjectLayout, projectURL: URL, log: (String) -> Void) async throws {
         guard FileManager.default.fileExists(atPath: layout.fullSRTURL.path) else { throw WorkflowError.missingFullSRT }
         let parsed = try srt.loadWithReport(from: layout.fullSRTURL)
-        let warnings = srt.validateTimeline(parsed.cues, mediaDuration: try await ffmpeg.duration(of: mediaURL))
+        let permittedEnd = try await timelinePermittedEnd(mediaURL: mediaURL, projectURL: projectURL)
+        let warnings = srt.validateTimeline(parsed.cues, mediaDuration: permittedEnd)
         var lines = warnings.isEmpty
             ? ["Временная шкала корректна. Субтитров: \(parsed.cues.count)."]
             : warnings
@@ -2451,6 +2511,22 @@ final class WorkflowEngine: @unchecked Sendable {
         try store.registerOutput(kind: "timeline-validation", url: layout.timelineValidationURL, in: projectURL)
         log(body.trimmingCharacters(in: .whitespacesAndNewlines))
         if !warnings.isEmpty { throw WorkflowError.invalidSRT(warnings.joined(separator: " ")) }
+    }
+
+    /// Selected Whisper JSON-full can legitimately include native timestamp
+    /// padding beyond the prepared media extent. Only an upstream-published
+    /// selected timing envelope may extend the timeline limit; ordinary SRT
+    /// remains bounded by the measured media duration.
+    private func timelinePermittedEnd(mediaURL: URL, projectURL: URL) async throws -> TimeInterval? {
+        let mediaDuration = try await ffmpeg.duration(of: mediaURL)
+        guard let selected = try selectedTimingTranslation.loadPersistedSource(projectURL: projectURL, mediaURL: mediaURL),
+              let selectedEnd = selected.selectedTimingEnd else {
+            return mediaDuration
+        }
+        return SelectedTimingTimeline.permittedEnd(
+            projectURL: projectURL,
+            measuredDuration: max(mediaDuration ?? 0, selectedEnd)
+        )
     }
 
     private func validateAllVideos(
@@ -2510,7 +2586,10 @@ final class WorkflowEngine: @unchecked Sendable {
                 log("Существующий full.srt не читается; потребуется новая расшифровка: \(error.localizedDescription)")
                 return false
             }
-            let warnings = srt.validateTimeline(parsed.cues, mediaDuration: try await ffmpeg.duration(of: mediaURL))
+            let warnings = srt.validateTimeline(
+                parsed.cues,
+                mediaDuration: try await timelinePermittedEnd(mediaURL: mediaURL, projectURL: projectURL)
+            )
             guard warnings.isEmpty else {
                 log("Существующий full.srt не прошёл проверку; потребуется новая расшифровка.")
                 return false
@@ -2547,6 +2626,54 @@ final class WorkflowEngine: @unchecked Sendable {
                   nonemptyFile(layout.subtitlesURL(language: targetLanguage)),
                   let report = try? store.decoder.decode(TranslationReport.self, from: Data(contentsOf: reportURL)) else {
                 return false
+            }
+            // An approved translation is intentionally not byte-identical to
+            // the machine selected-timing document. Its immutable approved
+            // revision is validated by the established lineage validator;
+            // never rerun machine translation over a user's accepted edit.
+            if let selectedSource = try? selectedTimingTranslation.loadPersistedSource(projectURL: projectURL, mediaURL: mediaURL),
+               let activeSourceCues = try? srt.load(from: layout.subtitlesURL(language: sourceLanguage)),
+               let sourceDocument = try? selectedTimingTranslation.sourceDocument(selectedSource, reconciledWith: activeSourceCues),
+               let translatedData = try? Data(contentsOf: layout.selectedTimingTranslationsURL(source: sourceLanguage, target: targetLanguage)),
+               let translatedDocument = try? store.decoder.decode(TimedTranslationDocument.self, from: translatedData),
+               let identity = try? await selectedTimingTranslation.currentIdentity(),
+               let activeTarget = manifest.activeTranscriptRevision(for: targetLanguage),
+               activeTarget.origin == .userEdited,
+               identity.digest?.isEmpty == false,
+               (try? translatedDocument.validate()) != nil,
+               translatedDocument.source == sourceDocument,
+               translatedDocument.model == identity,
+               TranslationResumeValidator.outputsMatch(report: report, manifest: manifest, layout: layout) {
+                return report.sourceRevisionID == sourceRevision.id
+                    && report.model == identity.model
+                    && report.modelDigest == identity.digest
+                    && report.protocolVersion == identity.protocolVersion
+                    && report.contextIdentity == sourceDocument.upstreamManifestSHA256
+            }
+            if let selectedSource = try? selectedTimingTranslation.loadPersistedSource(projectURL: projectURL, mediaURL: mediaURL),
+               let activeSourceCues = try? srt.load(from: layout.subtitlesURL(language: sourceLanguage)),
+               let sourceDocument = try? selectedTimingTranslation.sourceDocument(selectedSource, reconciledWith: activeSourceCues),
+               let translatedData = try? Data(contentsOf: layout.selectedTimingTranslationsURL(source: sourceLanguage, target: targetLanguage)),
+               let translatedDocument = try? store.decoder.decode(TimedTranslationDocument.self, from: translatedData),
+               let identity = try? await selectedTimingTranslation.currentIdentity(),
+               identity.digest?.isEmpty == false,
+               (try? translatedDocument.validate()) != nil,
+               translatedDocument.source == sourceDocument,
+               translatedDocument.model == identity,
+               let expectedSourceCues = try? sourceDocument.subtitleCues(),
+               let sourceCues = try? srt.load(from: layout.subtitlesURL(language: sourceLanguage)),
+               let translatedCues = try? translatedDocument.subtitleCues(),
+               let targetCues = try? srt.load(from: layout.subtitlesURL(language: targetLanguage)),
+               sourceCues.count == expectedSourceCues.count,
+               zip(sourceCues, expectedSourceCues).allSatisfy({ $0.id == $1.id && abs($0.start - $1.start) <= 0.001 && abs($0.end - $1.end) <= 0.001 && $0.text.trimmingCharacters(in: .whitespacesAndNewlines) == $1.text.trimmingCharacters(in: .whitespacesAndNewlines) }),
+               translatedCues.count == targetCues.count,
+               zip(translatedCues, targetCues).allSatisfy({ $0.id == $1.id && abs($0.start - $1.start) <= 0.001 && abs($0.end - $1.end) <= 0.001 && $0.text == $1.text }),
+               TranslationResumeValidator.outputsMatch(report: report, manifest: manifest, layout: layout) {
+                return report.sourceRevisionID == sourceRevision.id
+                    && report.model == identity.model
+                    && report.modelDigest == identity.digest
+                    && report.protocolVersion == identity.protocolVersion
+                    && report.contextIdentity == sourceDocument.upstreamManifestSHA256
             }
             guard let identity = try? await translationAdapter.currentIdentity(), identity.digest?.isEmpty == false,
                   let sourceCues = try? srt.load(from: layout.subtitlesURL(language: sourceLanguage)),
@@ -2647,7 +2774,7 @@ final class WorkflowEngine: @unchecked Sendable {
         case .createManifest: return [layout.manifestURL.path]
         case .detectLanguage: return [layout.languageDetectionURL.path]
         case .transcribe:
-            return [layout.fullSRTURL, layout.transcriptURL, layout.whisperJSONURL, layout.sourceAudioURL]
+            return [layout.fullSRTURL, layout.transcriptURL, layout.whisperJSONURL, layout.sourceAudioURL, layout.selectedTimingSourceUnitsURL]
                 .filter { nonemptyFile($0) }
                 .map(\.path)
         case .assessTranscriptionQuality:
@@ -2660,7 +2787,8 @@ final class WorkflowEngine: @unchecked Sendable {
             return [
                 layout.transcriptURL(language: target),
                 layout.subtitlesURL(language: target),
-                layout.translationReportURL(source: source, target: target)
+                layout.translationReportURL(source: source, target: target),
+                layout.selectedTimingTranslationsURL(source: source, target: target)
             ].filter { nonemptyFile($0) }.map(\.path)
         case .validateTimeline: return [layout.timelineValidationURL.path]
         case .topicTimecoding:

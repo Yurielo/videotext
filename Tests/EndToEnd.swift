@@ -1036,9 +1036,8 @@ struct EndToEndTest {
         try require(directoryExists(layout.videoDirectory), "Не создана папка Video")
         try require(directoryExists(layout.textsDirectory), "Не создана папка Texts")
         try require(directoryExists(layout.supportDirectory), "Не создана папка Support files")
-        let requiredFiles = [
+        var requiredFiles = [
             layout.manifestURL,
-            layout.sourceAudioURL,
             layout.diagnosticsURL,
             layout.timelineValidationURL,
             layout.ffprobeReportURL,
@@ -1048,6 +1047,14 @@ struct EndToEndTest {
             layout.topicsTextURL,
             layout.subtitledVideoURL
         ]
+        let selectedTimingSource = nonemptyFile(at: layout.selectedTimingSourceUnitsURL)
+        if selectedTimingSource {
+            let selected = try JSONDecoder().decode(TimedSourceDocument.self, from: Data(contentsOf: layout.selectedTimingSourceUnitsURL))
+            try selected.validateCoverage()
+            try require(selected.selectedTimingEnd != nil, "Selected timing source не содержит published timing envelope")
+        } else {
+            requiredFiles.append(layout.sourceAudioURL)
+        }
         for url in requiredFiles { try require(nonemptyFile(at: url), "Отсутствует или пуст результат: \(url.path)") }
         let cues = try SRTService().load(from: layout.fullSRTURL)
         try require(!cues.isEmpty, "full.srt не содержит субтитров")

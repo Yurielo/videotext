@@ -60,6 +60,9 @@ struct ProjectLayout {
     /// Opt-in evidence imported from SeminarText selected-attempt JSON-full.
     /// This is deliberately separate from the legacy VideoText Whisper outputs.
     var selectedTimingDirectory: URL { supportDirectory.appendingPathComponent("Selected timing", isDirectory: true) }
+    var selectedTimingSeminarTextDirectory: URL {
+        selectedTimingDirectory.appendingPathComponent("SeminarText", isDirectory: true)
+    }
     var selectedTimingSourceUnitsURL: URL { selectedTimingDirectory.appendingPathComponent("source_units.json") }
     func selectedTimingTranslationsURL(source: ArtifactLanguage, target: ArtifactLanguage) -> URL {
         selectedTimingDirectory.appendingPathComponent("translations.\(source.rawValue)-\(target.rawValue).json")

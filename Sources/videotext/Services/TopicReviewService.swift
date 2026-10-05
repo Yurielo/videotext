@@ -205,7 +205,14 @@ struct TopicReviewService {
         let cues = try srt.load(from: ProjectLayout(root: projectURL).subtitlesURL(language: language))
         let meaningfulIDs = Set(TopicTextPreprocessor().prepare(cues).flatMap(\.cueIDs))
         let meaningful = cues.filter { meaningfulIDs.contains($0.id) }
-        let issues = validator.validate(file, expectedCues: meaningful, mediaDuration: manifest.durationSeconds)
+        let issues = validator.validate(
+            file,
+            expectedCues: meaningful,
+            mediaDuration: SelectedTimingTimeline.permittedEnd(
+                projectURL: projectURL,
+                measuredDuration: manifest.durationSeconds
+            )
+        )
         guard issues.isEmpty else { throw WorkflowError.invalidTopics(issues.joined(separator: " ")) }
     }
 

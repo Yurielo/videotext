@@ -352,6 +352,8 @@ struct ProjectOutput: Codable, Identifiable {
         case "ffprobe", "fragment-ffprobe": return "Проверка видео"
         case "full-srt": return "Полные субтитры"
         case "transcript": return "Расшифровка"
+        case "selected-timing-source": return "Выбранные временные данные расшифровки"
+        case let value where value.hasPrefix("selected-timing-translation-"): return "Перевод расшифровки"
         case "localized-transcript": return "Расшифровка по языку"
         case "localized-subtitles": return "Субтитры по языку"
         case "topics", "topics-text": return "Тематический таймкодинг"

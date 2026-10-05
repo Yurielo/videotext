@@ -20,7 +20,61 @@ struct SelectedTimingVerticalSliceProbe {
         try require(source.units.contains(where: { $0.text.contains("mitochondria") }), "mitochondria missing")
         try require(source.units.map(\.id) == Array(1...source.units.count), "source order changed")
         try require(source.units.allSatisfy { $0.end >= $0.start }, "invalid time range")
-        try require(source.units.last?.end == 1.96, "manifest range did not bound decoder padding")
+        try require(source.units.first?.start == 0, "selected JSON token timing was not shifted from its own timebase")
+        try require(source.units.last?.end == 2.4, "selected JSON token timing was inferred from SRT/segment boundaries")
+        try require(source.selectedTimingEnd == 5.5, "selected timing envelope was not preserved")
+        let selectedProject = root.appendingPathComponent("selected-project")
+        try FileManager.default.createDirectory(at: selectedProject, withIntermediateDirectories: true)
+        try SelectedTimingVerticalSlice().persistSource(source, to: selectedProject)
+        try require(
+            SelectedTimingTimeline.permittedEnd(projectURL: selectedProject, measuredDuration: 1.96) == 5.5,
+            "topic/review validation did not consume the published selected timing envelope"
+        )
+        try require(
+            SelectedTimingTimeline.permittedEnd(projectURL: root.appendingPathComponent("ordinary-project"), measuredDuration: 1.96) == 1.96,
+            "ordinary projects received a selected timing extension"
+        )
+        var legacyObject = try JSONSerialization.jsonObject(with: JSONEncoder().encode(source)) as! [String: Any]
+        legacyObject.removeValue(forKey: "tokenTimeline")
+        legacyObject.removeValue(forKey: "selectedTimingEnd")
+        legacyObject.removeValue(forKey: "qualityEvidence")
+        let legacySource = try JSONDecoder().decode(
+            TimedSourceDocument.self,
+            from: JSONSerialization.data(withJSONObject: legacyObject)
+        )
+        try require(legacySource.tokenTimeline.isEmpty && legacySource.selectedTimingEnd == nil && legacySource.qualityEvidence.isEmpty,
+                    "existing selected timing documents no longer decode")
+        try require(
+            source.qualityEvidence.count == source.units.count
+                && source.qualityEvidence.allSatisfy { $0.averageTokenConfidence != nil && $0.averageNoSpeechProbability != nil },
+            "selected Whisper quality evidence was not preserved with source timing"
+        )
+        var acceptedCues = try source.subtitleCues()
+        acceptedCues = acceptedCues.map { cue in
+            SubtitleCue(id: cue.id, start: cue.start, end: cue.end, text: cue.text.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        let reconciled = try SelectedTimingVerticalSlice().sourceDocument(source, reconciledWith: acceptedCues)
+        try require(reconciled == source, "SRT whitespace normalization changed selected source provenance")
+        let reconciledAgain = try SelectedTimingVerticalSlice().sourceDocument(reconciled, reconciledWith: acceptedCues)
+        try require(reconciledAgain == reconciled, "selected timing reconciliation is not idempotent at shared unit boundaries")
+        acceptedCues[1].text = "Corrected accepted source text."
+        let corrected = try SelectedTimingVerticalSlice().sourceDocument(source, reconciledWith: acceptedCues)
+        try require(corrected.units[1].text == " Corrected accepted source text.", "accepted source correction was not bound to selected timing")
+        try require(corrected.units[1].textSHA256 != source.units[1].textSHA256, "accepted source correction did not invalidate unit cache identity")
+
+        var fillerSource = source
+        fillerSource.tokenTimeline = [
+            TimedSourceToken(text: " Um", start: 3.55, end: 3.65, sourcePartID: "part_0000"),
+            TimedSourceToken(text: " um", start: 3.70, end: 3.80, sourcePartID: "part_0000")
+        ]
+        let fillerReport = try FillerWordService().analyze(
+            selectedTiming: fillerSource,
+            cues: try source.subtitleCues(),
+            language: .en,
+            transcriptRevisionID: "selected-timing-revision"
+        )
+        try require(fillerReport.candidates.filter { $0.normalized == "um" }.count == 2,
+                    "selected Whisper token evidence was not used for filler analysis")
 
         var overlapping = source
         overlapping.units[1].start = overlapping.units[0].end - 0.01
@@ -56,6 +110,19 @@ struct SelectedTimingVerticalSliceProbe {
         changed.sourceText = changed.units.map(\.text).joined()
         _ = try await slice.translate(sourceDocument: changed, source: .en, target: .ru, cacheDirectory: cache)
         try require(provider.requests.count == firstCalls + 1, "cache reused another source text/unit")
+        let reverse = try await slice.translate(
+            sourceDocument: source,
+            source: .ru,
+            target: .en,
+            cacheDirectory: root.appendingPathComponent("reverse-cache")
+        )
+        try reverse.validate()
+        try require(
+            zip(reverse.units, source.units).allSatisfy {
+                $0.sourceUnitID == $1.id && $0.sourceTextSHA256 == $1.textSHA256 && $0.start == $1.start && $0.end == $1.end
+            },
+            "RU-to-EN selected timing translation lost structural provenance"
+        )
 
         let promptCapture = try await simplePromptCapture()
         try require(!promptCapture.contains("cueId") && !promptCapture.contains("sourceEcho") && !promptCapture.contains("timestamp"), "Ollama prompt leaked provenance")
@@ -76,8 +143,8 @@ struct SelectedTimingVerticalSliceProbe {
         // Two native JSON segments emulate an old SRT cue boundary in the
         // middle of a sentence. Source units must follow punctuation instead.
         let json: [String: Any] = ["transcription": [
-            ["tokens": Array(tokens[0..<11])],
-            ["tokens": Array(tokens[11...])]
+            ["offsets": ["from": 3540, "to": 4560], "no_speech_prob": 0.04, "tokens": Array(tokens[0..<11])],
+            ["offsets": ["from": 4560, "to": 5500], "no_speech_prob": 0.08, "tokens": Array(tokens[11...])]
         ]]
         let jsonURL = parts.appendingPathComponent("\(partID).json")
         try JSONSerialization.data(withJSONObject: json).write(to: jsonURL)
@@ -92,13 +159,13 @@ struct SelectedTimingVerticalSliceProbe {
             "artifact_type": "seminartext.selected_whisper_timing",
             "source": ["media_sha256": SelectedTimingHash.file(media)],
             "transcription": ["language": "en"],
-            "parts": [["id": partID, "order": 0, "absolute_offset_seconds": 0.0, "absolute_range": ["start_seconds": 0.0, "end_seconds": 1.96], "selected_attempt": "initial", "artifacts": ["txt": artifact(txtURL), "srt": artifact(srtURL), "json_full": artifact(jsonURL)]]]
+            "parts": [["id": partID, "order": 0, "absolute_offset_seconds": 0.0, "absolute_range": ["start_seconds": 0.0, "end_seconds": 5.5], "selected_timing_absolute_range": ["start_seconds": 0.0, "end_seconds": 5.5], "selected_attempt": "initial", "artifacts": ["txt": artifact(txtURL), "srt": artifact(srtURL), "json_full": artifact(jsonURL)]]]
         ]
         try JSONSerialization.data(withJSONObject: manifest).write(to: root.appendingPathComponent("manifest.json"))
     }
 
     private static func token(_ text: String, _ from: Int, _ to: Int) -> [String: Any] {
-        ["text": text, "offsets": ["from": from, "to": to]]
+        ["text": text, "offsets": ["from": from, "to": to], "p": 0.9]
     }
 
     private static func verifySingleSeminarTextEntry(root: URL, media: URL, package: URL) async throws {
@@ -110,7 +177,7 @@ struct SelectedTimingVerticalSliceProbe {
         let executable = root.appendingPathComponent("fake-seminartext")
         let script = """
         #!/bin/sh
-        printf '%s\\n' \"$*\" >> '\(invocationLog.path)'
+        printf '%s|model=%s\\n' \"$*\" \"$SEMINARTEXT_MODEL\" >> '\(invocationLog.path)'
         mkdir -p \"$SEMINARTEXT_OUTPUT/run\"
         cp -R '\(package.path)' \"$SEMINARTEXT_OUTPUT/run/structured_timing\"
         """
@@ -121,6 +188,7 @@ struct SelectedTimingVerticalSliceProbe {
             mediaURL: media,
             language: .en,
             executable: executable,
+            modelPath: "/models/selected.bin",
             outputRoot: outputRoot
         )
         let selectedPath = selected.resolvingSymlinksInPath().path
@@ -135,6 +203,7 @@ struct SelectedTimingVerticalSliceProbe {
         try require(arguments.contains("--structured-timing"), "runner missed selected timing request")
         try require(arguments.contains("--language en"), "runner missed source language")
         try require(arguments.contains("--no-open"), "runner did not keep SeminarText headless")
+        try require(arguments.contains("|model=/models/selected.bin"), "runner missed selected Whisper model")
     }
 
     private static func simplePromptCapture() async throws -> String {
