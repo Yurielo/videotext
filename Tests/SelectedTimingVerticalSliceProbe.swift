@@ -82,6 +82,27 @@ struct SelectedTimingVerticalSliceProbe {
         var negative = source
         negative.units[0].start = -0.01
         try expectFailure { try negative.validateCoverage() }
+        let zeroWidthPackage = root.appendingPathComponent("zero-width-package")
+        try makePackage(at: zeroWidthPackage, media: media, zeroWidthSpokenToken: true)
+        let zeroWidthSource = try importer.importSelectedPackage(
+            packageRoot: zeroWidthPackage,
+            expectedMediaURL: media,
+            expectedLanguage: .en
+        )
+        try require(
+            zeroWidthSource.sourceText == zeroWidthSource.units.map(\.text).joined(),
+            "zero-width selected token lost or duplicated source text"
+        )
+        try require(
+            zeroWidthSource.tokenTimeline.contains(where: {
+                $0.text == " save" && $0.start == 0.1 && $0.end == 0.1
+            }),
+            "zero-width selected token timing was rewritten"
+        )
+        try require(
+            zeroWidthSource.units.allSatisfy { $0.end >= $0.start },
+            "zero-width selected token corrupted source-unit envelope"
+        )
         let malformedPackage = root.appendingPathComponent("malformed-package")
         try makePackage(at: malformedPackage, media: media, overlappingTokens: true)
         try expectFailure { _ = try importer.importSelectedPackage(packageRoot: malformedPackage, expectedMediaURL: media, expectedLanguage: .en) }
@@ -129,7 +150,12 @@ struct SelectedTimingVerticalSliceProbe {
         print("SELECTED_TIMING_VERTICAL_SLICE_PROBE_PASS")
     }
 
-    private static func makePackage(at root: URL, media: URL, overlappingTokens: Bool = false) throws {
+    private static func makePackage(
+        at root: URL,
+        media: URL,
+        overlappingTokens: Bool = false,
+        zeroWidthSpokenToken: Bool = false
+    ) throws {
         let parts = root.appendingPathComponent("parts")
         try FileManager.default.createDirectory(at: parts, withIntermediateDirectories: true)
         let partID = "part_0000"
@@ -140,6 +166,7 @@ struct SelectedTimingVerticalSliceProbe {
             token(" We", 1420, 1480), token(" watch", 1480, 1550), token(" the", 1550, 1600), token(" mitochondria", 1600, 1760), token(" gently", 1760, 1820), token(" go", 1820, 1860), token(" downhill", 1860, 1940), token(".", 1940, 2400), token("[_EOT_]", 2400, 2400)
         ]
         if overlappingTokens { tokens[1] = token(" save", 50, 200) }
+        if zeroWidthSpokenToken { tokens[1] = token(" save", 100, 100) }
         // Two native JSON segments emulate an old SRT cue boundary in the
         // middle of a sentence. Source units must follow punctuation instead.
         let json: [String: Any] = ["transcription": [

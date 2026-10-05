@@ -410,7 +410,9 @@ struct TimedSourceDocument: Codable, Equatable {
         guard units.allSatisfy({ SelectedTimingHash.string($0.text) == $0.textSHA256 }) else {
             throw WorkflowError.processFailed("Selected timing source units имеют неверный text SHA-256.")
         }
-        guard tokenTimeline.allSatisfy({ !$0.text.isEmpty && $0.start >= 0 && $0.end > $0.start && !$0.sourcePartID.isEmpty }) else {
+        // Token offsets retain native selected-Whisper evidence. Equal bounds
+        // are valid zero-width evidence; only reverse intervals are invalid.
+        guard tokenTimeline.allSatisfy({ !$0.text.isEmpty && $0.start >= 0 && $0.end >= $0.start && !$0.sourcePartID.isEmpty }) else {
             throw WorkflowError.processFailed("Selected timing source token timeline содержит недопустимый речевой интервал.")
         }
         let unitIDs = Set(units.map(\.id))
@@ -567,9 +569,12 @@ struct SelectedTimingImporter {
                         start = max(start, previousAtomEnd)
                         end = max(end, start)
                     }
-                    guard end > start else {
-                        throw WorkflowError.processFailed("Selected timing JSON схлопнул речевой token в нулевой интервал.")
-                    }
+                    // JSON-full is evidence from the chosen Whisper attempt.
+                    // A non-control token can legitimately have equal raw
+                    // offsets after Whisper/VAD time mapping. Preserve that
+                    // zero-width evidence verbatim; do not invent a duration
+                    // or discard its source text. Sentence units retain their
+                    // truthful envelope from the surrounding token evidence.
                     previousAtomEnd = end
                     atoms.append(SelectedTimingAtom(
                         text: token.text,
