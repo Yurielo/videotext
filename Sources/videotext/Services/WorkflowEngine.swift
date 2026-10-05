@@ -1292,6 +1292,7 @@ final class WorkflowEngine: @unchecked Sendable {
                     }
                     let seminarText = try SeminarTextExecutableLocator().resolvedExecutable()
                     log("Расшифровка SeminarText selected timing: \(seminarText.path)")
+                    log("SeminarText runtime identity:\n\(try SeminarTextExecutableLocator().runtimeIdentity(of: seminarText))")
                     tracker.update(operation, fraction: 0.05, indeterminate: true)
                     let sourceDocument = try await selectedTimingTranslation.transcribe(
                         mediaURL: mediaURL,

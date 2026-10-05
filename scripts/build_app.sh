@@ -24,6 +24,10 @@ cp "${ROOT}/Resources/Info.plist" "${CONTENTS}/Info.plist"
 cp "${ROOT}/Resources/AppIcon.icns" "${RESOURCES}/AppIcon.icns"
 mkdir -p "${RESOURCES}/Branding"
 cp "${ROOT}/Resources/Branding/VideoTextLogo.png" "${RESOURCES}/Branding/VideoTextLogo.png"
+[[ -x "${ROOT}/Resources/SeminarText/seminartext" ]] || { echo "Missing bundled canonical SeminarText component." >&2; exit 2; }
+mkdir -p "${RESOURCES}/SeminarText"
+ditto --norsrc "${ROOT}/Resources/SeminarText" "${RESOURCES}/SeminarText"
+chmod +x "${RESOURCES}/SeminarText/seminartext"
 
 swiftc \
   -O \

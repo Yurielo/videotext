@@ -55,6 +55,10 @@ mkdir -p "$(dirname "${TEST_BINARY}")"
 cp "${ROOT}/Resources/Info.plist" "${TEST_APP}/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable videotext-e2e' "${TEST_APP}/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.codex.videotext.e2e' "${TEST_APP}/Contents/Info.plist"
+[[ -x "${ROOT}/Resources/SeminarText/seminartext" ]] || { echo "Missing bundled canonical SeminarText component." >&2; exit 2; }
+mkdir -p "${TEST_APP}/Contents/Resources/SeminarText"
+ditto --norsrc "${ROOT}/Resources/SeminarText" "${TEST_APP}/Contents/Resources/SeminarText"
+chmod +x "${TEST_APP}/Contents/Resources/SeminarText/seminartext"
 
 while IFS= read -r source; do
   SWIFT_SOURCES+=("$source")

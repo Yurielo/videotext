@@ -203,17 +203,14 @@ record ffmpeg_version "$(ffmpeg -version 2>/dev/null | sed -n '1p')"
 record ffprobe_version "$(ffprobe -version 2>/dev/null | sed -n '1p')"
 record whisper_version "$(whisper-cli --version 2>&1 | sed -n '1p')"
 
-# The selected-timing route consumes the canonical SeminarText capability. A
-# release gate must never accidentally exercise an older similarly named CLI.
-SEMINARTEXT_EXECUTABLE="${VIDEOTEXT_SEMINARTEXT_EXECUTABLE:-}"
-[[ -n "$SEMINARTEXT_EXECUTABLE" ]] || fail "задайте VIDEOTEXT_SEMINARTEXT_EXECUTABLE для canonical SeminarText selected timing"
-[[ -x "$SEMINARTEXT_EXECUTABLE" ]] || fail "SeminarText не исполняемый: $SEMINARTEXT_EXECUTABLE"
-SEMINARTEXT_HELP="$("$SEMINARTEXT_EXECUTABLE" transcribe --help 2>&1)" || fail "не удалось проверить SeminarText: $SEMINARTEXT_EXECUTABLE"
-printf '%s\n' "$SEMINARTEXT_HELP" | /usr/bin/grep -Fq -- '--language' || fail "SeminarText не поддерживает --language: $SEMINARTEXT_EXECUTABLE"
-printf '%s\n' "$SEMINARTEXT_HELP" | /usr/bin/grep -Fq -- '--structured-timing' || fail "SeminarText не поддерживает --structured-timing: $SEMINARTEXT_EXECUTABLE"
-record seminartext_executable "$SEMINARTEXT_EXECUTABLE"
-record seminartext_sha256 "$(shasum -a 256 "$SEMINARTEXT_EXECUTABLE" | awk '{print $1}')"
-record seminartext_runtime_identity "$("$SEMINARTEXT_EXECUTABLE" runtime-identity 2>&1)"
+BUNDLED_SEMINARTEXT="$ROOT/Resources/SeminarText/seminartext"
+[[ -x "$BUNDLED_SEMINARTEXT" ]] || fail "не найден bundled SeminarText component"
+SEMINARTEXT_HELP="$("$BUNDLED_SEMINARTEXT" transcribe --help 2>&1)" || fail "не удалось проверить bundled SeminarText"
+printf '%s\n' "$SEMINARTEXT_HELP" | /usr/bin/grep -Fq -- '--language' || fail "bundled SeminarText не поддерживает --language"
+printf '%s\n' "$SEMINARTEXT_HELP" | /usr/bin/grep -Fq -- '--structured-timing' || fail "bundled SeminarText не поддерживает --structured-timing"
+record seminartext_executable "$BUNDLED_SEMINARTEXT"
+record seminartext_sha256 "$(shasum -a 256 "$BUNDLED_SEMINARTEXT" | awk '{print $1}')"
+record seminartext_runtime_identity "$("$BUNDLED_SEMINARTEXT" runtime-identity 2>&1)"
 
 require_no_active_tools
 SOURCE_HASH="$(release_inputs_hash)" || fail "не удалось вычислить hash release inputs"
@@ -302,6 +299,13 @@ record build_command "VIDEOTEXT_APP_PATH=$CANDIDATE $ROOT/scripts/build_app.sh"
 record build_exit_status 0
 record build_log "$RUN_DIR/build.log"
 [[ -d "$CANDIDATE" ]] || fail "candidate не создан"
+Candidate_SEMINARTEXT="$CANDIDATE/Contents/Resources/SeminarText/seminartext"
+[[ -x "$Candidate_SEMINARTEXT" ]] || fail "candidate не содержит bundled SeminarText"
+[[ "$(shasum -a 256 "$Candidate_SEMINARTEXT" | awk '{print $1}')" == "$(shasum -a 256 "$BUNDLED_SEMINARTEXT" | awk '{print $1}')" ]] || fail "candidate SeminarText differs from release E2E component"
+"$Candidate_SEMINARTEXT" transcribe --help 2>&1 | /usr/bin/grep -Fq -- '--language' || fail "candidate SeminarText не поддерживает --language"
+record candidate_seminartext_path "$Candidate_SEMINARTEXT"
+record candidate_seminartext_sha256 "$(shasum -a 256 "$Candidate_SEMINARTEXT" | awk '{print $1}')"
+record candidate_seminartext_runtime_identity "$("$Candidate_SEMINARTEXT" runtime-identity 2>&1)"
 record codesign_before_command "codesign --verify --deep --strict $CANDIDATE"
 if ! codesign --verify --deep --strict "$CANDIDATE" > "$RUN_DIR/codesign-before.log" 2>&1; then
   record codesign_before_exit_status 1

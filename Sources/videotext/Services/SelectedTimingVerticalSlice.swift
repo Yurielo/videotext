@@ -218,25 +218,56 @@ struct SelectedTimingVerticalSlice {
     }
 }
 
-/// A local VideoText installation deliberately consumes a separately installed
-/// SeminarText runtime. The environment override keeps deterministic QA and
-/// managed deployments possible without embedding another ASR implementation.
+/// The packaged application owns selection of the SeminarText component that
+/// implements its selected-timing contract. This must not silently fall back
+/// to an arbitrary executable from PATH after release validation.
 struct SeminarTextExecutableLocator {
     func resolvedExecutable() throws -> URL {
         let environment = ProcessInfo.processInfo.environment
         let configured = environment["VIDEOTEXT_SEMINARTEXT_EXECUTABLE"]
             .map { URL(fileURLWithPath: $0).standardizedFileURL }
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let candidates = [
-            configured,
-            home.appendingPathComponent("bin/seminartext"),
-            URL(fileURLWithPath: "/opt/homebrew/bin/seminartext"),
-            URL(fileURLWithPath: "/usr/local/bin/seminartext")
-        ].compactMap { $0 }
-        if let executable = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) {
+        let bundled = Bundle.main.resourceURL?
+            .appendingPathComponent("SeminarText/seminartext")
+            .standardizedFileURL
+        let candidates = [bundled, configured].compactMap { $0 }
+        for executable in candidates where FileManager.default.isExecutableFile(atPath: executable.path) {
+            try verifyCapability(of: executable)
             return executable
         }
-        throw WorkflowError.missingTool("SeminarText (--structured-timing); задайте VIDEOTEXT_SEMINARTEXT_EXECUTABLE или установите ~/bin/seminartext")
+        throw WorkflowError.missingTool("Не найден совместимый компонент SeminarText для selected timing.")
+    }
+
+    private func verifyCapability(of executable: URL) throws {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["transcribe", "--help"]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        process.waitUntilExit()
+        let help = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        guard process.terminationStatus == 0,
+              help.contains("--language"),
+              help.contains("--structured-timing") else {
+            throw WorkflowError.processFailed("SeminarText не поддерживает required selected-timing contract (--language, --structured-timing): \(executable.path)")
+        }
+    }
+
+    func runtimeIdentity(of executable: URL) throws -> String {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["runtime-identity"]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        process.waitUntilExit()
+        let identity = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        guard process.terminationStatus == 0, !identity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw WorkflowError.processFailed("Не удалось проверить runtime identity SeminarText: \(executable.path)")
+        }
+        return identity.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
