@@ -49,6 +49,9 @@ struct CoreProductWorkflowProbe {
         try require(!cues.isEmpty, "core transcription produced an empty full.srt")
         try require(nonempty(layout.transcriptURL), "core transcription did not produce transcript.txt")
         try require(nonempty(layout.fullSRTURL), "core transcription did not produce full.srt")
+        try require(nonempty(layout.whisperJSONURL), "core transcription did not produce whisper.json")
+        try require(SeminarTextCoreWhisperEvidenceImporter().validateLegacyWhisperJSON(at: layout.whisperJSONURL),
+                    "core transcription produced an unreadable whisper.json")
         try require(nonempty(layout.seminarTextCoreEvidenceURL), "core SeminarText provenance was not persisted")
         try require(!FileManager.default.fileExists(atPath: layout.selectedTimingSourceUnitsURL.path), "core transcription wrote selected-timing source units")
         try require(!FileManager.default.fileExists(atPath: layout.selectedTimingSeminarTextDirectory.path), "core transcription wrote a selected-timing SeminarText package")
@@ -62,10 +65,20 @@ struct CoreProductWorkflowProbe {
         let rawCues = try SeminarTextCoreTranscriptionRunner().loadCoreSRT(from: rawSRTs[0])
         try require(rawCues.count == cues.count && zip(rawCues, cues).allSatisfy { $0.text == $1.text },
                     "core import lost or changed SeminarText text")
+        try require(evidence.selectedTimingManifestSHA256 != nil && evidence.selectedWhisperJSONSHA256 == SelectedTimingHash.file(layout.whisperJSONURL),
+                    "core provenance does not bind whisper.json to selected SeminarText evidence")
         try require(logs.contains(where: { $0.contains("Расшифровка bundled SeminarText") }), "core path did not use bundled SeminarText")
-        try require(!logs.joined(separator: "\n").contains("selected timing"), "core path invoked selected timing")
         let outputs = try store.load(from: project).outputs
         try require(!outputs.contains(where: { $0.kind.contains("translation") }), "core path registered a translation output")
+        try require(outputs.contains(where: { $0.kind == "whisper-json" }), "core path did not register whisper.json")
+
+        var fillerSettings = settings
+        fillerSettings.mode = .resumeProject
+        fillerSettings.selectedOperations = [.detectFillerWords]
+        _ = try await engine.run(settings: fillerSettings, onLog: { logs.append($0) })
+        try require(nonempty(layout.fillerWordsURL), "filler analysis could not consume restored whisper.json")
+        try require(logs.contains(where: { $0.contains("Найдено кандидатов слов-паразитов") }),
+                    "filler analysis did not complete")
 
         var resumed = settings
         resumed.mode = .resumeProject
@@ -95,7 +108,8 @@ struct CoreProductWorkflowProbe {
 
         let reopened = try store.openProject(at: project)
         try require(reopened.0.sourceMediaPath == media.path, "reopen lost core project source")
-        try require(nonempty(layout.fullSRTURL) && nonempty(layout.transcriptURL), "reopen lost core transcript artifacts")
+        try require(nonempty(layout.fullSRTURL) && nonempty(layout.transcriptURL) && nonempty(layout.whisperJSONURL),
+                    "reopen lost core transcript artifacts")
         print("CORE_PRODUCT_WORKFLOW_PROBE_PASS cues=\(cues.count) project=\(project.path) fragment=\(fragment.videoPath)")
     }
 

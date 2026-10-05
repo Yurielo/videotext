@@ -327,7 +327,7 @@ struct SeminarTextSelectedTimingRunner {
         return manifests[0].deletingLastPathComponent()
     }
 
-    private static func findManifests(in root: URL) -> [URL] {
+    static func findManifests(in root: URL) -> [URL] {
         let keys: Set<URLResourceKey> = [.isRegularFileKey]
         guard let enumerator = FileManager.default.enumerator(
             at: root,
@@ -344,12 +344,16 @@ struct SeminarTextSelectedTimingRunner {
     }
 }
 
-/// Core VideoText transcription consumes ordinary SeminarText SRT output. The
-/// selected JSON-full package remains an opt-in translation capability only.
+/// Core VideoText transcription consumes the selected SeminarText Whisper
+/// attempt. Its ordinary SRT remains the source of VideoText subtitles, while
+/// the selected JSON-full is imported only as the established core
+/// `whisper.json` evidence for quality and filler-word consumers. This is one
+/// SeminarText invocation, not a second transcription or a translation path.
 struct SeminarTextCoreTranscriptionRunner {
     struct Result {
         let srtURL: URL
         let outputDirectory: URL
+        let selectedTimingPackageURL: URL
     }
 
     let runner: ToolRunner
@@ -379,7 +383,14 @@ struct SeminarTextCoreTranscriptionRunner {
         if !modelPath.isEmpty {
             arguments.append("SEMINARTEXT_MODEL=\(modelPath)")
         }
-        arguments += [executable.path, "transcribe", mediaURL.path, "--language", language.rawValue, "--no-open"]
+        arguments += [
+            executable.path,
+            "transcribe",
+            mediaURL.path,
+            "--language", language.rawValue,
+            "--structured-timing",
+            "--no-open"
+        ]
         let result = try await runner.run("/usr/bin/env", arguments, currentDirectory: invocationRoot) { _, chunk in
             onLog(chunk)
         }
@@ -390,7 +401,15 @@ struct SeminarTextCoreTranscriptionRunner {
         guard srtURLs.count == 1, let srtURL = srtURLs.first else {
             throw WorkflowError.processFailed("SeminarText не создал один core SRT (найдено: \(srtURLs.count)).")
         }
-        return Result(srtURL: srtURL, outputDirectory: srtURL.deletingLastPathComponent())
+        let manifests = SeminarTextSelectedTimingRunner.findManifests(in: invocationRoot)
+        guard manifests.count == 1, let manifestURL = manifests.first else {
+            throw WorkflowError.processFailed("SeminarText не создал один manifest выбранной Whisper-попытки (найдено: \(manifests.count)).")
+        }
+        return Result(
+            srtURL: srtURL,
+            outputDirectory: srtURL.deletingLastPathComponent(),
+            selectedTimingPackageURL: manifestURL.deletingLastPathComponent()
+        )
     }
 
     private static func findCoreSRTs(in root: URL) -> [URL] {
@@ -479,7 +498,208 @@ struct SeminarTextCoreTranscriptionEvidence: Codable {
     let schemaVersion: Int
     let runtimeIdentity: String
     let sourceSRTSHA256: String
+    let selectedTimingManifestSHA256: String?
+    let selectedWhisperJSONSHA256: String?
     let outputDirectory: String
+}
+
+/// Imports selected JSON-full artifacts from the same selected SeminarText
+/// attempt into the long-standing VideoText `whisper.json` shape. The legacy
+/// core consumers require only raw Whisper segment/token evidence. Their
+/// absolute offsets are derived exclusively from the signed per-part offset in
+/// SeminarText's manifest; no timing, confidence or text is invented.
+struct SeminarTextCoreWhisperEvidenceImporter {
+    func importSelectedWhisperJSON(
+        packageRoot: URL,
+        expectedMediaURL: URL,
+        expectedLanguage: ArtifactLanguage
+    ) throws -> Data {
+        let manifestURL = packageRoot.appendingPathComponent("manifest.json")
+        let manifestData = try Data(contentsOf: manifestURL)
+        guard let manifest = try JSONSerialization.jsonObject(with: manifestData) as? [String: Any],
+              (manifest["schema_version"] as? NSNumber)?.intValue == 1,
+              manifest["artifact_type"] as? String == "seminartext.selected_whisper_timing",
+              let source = manifest["source"] as? [String: Any],
+              source["media_sha256"] as? String == SelectedTimingHash.file(expectedMediaURL),
+              let transcription = manifest["transcription"] as? [String: Any],
+              transcription["language"] as? String == expectedLanguage.rawValue,
+              let rawParts = manifest["parts"] as? [[String: Any]],
+              !rawParts.isEmpty else {
+            throw WorkflowError.processFailed("SeminarText selected JSON manifest не соответствует media/language.")
+        }
+
+        let parts = try rawParts.sorted { lhs, rhs in
+            try partOrder(lhs) < partOrder(rhs)
+        }
+        guard try parts.enumerated().allSatisfy({ index, part in try partOrder(part) == index }) else {
+            throw WorkflowError.processFailed("SeminarText selected JSON manifest содержит неупорядоченные части.")
+        }
+
+        var rootTemplate: [String: Any]?
+        var segments: [[String: Any]] = []
+        var hasTimedToken = false
+        for part in parts {
+            let id = try partID(part)
+            let offset = try absoluteOffset(part)
+            let selectedRange = try selectedTimingRange(part)
+            let jsonURL = try verifiedJSON(part: part, id: id, packageRoot: packageRoot)
+            guard let root = try JSONSerialization.jsonObject(with: Data(contentsOf: jsonURL)) as? [String: Any],
+                  let transcription = root["transcription"] as? [[String: Any]] else {
+                throw WorkflowError.processFailed("Selected JSON-full \(id) не содержит transcription.")
+            }
+            if rootTemplate == nil { rootTemplate = root }
+            for segment in transcription {
+                try validateSelectedSegment(segment, range: selectedRange, absoluteOffset: offset, partID: id)
+                let shifted = shift(segment, milliseconds: offset * 1000)
+                if segmentHasTimedToken(shifted) { hasTimedToken = true }
+                segments.append(shifted)
+            }
+        }
+        guard !segments.isEmpty, hasTimedToken else {
+            throw WorkflowError.processFailed("Selected JSON-full не содержит слов с временными границами для core whisper.json.")
+        }
+        var root = rootTemplate ?? [:]
+        root["transcription"] = segments
+        return try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+    }
+
+    func validateLegacyWhisperJSON(at url: URL) -> Bool {
+        guard let root = try? JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any],
+              let transcription = root["transcription"] as? [[String: Any]],
+              !transcription.isEmpty else { return false }
+        return transcription.contains(where: segmentHasTimedToken)
+    }
+
+    private func partOrder(_ part: [String: Any]) throws -> Int {
+        guard let order = number(part["order"]), order >= 0, order.rounded() == order else {
+            throw WorkflowError.processFailed("SeminarText selected JSON manifest содержит недопустимый order части.")
+        }
+        return Int(order)
+    }
+
+    private func partID(_ part: [String: Any]) throws -> String {
+        guard let id = part["id"] as? String,
+              id.range(of: "^part_[0-9]{4}$", options: .regularExpression) != nil else {
+            throw WorkflowError.processFailed("SeminarText selected JSON manifest содержит недопустимый ID части.")
+        }
+        return id
+    }
+
+    private func absoluteOffset(_ part: [String: Any]) throws -> Double {
+        guard let offset = number(part["absolute_offset_seconds"]), offset >= 0 else {
+            throw WorkflowError.processFailed("SeminarText selected JSON manifest содержит недопустимый absolute offset.")
+        }
+        return offset
+    }
+
+    private func selectedTimingRange(_ part: [String: Any]) throws -> (start: Double, end: Double) {
+        guard let range = part["selected_timing_absolute_range"] as? [String: Any],
+              let start = number(range["start_seconds"]),
+              let end = number(range["end_seconds"]),
+              start >= 0, end > start else {
+            throw WorkflowError.processFailed("SeminarText selected JSON manifest не содержит truthful selected timing envelope.")
+        }
+        return (start, end)
+    }
+
+    private func verifiedJSON(part: [String: Any], id: String, packageRoot: URL) throws -> URL {
+        guard let artifacts = part["artifacts"] as? [String: Any],
+              let json = artifacts["json_full"] as? [String: Any],
+              let path = json["path"] as? String,
+              path == "parts/\(id).json",
+              let expectedHash = json["sha256"] as? String else {
+            throw WorkflowError.processFailed("SeminarText selected JSON manifest содержит недопустимый json_full artifact.")
+        }
+        let url = packageRoot.appendingPathComponent(path)
+        guard FileManager.default.isReadableFile(atPath: url.path),
+              SelectedTimingHash.file(url) == expectedHash else {
+            throw WorkflowError.processFailed("Selected JSON-full artifact не читается или не совпадает с manifest: \(path).")
+        }
+        return url
+    }
+
+    private func validateSelectedSegment(
+        _ segment: [String: Any],
+        range: (start: Double, end: Double),
+        absoluteOffset: Double,
+        partID: String
+    ) throws {
+        guard let offsets = segment["offsets"] as? [String: Any],
+              let start = number(offsets["from"]),
+              let end = number(offsets["to"]),
+              start >= 0, end >= start,
+              absoluteOffset + start / 1000 >= range.start - 0.000_001,
+              absoluteOffset + end / 1000 <= range.end + 0.000_001 else {
+            // The manifest's selected envelope, rather than prepared chunk
+            // duration, is the only accepted authority for selected evidence.
+            throw WorkflowError.processFailed("Selected JSON-full \(partID) содержит недопустимый segment timing.")
+        }
+        guard let tokens = segment["tokens"] as? [[String: Any]] else {
+            throw WorkflowError.processFailed("Selected JSON-full \(partID) не содержит tokens.")
+        }
+        for token in tokens {
+            guard let tokenOffsets = token["offsets"] as? [String: Any],
+                  let tokenStart = number(tokenOffsets["from"]),
+                  let tokenEnd = number(tokenOffsets["to"]),
+                  tokenStart >= 0, tokenEnd >= tokenStart,
+                  absoluteOffset + tokenStart / 1000 >= range.start - 0.000_001,
+                  absoluteOffset + tokenEnd / 1000 <= range.end + 0.000_001 else {
+                throw WorkflowError.processFailed("Selected JSON-full \(partID) содержит недопустимый token timing.")
+            }
+        }
+    }
+
+    private func segmentHasTimedToken(_ segment: [String: Any]) -> Bool {
+        guard let tokens = segment["tokens"] as? [[String: Any]] else { return false }
+        return tokens.contains { token in
+            guard let text = (token["text"] as? String) ?? (token["token"] as? String),
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  let offsets = token["offsets"] as? [String: Any],
+                  let start = number(offsets["from"]),
+                  let end = number(offsets["to"]) else { return false }
+            return end > start
+        }
+    }
+
+    private func shift(_ value: [String: Any], milliseconds: Double) -> [String: Any] {
+        var result: [String: Any] = [:]
+        for (key, child) in value {
+            if key == "offsets", var offsets = child as? [String: Any] {
+                for boundary in ["from", "to"] {
+                    if let value = number(offsets[boundary]) { offsets[boundary] = value + milliseconds }
+                }
+                result[key] = offsets
+            } else if key == "timestamps", var timestamps = child as? [String: Any] {
+                for boundary in ["from", "to"] {
+                    if let seconds = timestamp(timestamps[boundary]) {
+                        timestamps[boundary] = SRTService().formatTimestamp(seconds + milliseconds / 1000)
+                            .replacingOccurrences(of: ",", with: ".")
+                    }
+                }
+                result[key] = timestamps
+            } else if let dictionary = child as? [String: Any] {
+                result[key] = shift(dictionary, milliseconds: milliseconds)
+            } else if let dictionaries = child as? [[String: Any]] {
+                result[key] = dictionaries.map { shift($0, milliseconds: milliseconds) }
+            } else {
+                result[key] = child
+            }
+        }
+        return result
+    }
+
+    private func number(_ value: Any?) -> Double? {
+        if let value = value as? Double { return value }
+        if let value = value as? NSNumber { return value.doubleValue }
+        if let value = value as? String { return Double(value) }
+        return nil
+    }
+
+    private func timestamp(_ value: Any?) -> TimeInterval? {
+        if let number = number(value) { return number > 1000 ? number / 1000 : number }
+        guard let text = value as? String else { return nil }
+        return try? TimecodeParser.parse(text.replacingOccurrences(of: ",", with: "."))
+    }
 }
 
 struct TimedSourceUnit: Codable, Equatable {

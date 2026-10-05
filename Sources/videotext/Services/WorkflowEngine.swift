@@ -1319,10 +1319,25 @@ final class WorkflowEngine: @unchecked Sendable {
                     }
                     try srt.writePreservingIDs(cues, to: layout.fullSRTURL)
                     try writeTranscript(from: cues, to: layout.transcriptURL)
+                    let coreWhisperJSON = try SeminarTextCoreWhisperEvidenceImporter().importSelectedWhisperJSON(
+                        packageRoot: coreResult.selectedTimingPackageURL,
+                        expectedMediaURL: mediaURL,
+                        expectedLanguage: sourceLanguage
+                    )
+                    try coreWhisperJSON.write(to: layout.whisperJSONURL, options: .atomic)
+                    guard SeminarTextCoreWhisperEvidenceImporter().validateLegacyWhisperJSON(at: layout.whisperJSONURL),
+                          nonemptyFile(layout.fullSRTURL),
+                          nonemptyFile(layout.transcriptURL) else {
+                        throw WorkflowError.processFailed("SeminarText не создал полный core transcription package: full.srt, transcript.txt и whisper.json обязательны.")
+                    }
                     let coreEvidence = SeminarTextCoreTranscriptionEvidence(
                         schemaVersion: 1,
                         runtimeIdentity: runtimeIdentity,
                         sourceSRTSHA256: SelectedTimingHash.file(coreResult.srtURL),
+                        selectedTimingManifestSHA256: SelectedTimingHash.file(
+                            coreResult.selectedTimingPackageURL.appendingPathComponent("manifest.json")
+                        ),
+                        selectedWhisperJSONSHA256: SelectedTimingHash.file(layout.whisperJSONURL),
                         outputDirectory: coreResult.outputDirectory.path
                     )
                     let encoder = JSONEncoder()
@@ -1331,6 +1346,7 @@ final class WorkflowEngine: @unchecked Sendable {
                     try store.registerOutput(kind: "seminartext-core-transcription", url: layout.seminarTextCoreEvidenceURL, in: projectURL)
                     try store.registerOutput(kind: "full-srt", url: layout.fullSRTURL, in: projectURL)
                     try store.registerOutput(kind: "transcript", url: layout.transcriptURL, in: projectURL)
+                    try store.registerOutput(kind: "whisper-json", url: layout.whisperJSONURL, in: projectURL)
                     _ = try registerTranscriptRevision(
                         cues: cues,
                         language: sourceLanguage,
@@ -1341,7 +1357,7 @@ final class WorkflowEngine: @unchecked Sendable {
                         modelPath: modelPath
                     )
                     tracker.update(operation, fraction: 1)
-                    log("Созданы full.srt и transcript.txt из обычного успешного запуска bundled SeminarText.")
+                    log("Созданы full.srt, transcript.txt и whisper.json из одной выбранной Whisper-попытки bundled SeminarText.")
 
                 case .assessTranscriptionQuality:
                     let parsed = try srt.loadWithReport(from: layout.fullSRTURL)
@@ -2599,7 +2615,9 @@ final class WorkflowEngine: @unchecked Sendable {
                   manifest.languageProfile != nil else { return false }
             return true
         case .transcribe:
-            guard nonemptyFile(layout.fullSRTURL) else { return false }
+            guard nonemptyFile(layout.fullSRTURL),
+                  nonemptyFile(layout.whisperJSONURL),
+                  SeminarTextCoreWhisperEvidenceImporter().validateLegacyWhisperJSON(at: layout.whisperJSONURL) else { return false }
             let parsed: SRTParseResult
             do {
                 parsed = try srt.loadWithReport(from: layout.fullSRTURL)
@@ -2627,6 +2645,7 @@ final class WorkflowEngine: @unchecked Sendable {
             } else {
                 try store.registerOutput(kind: "transcript", url: layout.transcriptURL, in: projectURL)
             }
+            try store.registerOutput(kind: "whisper-json", url: layout.whisperJSONURL, in: projectURL)
             return true
         case .assessTranscriptionQuality:
             guard settings.mode != .newProject,
