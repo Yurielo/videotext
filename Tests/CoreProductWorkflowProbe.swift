@@ -59,6 +59,9 @@ struct CoreProductWorkflowProbe {
         let rawSRTs = try seminarTextSRTs(in: URL(fileURLWithPath: evidence.outputDirectory))
         try require(rawSRTs.count == 1 && evidence.sourceSRTSHA256 == SelectedTimingHash.file(rawSRTs[0]),
                     "core provenance does not bind the SeminarText SRT")
+        let rawCues = try SeminarTextCoreTranscriptionRunner().loadCoreSRT(from: rawSRTs[0])
+        try require(rawCues.count == cues.count && zip(rawCues, cues).allSatisfy { $0.text == $1.text },
+                    "core import lost or changed SeminarText text")
         try require(logs.contains(where: { $0.contains("Расшифровка bundled SeminarText") }), "core path did not use bundled SeminarText")
         try require(!logs.joined(separator: "\n").contains("selected timing"), "core path invoked selected timing")
         let outputs = try store.load(from: project).outputs
