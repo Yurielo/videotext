@@ -59,7 +59,9 @@ import Darwin
         }
         let beforeSnapshot = snapshot()
         let runner = ToolRunner()
-        for _ in 0..<12 {
+        // Exercise more than the workspace capacity within one long-lived
+        // process: sequential completed tools must release their own scratch.
+        for _ in 0..<20 {
             let result = try await runner.run("/bin/sh", ["-c", "echo fixture > \"$TMPDIR/scratch\"; printf ok"])
             precondition(result.stdout == "ok" && result.exitCode == 0)
             let failed = try await runner.run("/bin/sh", ["-c", "echo fixture > \"$TMPDIR/scratch\"; exit 7"])
@@ -85,6 +87,6 @@ import Darwin
         precondition(FileManager.default.fileExists(atPath: unknown.path))
         let afterSnapshot = snapshot()
         precondition(beforeSnapshot == afterSnapshot)
-        print("OWNED_TMP_PASS cycles=12 owned_before=\(beforeSnapshot.0) owned_after=\(afterSnapshot.0) bytes_before=\(beforeSnapshot.1) bytes_after=\(afterSnapshot.1) success/failure/cancel/launch-failure/unknown/live")
+        print("OWNED_TMP_PASS cycles=20 owned_before=\(beforeSnapshot.0) owned_after=\(afterSnapshot.0) bytes_before=\(beforeSnapshot.1) bytes_after=\(afterSnapshot.1) success/failure/cancel/launch-failure/unknown/live")
     }
 }
