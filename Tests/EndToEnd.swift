@@ -611,15 +611,18 @@ struct EndToEndTest {
             "Translation media exceeds the bounded short-media contract"
         )
 
-        let sourceURL = layout.subtitlesURL(language: sourceLanguage)
+        let localizedSourceURL = layout.subtitlesURL(language: sourceLanguage)
+        let materializesLegacySource = !FileManager.default.fileExists(atPath: localizedSourceURL.path)
+        let sourceURL = materializesLegacySource ? layout.fullSRTURL : localizedSourceURL
         let source = try SRTService().load(from: sourceURL)
         try require((1...128).contains(source.count), "Bounded full-document translation needs 1...128 cues")
-        let sourceFiles = [
+        var sourceFiles = [
             layout.fullSRTURL,
-            layout.transcriptURL,
-            sourceURL,
-            layout.transcriptURL(language: sourceLanguage)
+            layout.transcriptURL
         ]
+        if !materializesLegacySource {
+            sourceFiles += [localizedSourceURL, layout.transcriptURL(language: sourceLanguage)]
+        }
         let sourceBytes = try sourceFiles.map { try Data(contentsOf: $0) }
         let sourceDates = sourceFiles.map { modificationDate($0) }
         let evidenceRoot = ProcessInfo.processInfo.environment["QA_E2E_EVIDENCE_DIR"].map {
@@ -674,6 +677,23 @@ struct EndToEndTest {
             }
         }
 
+        func assertLegacySourceWasMaterialized() throws {
+            guard materializesLegacySource else { return }
+            let localized = try SRTService().load(from: localizedSourceURL)
+            try require(
+                localized.count == source.count
+                    && zip(localized, source).allSatisfy {
+                        $0.id == $1.id && $0.start == $1.start && $0.end == $1.end && $0.text == $1.text
+                    },
+                "Legacy full.srt was not materialized as the active source language artifact"
+            )
+            let localizedTranscript = try String(contentsOf: layout.transcriptURL(language: sourceLanguage), encoding: .utf8)
+            try require(
+                localizedTranscript == source.map(\.text).joined(separator: "\n\n") + "\n",
+                "Legacy full.srt was not materialized as the active source language transcript"
+            )
+        }
+
         func saveManifest(_ name: String) throws {
             let manifestBytes = try Data(contentsOf: layout.manifestURL)
             try manifestBytes.write(to: evidence.appendingPathComponent(name))
@@ -694,18 +714,6 @@ struct EndToEndTest {
             plan.contextIdentity == wireContextIdentity,
             "Independent full-document context fingerprint differs"
         )
-        let current = try store.load(from: projectURL)
-        guard let sourceRevision = current.activeTranscriptRevision(for: sourceLanguage) else {
-            throw EndToEndError.failed("Translation lost the source revision")
-        }
-        let checkpoints = try TranslationCheckpointStore(
-            directory: layout.translationCacheDirectory(source: sourceLanguage, target: targetLanguage),
-            plan: plan,
-            identity: identity,
-            source: sourceLanguage,
-            target: targetLanguage,
-            sourceIdentity: sourceRevision.id
-        )
         let usesSelectedTiming = try SelectedTimingVerticalSlice().loadPersistedSource(
             projectURL: projectURL,
             mediaURL: mediaURL
@@ -716,6 +724,7 @@ struct EndToEndTest {
             resumed = try await engine(executionController).run(settings: settings, onLog: { print($0) })
         } catch {
             guard !usesSelectedTiming else { throw error }
+            try assertLegacySourceWasMaterialized()
             try require(
                 error.localizedDescription.contains("не может быть автоматически утверждён"),
                 "Legacy full.srt rejected a translation without a fail-closed error"
@@ -767,9 +776,22 @@ struct EndToEndTest {
             print("TRANSLATION_EVIDENCE=\(evidence.path)")
             return
         }
+        try assertLegacySourceWasMaterialized()
         try require(
             resumed.checkpoint == nil && resumed.topicReviewCheckpoint == nil,
             "Translation unexpectedly opened a review checkpoint"
+        )
+        let current = try store.load(from: projectURL)
+        guard let sourceRevision = current.activeTranscriptRevision(for: sourceLanguage) else {
+            throw EndToEndError.failed("Translation did not create the source revision")
+        }
+        let checkpoints = try TranslationCheckpointStore(
+            directory: layout.translationCacheDirectory(source: sourceLanguage, target: targetLanguage),
+            plan: plan,
+            identity: identity,
+            source: sourceLanguage,
+            target: targetLanguage,
+            sourceIdentity: sourceRevision.id
         )
         if let persistedSelectedSource = try SelectedTimingVerticalSlice().loadPersistedSource(
             projectURL: projectURL,
