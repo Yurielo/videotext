@@ -12,8 +12,18 @@ TEST_APP="${WORK_ROOT}/videotext-e2e.app"
 TEST_BINARY="${TEST_APP}/Contents/MacOS/videotext-e2e"
 SWIFT_SOURCES=()
 
-if [[ $# -ne 2 && $# -ne 4 ]]; then
-  echo "Использование: $0 <ru-видео> <модель-whisper> [<en-видео> <en-проект>]" >&2
+PROFILE=""
+if [[ "${1:-}" == "--profile" ]]; then
+  [[ $# -ge 2 ]] || { echo "После --profile требуется core или translation" >&2; exit 2; }
+  PROFILE="$2"
+  shift 2
+fi
+if [[ -z "$PROFILE" ]]; then
+  if [[ $# -eq 2 ]]; then PROFILE="core"; elif [[ $# -eq 4 ]]; then PROFILE="translation"; fi
+fi
+if [[ "$PROFILE" == "core" && $# -ne 2 ]] || [[ "$PROFILE" == "translation" && $# -ne 4 ]] || [[ "$PROFILE" != "core" && "$PROFILE" != "translation" ]]; then
+  echo "Использование: $0 --profile core <ru-видео> <модель-whisper>" >&2
+  echo "       или: $0 --profile translation <ru-видео> <модель-whisper> <en-видео> <en-проект>" >&2
   exit 2
 fi
 
@@ -33,6 +43,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 export VIDEOTEXT_HISTORY_PATH="${SOURCE_PATH}/history.json"
 export QA_E2E_EVIDENCE_DIR="${QA_E2E_EVIDENCE_DIR:-${SOURCE_PATH}/evidence}"
+export VIDEOTEXT_E2E_PROFILE="$PROFILE"
 EXTENSION="${VIDEO_PATH##*.}"
 mkdir -p "${RU_SOURCE_PATH}"
 TEST_VIDEO="${RU_SOURCE_PATH}/Короткое видео Юрий's test.${EXTENSION}"

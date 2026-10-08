@@ -15,35 +15,53 @@ PROMOTE=false
 PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
 usage() {
-  printf 'Использование: %s <ru-видео> <модель-whisper> <en-видео> <en-проект> [--promote]\n' "$0"
+  printf 'Использование: %s --profile core <ru-видео> <модель-whisper> [--promote]\n' "$0"
+  printf '       или: %s --profile translation <ru-видео> <модель-whisper> <en-видео> <en-проект> [--promote]\n' "$0"
 }
 
-if [[ $# -lt 4 || $# -gt 5 ]]; then
+if [[ "${1:-}" != "--profile" || $# -lt 4 ]]; then
   usage >&2
   exit 2
 fi
+PROFILE="$2"
+shift 2
 
 VIDEO_PATH="$1"
 MODEL_PATH="$2"
-EN_VIDEO_PATH="$3"
-EN_PROJECT_PATH="$4"
-if [[ $# -eq 5 ]]; then
-  [[ "$5" == "--promote" ]] || { usage >&2; exit 2; }
+shift 2
+EN_VIDEO_PATH=""
+EN_PROJECT_PATH=""
+case "$PROFILE" in
+  core)
+    [[ $# -le 1 ]] || { usage >&2; exit 2; }
+    ;;
+  translation)
+    [[ $# -ge 2 && $# -le 3 ]] || { usage >&2; exit 2; }
+    EN_VIDEO_PATH="$1"
+    EN_PROJECT_PATH="$2"
+    shift 2
+    ;;
+  *) usage >&2; exit 2 ;;
+esac
+if [[ $# -eq 1 ]]; then
+  [[ "$1" == "--promote" ]] || { usage >&2; exit 2; }
   PROMOTE=true
 fi
 
 [[ -f "$VIDEO_PATH" ]] || { printf 'Не найдено RU-видео: %s\n' "$VIDEO_PATH" >&2; exit 2; }
 [[ -f "$MODEL_PATH" ]] || { printf 'Не найдена модель Whisper: %s\n' "$MODEL_PATH" >&2; exit 2; }
-[[ -f "$EN_VIDEO_PATH" ]] || { printf 'Не найдено EN-видео: %s\n' "$EN_VIDEO_PATH" >&2; exit 2; }
-[[ -d "$EN_PROJECT_PATH" ]] || { printf 'Не найден EN-проект: %s\n' "$EN_PROJECT_PATH" >&2; exit 2; }
-[[ -f "$EN_PROJECT_PATH/Support files/manifest.json" ]] || {
-  printf 'В EN-проекте нет manifest.json: %s\n' "$EN_PROJECT_PATH" >&2
-  exit 2
-}
-[[ -f "$EN_PROJECT_PATH/Texts/full.srt" ]] || {
-  printf 'В EN-проекте нет full.srt: %s\n' "$EN_PROJECT_PATH" >&2
-  exit 2
-}
+if [[ "$PROFILE" == "translation" ]]; then
+  [[ -f "$EN_VIDEO_PATH" ]] || { printf 'Не найдено EN-видео: %s\n' "$EN_VIDEO_PATH" >&2; exit 2; }
+  [[ -d "$EN_PROJECT_PATH" ]] || { printf 'Не найден EN-проект: %s\n' "$EN_PROJECT_PATH" >&2; exit 2; }
+  [[ -f "$EN_PROJECT_PATH/Support files/manifest.json" ]] || {
+    printf 'В EN-проекте нет manifest.json: %s\n' "$EN_PROJECT_PATH" >&2
+    exit 2
+  }
+  [[ -f "$EN_PROJECT_PATH/Texts/full.srt" ]] || {
+    printf 'В EN-проекте нет full.srt: %s\n' "$EN_PROJECT_PATH" >&2
+    exit 2
+  }
+fi
 
 STAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
 RUN_DIR="$WORK_ROOT/release-gate/$STAMP"
@@ -81,10 +99,14 @@ release_files() {
     "$ROOT/scripts/owned_tmp.py" \
     "$ROOT/scripts/test_project_schema.sh" \
     "$ROOT/scripts/test_human_review.sh" \
+    "$ROOT/scripts/test_diagnostics.sh" \
+    "$ROOT/scripts/test_result_access.sh" \
+    "$ROOT/scripts/test_core_product_workflow.sh" \
     "$ROOT/scripts/test_topics.sh" \
     "$ROOT/scripts/test_topic_matrix.sh" \
     "$ROOT/scripts/test_ollama_topics.sh" \
     "$ROOT/scripts/test_candidate_lifecycle.sh" \
+    "$ROOT/scripts/test_candidate_active_quit.sh" \
     "$ROOT/scripts/test_translation.sh" \
     "$ROOT/scripts/test_translation_models.sh" \
     "$ROOT/scripts/test_ollama_memory_shutdown.sh" \
@@ -104,6 +126,9 @@ release_files() {
     "$ROOT/Tests/EndToEnd.swift" \
     "$ROOT/Tests/ProjectSchemaProbe.swift" \
     "$ROOT/Tests/HumanReviewProbe.swift" \
+    "$ROOT/Tests/DiagnosticsProbe.swift" \
+    "$ROOT/Tests/ResultAccessProbe.swift" \
+    "$ROOT/Tests/CoreProductWorkflowProbe.swift" \
     "$ROOT/Tests/TopicAnalysisProbe.swift" \
     "$ROOT/Tests/TopicMatrixProbe.swift" \
     "$ROOT/Tests/OllamaTopicProbe.swift" \
@@ -116,6 +141,7 @@ release_files() {
     "$ROOT/Tests/OwnedTMPProbe.swift" \
     "$ROOT/Tests/ProcessShutdownProbe.swift" \
     "$ROOT/Tests/CandidateLifecycleProbe.swift" \
+    "$ROOT/Tests/CandidateActiveQuitProbe.swift" \
     "$ROOT/Tests/ApplicationLifecycleProbe.swift" \
     "$ROOT/Tests/test_owned_tmp.py" \
     "$ROOT/Tests/ToolRunnerProbe.swift" \
@@ -172,6 +198,7 @@ record source_commit "$SOURCE_COMMIT"
 record source_tree_clean true
 record source_version "$SOURCE_VERSION"
 record source_build "$SOURCE_BUILD"
+record release_profile "$PROFILE"
 if ! BASELINE_RESULT="$("$ROOT/scripts/check_baseline.sh" 2>&1)"; then
   fail "$BASELINE_RESULT"
 fi
@@ -181,14 +208,16 @@ VIDEO_SHA256="$(shasum -a 256 "$VIDEO_PATH" | awk '{print $1}')"
 record video_sha256 "$VIDEO_SHA256"
 record whisper_model_path "$MODEL_PATH"
 record whisper_model_sha256 "$(shasum -a 256 "$MODEL_PATH" | awk '{print $1}')"
-EN_VIDEO_SHA256="$(shasum -a 256 "$EN_VIDEO_PATH" | awk '{print $1}')"
-EN_PROJECT_SHA256="$(directory_hash "$EN_PROJECT_PATH")"
-record en_video_path "$EN_VIDEO_PATH"
-record en_video_sha256 "$EN_VIDEO_SHA256"
-record en_project_path "$EN_PROJECT_PATH"
-record en_project_sha256 "$EN_PROJECT_SHA256"
-record en_project_manifest_sha256 "$(shasum -a 256 "$EN_PROJECT_PATH/Support files/manifest.json" | awk '{print $1}')"
-record en_project_full_srt_sha256 "$(shasum -a 256 "$EN_PROJECT_PATH/Texts/full.srt" | awk '{print $1}')"
+if [[ "$PROFILE" == "translation" ]]; then
+  EN_VIDEO_SHA256="$(shasum -a 256 "$EN_VIDEO_PATH" | awk '{print $1}')"
+  EN_PROJECT_SHA256="$(directory_hash "$EN_PROJECT_PATH")"
+  record en_video_path "$EN_VIDEO_PATH"
+  record en_video_sha256 "$EN_VIDEO_SHA256"
+  record en_project_path "$EN_PROJECT_PATH"
+  record en_project_sha256 "$EN_PROJECT_SHA256"
+  record en_project_manifest_sha256 "$(shasum -a 256 "$EN_PROJECT_PATH/Support files/manifest.json" | awk '{print $1}')"
+  record en_project_full_srt_sha256 "$(shasum -a 256 "$EN_PROJECT_PATH/Texts/full.srt" | awk '{print $1}')"
+fi
 for tool in ffmpeg ffprobe whisper-cli; do
   command -v "$tool" >/dev/null 2>&1 || fail "не найден обязательный инструмент $tool"
 done
@@ -209,22 +238,36 @@ require_no_active_tools
 SOURCE_HASH="$(release_inputs_hash)" || fail "не удалось вычислить hash release inputs"
 record release_inputs_sha256 "$SOURCE_HASH"
 
-for focused in \
-  test_project_schema.sh \
-  test_human_review.sh \
-  test_topics.sh \
-  test_topic_matrix.sh \
-  test_ollama_topics.sh \
-  test_ollama_memory_shutdown.sh \
-  test_translation.sh \
-  test_translation_ownership.sh \
-  test_selected_timing_vertical_slice.sh \
-  test_no_retired_translation_models.sh \
-  test_owned_tmp.sh \
-  test_process_shutdown.sh \
-  test_application_lifecycle.sh \
-  test_whisper_vad.sh \
-  test_transcription_quality.sh; do
+focused_checks=(
+  test_project_schema.sh
+  test_human_review.sh
+  test_diagnostics.sh
+  test_result_access.sh
+  test_topics.sh
+  test_topic_matrix.sh
+  test_ollama_topics.sh
+  test_ollama_memory_shutdown.sh
+  test_no_retired_translation_models.sh
+  test_fragment_processing.sh
+  test_filler_mute.sh
+  test_speed_adjustment.sh
+  test_blur.sh
+  test_watermark.sh
+  test_audio_enhancement.sh
+  test_owned_tmp.sh
+  test_process_shutdown.sh
+  test_application_lifecycle.sh
+  test_whisper_vad.sh
+  test_transcription_quality.sh
+)
+if [[ "$PROFILE" == "translation" ]]; then
+  focused_checks+=(
+    test_translation.sh
+    test_translation_ownership.sh
+    test_selected_timing_vertical_slice.sh
+  )
+fi
+for focused in "${focused_checks[@]}"; do
   log="$RUN_DIR/$focused.log"
   if ! "$ROOT/scripts/$focused" > "$log" 2>&1; then
     record "${focused%.sh}_exit_status" 1
@@ -234,14 +277,16 @@ for focused in \
   record "${focused%.sh}_exit_status" 0
   record "${focused%.sh}_log" "$log"
 done
-log="$RUN_DIR/test_translation_semantic_review.sh.log"
-if ! "$ROOT/scripts/test_translation_semantic_review.sh" --check-alarms > "$log" 2>&1; then
-  record test_translation_semantic_review_exit_status 1
+if [[ "$PROFILE" == "translation" ]]; then
+  log="$RUN_DIR/test_translation_semantic_review.sh.log"
+  if ! "$ROOT/scripts/test_translation_semantic_review.sh" --check-alarms > "$log" 2>&1; then
+    record test_translation_semantic_review_exit_status 1
+    record test_translation_semantic_review_log "$log"
+    fail "focused-проверка test_translation_semantic_review.sh завершилась ошибкой"
+  fi
+  record test_translation_semantic_review_exit_status 0
   record test_translation_semantic_review_log "$log"
-  fail "focused-проверка test_translation_semantic_review.sh завершилась ошибкой"
 fi
-record test_translation_semantic_review_exit_status 0
-record test_translation_semantic_review_log "$log"
 log="$RUN_DIR/test_tool_runner.sh.log"
 if ! "$ROOT/scripts/test_tool_runner.sh" "$VIDEO_PATH" > "$log" 2>&1; then
   record test_tool_runner_exit_status 1
@@ -256,25 +301,37 @@ for run in 1 2; do
   log="$RUN_DIR/e2e-$run.log"
   e2e_evidence="$RUN_DIR/e2e-$run-evidence"
   mkdir -p "$e2e_evidence"
-  if ! QA_E2E_EVIDENCE_DIR="$e2e_evidence" "$ROOT/scripts/test_e2e.sh" \
-    "$VIDEO_PATH" "$MODEL_PATH" "$EN_VIDEO_PATH" "$EN_PROJECT_PATH" > "$log" 2>&1; then
-    record "e2e_${run}_command" "$ROOT/scripts/test_e2e.sh $VIDEO_PATH $MODEL_PATH $EN_VIDEO_PATH $EN_PROJECT_PATH"
+  e2e_command=("$ROOT/scripts/test_e2e.sh" --profile "$PROFILE" "$VIDEO_PATH" "$MODEL_PATH")
+  if [[ "$PROFILE" == "translation" ]]; then
+    e2e_command+=("$EN_VIDEO_PATH" "$EN_PROJECT_PATH")
+  fi
+  if ! QA_E2E_EVIDENCE_DIR="$e2e_evidence" "${e2e_command[@]}" > "$log" 2>&1; then
+    record "e2e_${run}_command" "${e2e_command[*]}"
     record "e2e_${run}_exit_status" 1
     record "e2e_${run}_log" "$log"
     fail "E2E #$run завершился с ненулевым кодом"
   fi
   /usr/bin/grep -Fq 'E2E PASS' "$log" || fail "E2E #$run не содержит E2E PASS"
-  [[ "$(/usr/bin/grep -Fc 'REAL_TRANSLATION_PASS ru->en:' "$log")" -eq 1 ]] || \
-    fail "E2E #$run не доказал единственный RU->EN production-проход"
-  [[ "$(/usr/bin/grep -Fc 'REAL_TRANSLATION_PASS en->ru:' "$log")" -eq 1 ]] || \
-    fail "E2E #$run не доказал успешный EN->RU valid-full.srt проход"
+  if [[ "$PROFILE" == "core" ]]; then
+    /usr/bin/grep -Fq 'CORE_E2E_PASS' "$log" || fail "E2E #$run не доказал core profile"
+    if /usr/bin/grep -Fq 'REAL_TRANSLATION_' "$log"; then
+      fail "Core E2E #$run неожиданно запустил перевод"
+    fi
+  else
+    [[ "$(/usr/bin/grep -Fc 'REAL_TRANSLATION_PASS ru->en:' "$log")" -eq 1 ]] || \
+      fail "E2E #$run не доказал единственный RU->EN production-проход"
+    [[ "$(/usr/bin/grep -Fc 'REAL_TRANSLATION_PASS en->ru:' "$log")" -eq 1 ]] || \
+      fail "E2E #$run не доказал успешный EN->RU valid-full.srt проход"
+  fi
   [[ "$(shasum -a 256 "$VIDEO_PATH" | awk '{print $1}')" == "$VIDEO_SHA256" ]] || \
     fail "E2E #$run изменил RU-видео"
-  [[ "$(shasum -a 256 "$EN_VIDEO_PATH" | awk '{print $1}')" == "$EN_VIDEO_SHA256" ]] || \
-    fail "E2E #$run изменил EN-видео"
-  [[ "$(directory_hash "$EN_PROJECT_PATH")" == "$EN_PROJECT_SHA256" ]] || \
-    fail "E2E #$run изменил исходный EN-проект"
-  record "e2e_${run}_command" "$ROOT/scripts/test_e2e.sh $VIDEO_PATH $MODEL_PATH $EN_VIDEO_PATH $EN_PROJECT_PATH"
+  if [[ "$PROFILE" == "translation" ]]; then
+    [[ "$(shasum -a 256 "$EN_VIDEO_PATH" | awk '{print $1}')" == "$EN_VIDEO_SHA256" ]] || \
+      fail "E2E #$run изменил EN-видео"
+    [[ "$(directory_hash "$EN_PROJECT_PATH")" == "$EN_PROJECT_SHA256" ]] || \
+      fail "E2E #$run изменил исходный EN-проект"
+  fi
+  record "e2e_${run}_command" "${e2e_command[*]}"
   record "e2e_${run}_exit_status" 0
   record "e2e_${run}_status" PASS
   record "e2e_${run}_log" "$log"
@@ -329,6 +386,15 @@ if ! "$ROOT/scripts/test_candidate_lifecycle.sh" "$CANDIDATE" > "$RUN_DIR/candid
 fi
 record candidate_lifecycle_exit_status 0
 record candidate_lifecycle_log "$RUN_DIR/candidate-lifecycle.log"
+require_no_active_tools
+record candidate_active_quit_command "$ROOT/scripts/test_candidate_active_quit.sh $CANDIDATE $VIDEO_PATH"
+if ! "$ROOT/scripts/test_candidate_active_quit.sh" "$CANDIDATE" "$VIDEO_PATH" > "$RUN_DIR/candidate-active-quit.log" 2>&1; then
+  record candidate_active_quit_exit_status 1
+  record candidate_active_quit_log "$RUN_DIR/candidate-active-quit.log"
+  fail "candidate не прошел active-process normal Quit/reopen lifecycle"
+fi
+record candidate_active_quit_exit_status 0
+record candidate_active_quit_log "$RUN_DIR/candidate-active-quit.log"
 require_no_active_tools
 record smoke_metadata_cleanup_command "xattr -cr $CANDIDATE"
 if ! xattr -cr "$CANDIDATE" > "$RUN_DIR/smoke-metadata-cleanup.log" 2>&1; then
@@ -412,13 +478,14 @@ record completed_at "$(date -u '+%Y%m%dT%H%M%SZ')"
 record status PASS
 
 required_evidence=(
-  source_commit source_tree_clean source_version source_build
+  source_commit source_tree_clean source_version source_build release_profile
   release_inputs_sha256 candidate_sha256
   candidate_version candidate_build
   build_command build_exit_status build_log
   e2e_1_command e2e_1_exit_status e2e_1_log
   e2e_2_command e2e_2_exit_status e2e_2_log
   candidate_lifecycle_command candidate_lifecycle_exit_status candidate_lifecycle_log
+  candidate_active_quit_command candidate_active_quit_exit_status candidate_active_quit_log
   smoke_metadata_cleanup_command smoke_metadata_cleanup_exit_status smoke_metadata_cleanup_log
   codesign_before_command codesign_before_exit_status codesign_before_log
   codesign_after_command codesign_after_exit_status codesign_after_log

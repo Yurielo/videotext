@@ -1,5 +1,10 @@
 import Foundation
 
+enum DiagnosticsProfile: String {
+    case core
+    case translation
+}
+
 struct DiagnosticsService {
     let runner: ToolRunner
 
@@ -7,7 +12,7 @@ struct DiagnosticsService {
         self.runner = runner
     }
 
-    func collect() async -> DiagnosticsReport {
+    func collect(profile: DiagnosticsProfile = .core) async -> DiagnosticsReport {
         let canonicalFFmpeg = runner.resolve("ffmpeg")
         let canonicalFFprobe = runner.resolve("ffprobe")
         let fallbackFFmpeg = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"].first {
@@ -63,17 +68,27 @@ struct DiagnosticsService {
         var warnings: [String] = []
         let missingFilters = capabilities.filter { !$0.value }.map(\.key).sorted()
         if !missingFilters.isEmpty { warnings.append("В каноническом FFmpeg отсутствуют фильтры: \(missingFilters.joined(separator: ", ")).") }
-        for requiredModel in ["translategemma:4b", "embeddinggemma", "gemma3:4b"] where !ollamaModels.contains(requiredModel) {
+        let coreModels = ["embeddinggemma", "gemma3:4b"]
+        let translationModels = ["translategemma:4b"]
+        let requiredModels = coreModels + (profile == .translation ? translationModels : [])
+        func hasModel(_ required: String) -> Bool {
+            ollamaModels.contains(required)
+                || (!required.contains(":") && ollamaModels.contains("\(required):latest"))
+        }
+        for requiredModel in requiredModels where !hasModel(requiredModel) {
             warnings.append("Не найдена модель Ollama \(requiredModel).")
         }
         if !blockers.isEmpty { warnings.append("Terminal-задачи изменения Homebrew заблокированы активными процессами: \(blockers.joined(separator: ", ")).") }
         let hasDaniel = voices.contains { $0.hasPrefix("Daniel (Enhanced) ") }
         let hasYuri = voices.contains { $0.hasPrefix("Yuri (Enhanced) ") }
-        if !hasDaniel { warnings.append("Не установлен улучшенный мужской английский системный голос Daniel (Enhanced).") }
-        if !hasYuri { warnings.append("Не установлен временно выбранный мужской русский системный голос Yuri (Enhanced).") }
+        if profile == .translation {
+            if !hasDaniel { warnings.append("Не установлен улучшенный мужской английский системный голос Daniel (Enhanced).") }
+            if !hasYuri { warnings.append("Не установлен временно выбранный мужской русский системный голос Yuri (Enhanced).") }
+        }
         if vadModelPath == nil { warnings.append("Не найдена модель Silero VAD; Whisper будет использовать стандартную сегментацию.") }
 
-        let terminalTasks = [
+        let missingCoreModels = coreModels.filter { !hasModel($0) }
+        var terminalTasks = [
             TerminalTaskRecord(id: "TOOL-01", title: "Использовать ffmpeg-full как канонический media tool", command: nil, status: missingFilters.isEmpty ? "completed" : "failed", blockedBy: [], requiresExplicitApproval: false),
             TerminalTaskRecord(id: "TOOL-02", title: "Обновить или отвязать устаревший обычный ffmpeg после smoke-теста", command: "brew upgrade ffmpeg && brew unlink ffmpeg", status: blockers.isEmpty ? "approval-required" : "blocked", blockedBy: blockers, requiresExplicitApproval: true),
             TerminalTaskRecord(
@@ -84,24 +99,14 @@ struct DiagnosticsService {
                 blockedBy: [whisperPath == nil ? "whisper-cli" : nil, vadModelPath == nil ? "Silero VAD model" : nil].compactMap { $0 },
                 requiresExplicitApproval: false
             ),
-            TerminalTaskRecord(id: "MODEL-01", title: "Использовать TranslateGemma для двустороннего перевода и Gemma 3 для тематического анализа", command: nil, status: "completed", blockedBy: [], requiresExplicitApproval: false),
             TerminalTaskRecord(
-                id: "TTS-01",
-                title: "Использовать системные голоса: Daniel для EN, Yuri для RU до будущей замены",
+                id: "MODEL-01",
+                title: "Использовать Gemma 3 и embeddinggemma для тематического анализа",
                 command: nil,
-                status: hasDaniel && hasYuri ? "completed" : "user-action-required",
-                blockedBy: [hasDaniel ? nil : "Daniel (Enhanced)", hasYuri ? nil : "Yuri (Enhanced)"].compactMap { $0 },
+                status: missingCoreModels.isEmpty ? "completed" : "missing-dependency",
+                blockedBy: missingCoreModels,
                 requiresExplicitApproval: false
             ),
-            TerminalTaskRecord(
-                id: "TTS-02",
-                title: "Listening QA Piper Denis и Dmitri: оба голоса отклонены и удалены",
-                command: nil,
-                status: "completed-with-rejection",
-                blockedBy: [],
-                requiresExplicitApproval: false
-            ),
-            TerminalTaskRecord(id: "TTS-03", title: "В будущем подобрать более естественный мужской RU-голос", command: nil, status: "deferred", blockedBy: [], requiresExplicitApproval: false),
             TerminalTaskRecord(id: "AUDIO-01", title: "FFmpeg afftdn/loudnorm прошли RU/EN speech-noise benchmark", command: nil, status: "completed", blockedBy: [], requiresExplicitApproval: false),
             TerminalTaskRecord(
                 id: "AUDIO-02",
@@ -120,6 +125,36 @@ struct DiagnosticsService {
                 requiresExplicitApproval: false
             )
         ]
+        if profile == .translation {
+            let missingTranslationModels = translationModels.filter { !hasModel($0) }
+            terminalTasks.append(contentsOf: [
+                TerminalTaskRecord(
+                    id: "MODEL-TRANSLATION",
+                    title: "Использовать TranslateGemma для двустороннего перевода",
+                    command: nil,
+                    status: missingTranslationModels.isEmpty ? "completed" : "missing-dependency",
+                    blockedBy: missingTranslationModels,
+                    requiresExplicitApproval: false
+                ),
+                TerminalTaskRecord(
+                    id: "TTS-01",
+                    title: "Использовать системные голоса: Daniel для EN, Yuri для RU до будущей замены",
+                    command: nil,
+                    status: hasDaniel && hasYuri ? "completed" : "user-action-required",
+                    blockedBy: [hasDaniel ? nil : "Daniel (Enhanced)", hasYuri ? nil : "Yuri (Enhanced)"].compactMap { $0 },
+                    requiresExplicitApproval: false
+                ),
+                TerminalTaskRecord(
+                    id: "TTS-02",
+                    title: "Listening QA Piper Denis и Dmitri: оба голоса отклонены и удалены",
+                    command: nil,
+                    status: "completed-with-rejection",
+                    blockedBy: [],
+                    requiresExplicitApproval: false
+                ),
+                TerminalTaskRecord(id: "TTS-03", title: "В будущем подобрать более естественный мужской RU-голос", command: nil, status: "deferred", blockedBy: [], requiresExplicitApproval: false)
+            ])
+        }
         let brewPrefix = checks.first(where: { $0.name == "brew" })?.version
         return DiagnosticsReport(
             path: ProcessInfo.processInfo.environment["PATH"] ?? "",

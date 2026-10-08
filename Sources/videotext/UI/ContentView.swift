@@ -346,8 +346,19 @@ struct ContentView: View {
                             Text("EN").tag("en")
                         }
                         .pickerStyle(.segmented)
-                        TextField("Контекст и термины (необязательно)", text: $model.transcriptionContext)
-                            .help("Кратко укажите предметную область или редкие термины. Это подсказка модели, а не текст для расшифровки.")
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Label("Контекст и термины временно недоступны", systemImage: "info.circle")
+                                .foregroundStyle(.secondary)
+                            if model.hasUnsupportedTranscriptionContext {
+                                Spacer()
+                                Button("Удалить сохранённый контекст") {
+                                    model.clearUnsupportedTranscriptionContext()
+                                }
+                                .disabled(model.isRunning)
+                            }
+                        }
+                        .font(.caption)
+                        .help("Bundled SeminarText пока не поддерживает пользовательский контекст распознавания. Введённый ранее контекст не будет молча проигнорирован.")
                         Toggle("Human Review исходной расшифровки", isOn: $model.sourceHumanReviewEnabled)
                             .disabled(model.isRunning || model.humanReviewCheckpoint != nil)
                         Toggle("Анализировать слова-паразиты до Human Review", isOn: $model.fillerAnalysisBeforeReview)
@@ -1006,16 +1017,33 @@ struct ContentView: View {
             Text("Файлы проекта")
                 .font(.subheadline.bold())
             List(model.outputs) { output in
-                VStack(alignment: .leading) {
-                    Text(output.title)
-                        .font(.subheadline.bold())
-                    Text(output.path)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .truncationMode(.middle)
-                        .help(output.path)
-                        .textSelection(.enabled)
+                HStack(alignment: .center, spacing: 8) {
+                    VStack(alignment: .leading) {
+                        Text(output.title)
+                            .font(.subheadline.bold())
+                        Text(output.path)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                            .help(output.path)
+                            .textSelection(.enabled)
+                    }
+                    Spacer(minLength: 8)
+                    Button {
+                        model.openResult(output)
+                    } label: {
+                        Image(systemName: "arrow.up.forward.app")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Открыть результат")
+                    Button {
+                        model.revealResult(output)
+                    } label: {
+                        Image(systemName: "folder")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Показать результат в Finder")
                 }
             }
         }

@@ -312,15 +312,24 @@ private actor E2ETranslationWire {
 
 @main
 struct EndToEndTest {
+    private enum Profile: String {
+        case core
+        case translation
+    }
+
     static func main() async {
         do {
             if CommandLine.arguments == [CommandLine.arguments[0], "--translation-wire-self-test"] {
                 try await validateTranslationWireMock()
                 return
             }
-            guard CommandLine.arguments.count == 3 || CommandLine.arguments.count == 5 else {
+            let inferredProfile: Profile = CommandLine.arguments.count == 5 ? .translation : .core
+            let profile = ProcessInfo.processInfo.environment["VIDEOTEXT_E2E_PROFILE"]
+                .flatMap(Profile.init(rawValue:)) ?? inferredProfile
+            guard (profile == .core && CommandLine.arguments.count == 3)
+                || (profile == .translation && CommandLine.arguments.count == 5) else {
                 throw EndToEndError.failed(
-                    "Использование: videotext-e2e <ru-видео> <модель-whisper> [<en-видео> <en-проект>]"
+                    "Core E2E требует RU-видео и модель Whisper; translation E2E дополнительно требует EN-видео и EN-проект."
                 )
             }
 
@@ -331,7 +340,9 @@ struct EndToEndTest {
             try require(WhisperModelLocator().bestModelPath() == modelPath, "Автопоиск выбрал неверную модель Whisper")
             try validateTimecodes()
             try validateZeroDurationSubtitles()
-            try await validateTranslationWireMock()
+            if profile == .translation {
+                try await validateTranslationWireMock()
+            }
             try await validateUserOperationSurface()
 
             let initialController = ProcessController()
@@ -436,14 +447,14 @@ struct EndToEndTest {
                 requireWhisperProgress: false
             )
             try validateHybridTopics(initialResult.projectURL)
-            try await validateRealTranslation(
-                mediaURL: mediaURL,
-                projectURL: initialResult.projectURL,
-                modelPath: modelPath,
-                sourceLanguage: .ru,
-                targetLanguage: .en
-            )
-            if CommandLine.arguments.count == 5 {
+            if profile == .translation {
+                try await validateRealTranslation(
+                    mediaURL: mediaURL,
+                    projectURL: initialResult.projectURL,
+                    modelPath: modelPath,
+                    sourceLanguage: .ru,
+                    targetLanguage: .en
+                )
                 let englishMediaURL = URL(fileURLWithPath: CommandLine.arguments[3])
                 let englishProjectURL = URL(fileURLWithPath: CommandLine.arguments[4], isDirectory: true)
                 try require(
@@ -583,7 +594,12 @@ struct EndToEndTest {
             try require(finalHistory.contains { $0.projectPath == initialResult.projectURL.path && $0.status == .completed }, "История не обновилась после продолжения")
             try require(noActiveTools(), "После E2E остались активные videotext/whisper-cli/ffmpeg/ffprobe")
 
-            print("E2E PASS: Human Review, real TranslateGemma BookText ownership/cache/resume/provenance, gemma3 topics, fragments, ffprobe and cancellation")
+            if profile == .core {
+                print("CORE_E2E_PASS: bundled SeminarText, Human Review, gemma3 topics, fragments, result discovery, reopen, ffprobe and cancellation; translation not required")
+            } else {
+                print("TRANSLATION_E2E_PASS: Human Review, real TranslateGemma BookText ownership/cache/resume/provenance, gemma3 topics, fragments, ffprobe and cancellation")
+            }
+            print("E2E PASS")
             print("QA_PROJECT=\(initialResult.projectURL.path)")
         } catch {
             fputs("E2E FAIL: \(error.localizedDescription)\n", stderr)
@@ -1899,9 +1915,10 @@ struct EndToEndTest {
     @MainActor
     private static func validateUserOperationSurface() async throws {
         try require(
-            WorkflowOperation.userSelectable == [.transcribe, .translateTranscript, .topicTimecoding, .burnSubtitles],
+            WorkflowOperation.userSelectable == [.transcribe, .topicTimecoding, .burnSubtitles],
             "В пользовательском меню присутствуют служебные операции"
         )
+        try require(!WorkflowOperation.translateTranscript.isEnabledForCurrentRelease, "Core release неожиданно включил перевод")
         try require(WorkflowOperation.transcribe.title == "Расшифровать всё видео", "Операция расшифровки не переименована")
         try require(
             WorkflowViewModel().topicGranularity == .normal,

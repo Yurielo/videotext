@@ -5,7 +5,7 @@ struct ResultsDetector {
         let layout = ProjectLayout(root: projectURL)
         var outputs: [ProjectOutput] = []
 
-        for url in [layout.videoDirectory, layout.textsDirectory, layout.supportDirectory] {
+        for url in [layout.videoDirectory, layout.audioDirectory, layout.textsDirectory, layout.supportDirectory] {
             guard let enumerator = FileManager.default.enumerator(
                 at: url,
                 includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],

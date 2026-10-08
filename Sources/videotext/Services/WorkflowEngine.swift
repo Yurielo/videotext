@@ -774,12 +774,7 @@ final class WorkflowViewModel: ObservableObject {
         guard let projectURL else { return }
         do {
             let preferred = outputs
-                .filter {
-                    $0.kind == "processed-fragment-video"
-                        || $0.kind == "fragment-subtitled-video"
-                        || $0.kind == "subtitled-video"
-                        || $0.kind == "fragment-video"
-                }
+                .filter(\.isGeneratedMedia)
                 .sorted { $0.createdAt > $1.createdAt }
                 .first
                 .map { URL(fileURLWithPath: $0.path) }
@@ -787,6 +782,39 @@ final class WorkflowViewModel: ObservableObject {
         } catch {
             status = "Ошибка"
             log.append(error.localizedDescription)
+        }
+    }
+
+    func openResult(_ output: ProjectOutput) {
+        performResultAction { try finder.openResult(URL(fileURLWithPath: output.path)) }
+    }
+
+    func revealResult(_ output: ProjectOutput) {
+        performResultAction { try finder.revealResult(URL(fileURLWithPath: output.path)) }
+    }
+
+    var hasUnsupportedTranscriptionContext: Bool {
+        !transcriptionContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    func clearUnsupportedTranscriptionContext() {
+        transcriptionContext = ""
+        guard let projectURL else { return }
+        do {
+            try store.mutate(projectURL) { $0.transcriptionContext = nil }
+            log.append("Сохранённый контекст распознавания удалён из проекта.")
+        } catch {
+            reportPreparationError(error)
+        }
+    }
+
+    private func performResultAction(_ action: () throws -> Void) {
+        do {
+            try action()
+        } catch {
+            status = "Ошибка"
+            log.append(error.localizedDescription)
+            alert = AppAlert(title: "Ошибка", message: error.localizedDescription)
         }
     }
 

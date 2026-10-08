@@ -349,6 +349,24 @@ struct ProjectOutput: Codable, Identifiable {
     var path: String
     var createdAt: Date
 
+    var isGeneratedMedia: Bool {
+        [
+            "fragment-video",
+            "fragment-subtitled-video",
+            "processed-fragment-video",
+            "subtitled-video",
+            "speed-adjusted-video",
+            "blurred-video",
+            "watermarked-video",
+            "filler-muted-audio",
+            "filler-muted-video",
+            "enhanced-audio",
+            "enhanced-video",
+            "dubbed-audio",
+            "dubbed-video"
+        ].contains(kind)
+    }
+
     var title: String {
         switch kind {
         case "manifest": return "Манифест"
@@ -698,6 +716,7 @@ enum WorkflowError: LocalizedError {
     case cannotCreateProject(String)
     case insufficientDiskSpace
     case cannotOpenProjectFolder
+    case cannotOpenResult
     case processFailed(String)
     case topicServiceUnavailable(String)
     case invalidTopics(String)
@@ -720,6 +739,7 @@ enum WorkflowError: LocalizedError {
         case .cannotCreateProject(let path): return "Не удалось создать папку проекта: \(path)."
         case .insufficientDiskSpace: return "Недостаточно свободного места для обработки выбранного файла."
         case .cannotOpenProjectFolder: return "Не удалось открыть папку проекта в Finder."
+        case .cannotOpenResult: return "Не удалось открыть выбранный результат. Возможно, файл был перемещён или удалён."
         case .processFailed(let message): return message
         case .topicServiceUnavailable(let message): return "Качественный тематический анализ недоступен: \(message)"
         case .invalidTopics(let message): return "Тематический таймкодинг не прошёл проверку: \(message)"

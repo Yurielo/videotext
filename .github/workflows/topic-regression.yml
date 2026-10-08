@@ -1,4 +1,4 @@
-name: Topic Regression
+name: Core Candidate Gate
 
 # Hosted macOS is an explicit release/governance gate, not a development loop.
 # Run this workflow manually on the exact Candidate/pre-merge ref that needs
@@ -21,59 +21,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  pr-head-build:
-    if: github.event_name == 'pull_request'
-    name: PR Head Build
+  core-candidate:
+    name: Core Candidate / Pre-merge
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha }}
-      - name: Verify standalone PR source identity
-        env:
-          EXPECTED_PR_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: test "$(git rev-parse HEAD)" = "$EXPECTED_PR_HEAD"
-      - name: Validate standalone process lifecycle
-        run: |
-          scripts/test_owned_tmp.sh
-          scripts/test_process_shutdown.sh
-          scripts/test_application_lifecycle.sh
-      - name: Validate standalone translation contracts
-        run: |
-          scripts/test_translation.sh
-          scripts/test_translation_ownership.sh
-          scripts/test_translation_semantic_review.sh --check-alarms
-          scripts/test_no_retired_translation_models.sh
-          scripts/test_selected_timing_vertical_slice.sh
-      - name: Build standalone PR source
-        env:
-          VIDEOTEXT_APP_PATH: ${{ runner.temp }}/videotext-pr-head.app
-        run: scripts/build_app.sh
-      - name: Verify standalone bundle
-        env:
-          VIDEOTEXT_APP_PATH: ${{ runner.temp }}/videotext-pr-head.app
-        run: |
-          codesign --verify --deep --strict "$VIDEOTEXT_APP_PATH"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$VIDEOTEXT_APP_PATH/Contents/Info.plist")" = "local.codex.videotext.v3"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$VIDEOTEXT_APP_PATH/Contents/Info.plist")" = "0.6.8"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$VIDEOTEXT_APP_PATH/Contents/Info.plist")" = "2026.09.25.1"
-
-  topic-regression:
-    name: Quality Gate
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Record exact source identity
+        run: git rev-parse HEAD
       - name: Quality Gate — owned TMP lifecycle
         run: scripts/test_owned_tmp.sh
       - name: Validate development baseline
         run: scripts/test_baseline_guard.sh
       - name: Validate Whisper VAD and long-form recovery
         run: scripts/test_whisper_vad.sh
-      - name: Validate selected native timing vertical slice
-        run: scripts/test_selected_timing_vertical_slice.sh
       - name: Validate transcription quality
         run: scripts/test_transcription_quality.sh
       - name: Validate project schema
@@ -84,3 +46,21 @@ jobs:
         run: scripts/test_topics.sh
       - name: Validate topic review matrix
         run: scripts/test_topic_matrix.sh
+      - name: Validate result discovery and access contract
+        run: scripts/test_result_access.sh
+      - name: Validate application/process lifecycle
+        run: |
+          scripts/test_process_shutdown.sh
+          scripts/test_application_lifecycle.sh
+      - name: Build exact core source
+        env:
+          VIDEOTEXT_APP_PATH: ${{ runner.temp }}/videotext-core.app
+        run: scripts/build_app.sh
+      - name: Verify core bundle
+        env:
+          VIDEOTEXT_APP_PATH: ${{ runner.temp }}/videotext-core.app
+        run: |
+          codesign --verify --deep --strict "$VIDEOTEXT_APP_PATH"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$VIDEOTEXT_APP_PATH/Contents/Info.plist")" = "local.codex.videotext.v3"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$VIDEOTEXT_APP_PATH/Contents/Info.plist")" = "0.6.8"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$VIDEOTEXT_APP_PATH/Contents/Info.plist")" = "2026.09.25.1"
