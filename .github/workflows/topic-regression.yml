@@ -1,16 +1,24 @@
 name: Topic Regression
 
+# Hosted macOS is an explicit release/governance gate, not a development loop.
+# Run this workflow manually on the exact Candidate/pre-merge ref that needs
+# acceptance. Ordinary PR pushes and main pushes do not consume hosted macOS.
 on:
-  pull_request:
-    branches: [main]
-  push:
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why the hosted macOS gate is required"
+        required: true
+        type: choice
+        options:
+          - candidate
+          - pre-merge
+          - exceptional
 
-# A newer commit on the same PR makes the older PR validation obsolete.
-# Keep canonical main validations non-cancellable.
+# A newer explicit validation for the same ref supersedes an older one.
 concurrency:
-  group: videotext-ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: videotext-ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   pr-head-build:
