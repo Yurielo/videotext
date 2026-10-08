@@ -95,16 +95,19 @@ struct SelectedTimingVerticalSlice {
         for unit in sourceDocument.units {
             try Task.checkCancellation()
             let translated: String
-            if let cached = cache.load(unit) {
-                translated = cached
+            if let cached = cache.load(unit),
+               let validated = try? validatedTranslation(cached, sourceText: unit.text, source: source, target: target) {
+                translated = validated
                 onLog("Selected timing: перевод unit \(unit.id) восстановлен из кэша.")
             } else {
                 // This provider boundary receives only the owned text. IDs,
                 // timestamps and provenance never cross into TranslateGemma.
-                translated = try await translator.translate(text: unit.text, source: source, target: target)
-                guard !translated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                    throw WorkflowError.processFailed("TranslateGemma вернула пустой перевод source unit \(unit.id).")
-                }
+                translated = try validatedTranslation(
+                    await translator.translate(text: unit.text, source: source, target: target),
+                    sourceText: unit.text,
+                    source: source,
+                    target: target
+                )
                 try cache.save(translated, for: unit)
             }
             translations.append(TimedTranslationUnit(
@@ -126,6 +129,48 @@ struct SelectedTimingVerticalSlice {
         )
         try result.validate()
         return result
+    }
+
+    private func validatedTranslation(
+        _ text: String,
+        sourceText: String,
+        source: ArtifactLanguage,
+        target: ArtifactLanguage
+    ) throws -> String {
+        let translated = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !translated.isEmpty else {
+            throw WorkflowError.processFailed("TranslateGemma вернула пустой text-only перевод.")
+        }
+        let normalizedSource = normalizedTranslationText(sourceText).lowercased()
+        let normalizedTarget = normalizedTranslationText(translated).lowercased()
+        guard normalizedTarget != normalizedSource,
+              normalizedSource.isEmpty || !normalizedTarget.contains(normalizedSource) else {
+            throw WorkflowError.processFailed("TranslateGemma вернула исходный текст без перевода.")
+        }
+        if source == .en, target == .ru {
+            let letters = translationLetterCounts(translated)
+            guard letters.cyrillic > 0, letters.cyrillic >= letters.latin else {
+                throw WorkflowError.processFailed("TranslateGemma вернула текст преимущественно не на русском языке.")
+            }
+        }
+        return translated
+    }
+
+    private func normalizedTranslationText(_ text: String) -> String {
+        text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+
+    private func translationLetterCounts(_ text: String) -> (latin: Int, cyrillic: Int) {
+        text.unicodeScalars.reduce(into: (latin: 0, cyrillic: 0)) { counts, scalar in
+            switch scalar.value {
+            case 0x0041...0x005A, 0x0061...0x007A:
+                counts.latin += 1
+            case 0x0400...0x052F:
+                counts.cyrillic += 1
+            default:
+                break
+            }
+        }
     }
 
     func persist(_ document: TimedTranslationDocument, to projectURL: URL) throws {
@@ -156,6 +201,57 @@ struct SelectedTimingVerticalSlice {
         return document
     }
 
+    /// Materializes translation-owned source units from the selected timing
+    /// package already produced by the canonical Core transcription. This must
+    /// never invoke SeminarText or Whisper again.
+    func loadOrImportCoreSource(
+        projectURL: URL,
+        mediaURL: URL,
+        language: ArtifactLanguage
+    ) throws -> TimedSourceDocument {
+        let layout = ProjectLayout(root: projectURL)
+        guard FileManager.default.isReadableFile(atPath: layout.seminarTextCoreEvidenceURL.path) else {
+            throw WorkflowError.processFailed(
+                "В проекте нет canonical SeminarText timing evidence. Перевод не будет запускать повторную расшифровку."
+            )
+        }
+        let evidence = try JSONDecoder().decode(
+            SeminarTextCoreTranscriptionEvidence.self,
+            from: Data(contentsOf: layout.seminarTextCoreEvidenceURL)
+        )
+        guard let expectedManifestHash = evidence.selectedTimingManifestSHA256,
+              !expectedManifestHash.isEmpty else {
+            throw WorkflowError.processFailed(
+                "Canonical SeminarText evidence не содержит selected timing manifest; повторный ASR запрещён."
+            )
+        }
+        if let persisted = try loadPersistedSource(projectURL: projectURL, mediaURL: mediaURL) {
+            guard persisted.upstreamManifestSHA256 == expectedManifestHash else {
+                throw WorkflowError.processFailed(
+                    "Сохранённые source units не принадлежат canonical SeminarText attempt этого проекта."
+                )
+            }
+            return persisted
+        }
+        let manifests = SeminarTextSelectedTimingRunner.findManifests(in: layout.seminarTextCoreDirectory)
+            .filter { SelectedTimingHash.file($0) == expectedManifestHash }
+        guard manifests.count == 1, let manifestURL = manifests.first else {
+            throw WorkflowError.processFailed(
+                "Не найден единственный selected timing package, связанный с принятой расшифровкой. Повторный ASR не выполнялся."
+            )
+        }
+        let document = try importer.importSelectedPackage(
+            packageRoot: manifestURL.deletingLastPathComponent(),
+            expectedMediaURL: mediaURL,
+            expectedLanguage: language
+        )
+        guard document.upstreamManifestSHA256 == expectedManifestHash else {
+            throw WorkflowError.processFailed("Selected timing source units не совпадают с canonical Core evidence.")
+        }
+        try persistSource(document, to: projectURL)
+        return document
+    }
+
     func currentIdentity() async throws -> TranslationModelIdentity {
         try await translator.identity()
     }
@@ -173,8 +269,10 @@ struct SelectedTimingVerticalSlice {
             throw WorkflowError.processFailed("Активная исходная расшифровка пуста; selected timing перевод невозможен.")
         }
         var units: [TimedSourceUnit] = []
+        var qualityEvidence: [TimedSourceQualityEvidence] = []
+        let qualityByUnitID = Dictionary(uniqueKeysWithValues: selected.qualityEvidence.map { ($0.sourceUnitID, $0) })
         var previousEnd: TimeInterval?
-        for (index, cue) in cues.enumerated() {
+        for cue in cues {
             guard !cue.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   cue.start >= 0,
                   cue.end >= cue.start,
@@ -193,13 +291,21 @@ struct SelectedTimingVerticalSlice {
                 if !values.contains(partID) { values.append(partID) }
             }
             units.append(TimedSourceUnit(
-                id: index + 1,
+                id: cue.id,
                 text: text,
                 textSHA256: SelectedTimingHash.string(text),
                 start: cue.start,
                 end: cue.end,
                 sourcePartIDs: partIDs
             ))
+            let overlappingQuality = overlaps.compactMap { qualityByUnitID[$0.id] }
+            if !overlappingQuality.isEmpty {
+                qualityEvidence.append(TimedSourceQualityEvidence(
+                    sourceUnitID: cue.id,
+                    averageTokenConfidence: average(overlappingQuality.compactMap(\.averageTokenConfidence)),
+                    averageNoSpeechProbability: average(overlappingQuality.compactMap(\.averageNoSpeechProbability))
+                ))
+            }
             previousEnd = cue.end
         }
         let reconciled = TimedSourceDocument(
@@ -211,10 +317,14 @@ struct SelectedTimingVerticalSlice {
             units: units,
             selectedTimingEnd: selected.selectedTimingEnd,
             tokenTimeline: selected.tokenTimeline,
-            qualityEvidence: selected.qualityEvidence
+            qualityEvidence: qualityEvidence
         )
         try reconciled.validateCoverage()
         return reconciled
+    }
+
+    private func average(_ values: [Double]) -> Double? {
+        values.isEmpty ? nil : values.reduce(0, +) / Double(values.count)
     }
 }
 
@@ -784,8 +894,12 @@ struct TimedSourceDocument: Codable, Equatable {
     }
 
     func validateCoverage() throws {
+        let unitIDs = units.map(\.id)
         guard schemaVersion == 1, contract == SelectedTimingVerticalSlice.contract,
-              !units.isEmpty, units.map(\.id) == Array(1...units.count),
+              !units.isEmpty,
+              unitIDs.allSatisfy({ $0 > 0 }),
+              Set(unitIDs).count == unitIDs.count,
+              zip(unitIDs, unitIDs.dropFirst()).allSatisfy({ $0 < $1 }),
               units.allSatisfy({ !$0.text.isEmpty && $0.start >= 0 && $0.end >= $0.start && !$0.sourcePartIDs.isEmpty }) else {
             throw WorkflowError.processFailed("Selected timing source units нарушают базовую структуру.")
         }
@@ -804,10 +918,10 @@ struct TimedSourceDocument: Codable, Equatable {
         guard tokenTimeline.allSatisfy({ !$0.text.isEmpty && $0.start >= 0 && $0.end >= $0.start && !$0.sourcePartID.isEmpty }) else {
             throw WorkflowError.processFailed("Selected timing source token timeline содержит недопустимый речевой интервал.")
         }
-        let unitIDs = Set(units.map(\.id))
+        let validUnitIDs = Set(unitIDs)
         guard Set(qualityEvidence.map(\.sourceUnitID)).count == qualityEvidence.count,
               qualityEvidence.allSatisfy({ evidence in
-                  unitIDs.contains(evidence.sourceUnitID)
+                  validUnitIDs.contains(evidence.sourceUnitID)
                       && [evidence.averageTokenConfidence, evidence.averageNoSpeechProbability].allSatisfy {
                           $0.map { (0...1).contains($0) } ?? true
                       }

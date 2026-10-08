@@ -239,9 +239,9 @@ struct ProjectResultSummaryService {
     }
 
     private func ffprobeSummary(outputs: [ProjectOutput]) -> ProjectArtifactSummary {
-        let hasFullVideo = outputs.contains { $0.kind == "subtitled-video" }
+        let hasFullVideo = outputs.contains { $0.kind == "subtitled-video" || $0.kind.hasPrefix("subtitled-video-") }
         let fragmentFolders = Set(outputs.compactMap { output -> String? in
-            guard output.kind == "fragment-video" || output.kind == "fragment-subtitled-video" else { return nil }
+            guard output.kind == "fragment-video" || output.kind == "fragment-subtitled-video" || output.kind.hasPrefix("fragment-subtitled-video-") else { return nil }
             return URL(fileURLWithPath: output.path).deletingLastPathComponent().path
         })
         let expectedReports = (hasFullVideo ? 1 : 0) + fragmentFolders.count

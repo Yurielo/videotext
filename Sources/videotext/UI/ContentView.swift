@@ -328,6 +328,9 @@ struct ContentView: View {
                                 }
                             ))
                         }
+                        if model.selectedOperations.contains(.burnSubtitles) {
+                            subtitleSourcePicker
+                        }
                     }
                     .padding(6)
                 }
@@ -363,8 +366,6 @@ struct ContentView: View {
                             .disabled(model.isRunning || model.humanReviewCheckpoint != nil)
                         Toggle("Анализировать слова-паразиты до Human Review", isOn: $model.fillerAnalysisBeforeReview)
                             .disabled(model.isRunning || model.humanReviewCheckpoint != nil)
-                        Toggle("Human Review перевода", isOn: $model.translationHumanReviewEnabled)
-                            .disabled(model.isRunning || model.humanReviewCheckpoint != nil)
                         if model.humanReviewCheckpoint == nil {
                             Button {
                                 model.beginHumanReview()
@@ -375,6 +376,28 @@ struct ContentView: View {
                         }
                     }
                     .textFieldStyle(.roundedBorder)
+                    .padding(6)
+                }
+
+                GroupBox("Перевод") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(model.translationToRussianStatus)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Button {
+                                model.translateToRussian()
+                            } label: {
+                                Label("Перевести на русский", systemImage: "character.book.closed")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!model.canTranslateToRussian)
+                            Spacer()
+                            Label("Human Review обязателен", systemImage: "checkmark.seal")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     .padding(6)
                 }
 
@@ -500,6 +523,9 @@ struct ContentView: View {
 
                         Toggle("Вшить субтитры во фрагмент", isOn: $model.burnFragmentSubtitles)
                             .help("Создать fragment.srt из полной расшифровки и вшить его в готовый фрагмент")
+                        if model.burnFragmentSubtitles {
+                            subtitleSourcePicker
+                        }
 
                         Divider()
                         Text("Обработка итогового файла")
@@ -879,6 +905,23 @@ struct ContentView: View {
             }
             .padding()
             .disabled(model.isRunning)
+        }
+    }
+
+    @ViewBuilder
+    private var subtitleSourcePicker: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Picker("Субтитры", selection: $model.subtitleSource) {
+                ForEach(model.availableSubtitleSources) { source in
+                    Text(model.subtitleSourceTitle(source)).tag(source)
+                }
+            }
+            .disabled(model.isRunning)
+            if let message = model.subtitleSourceUnavailableMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 

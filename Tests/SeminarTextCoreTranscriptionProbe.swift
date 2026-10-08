@@ -177,15 +177,21 @@ struct SeminarTextCoreTranscriptionProbe {
 
     private static func verifyReleaseBoundary() async throws {
         try require(!WorkflowOperation.userSelectable.contains(.translateTranscript), "translation remains user-selectable in the core release")
-        try require(!WorkflowOperation.translateTranscript.isEnabledForCurrentRelease, "translation is enabled in the core release")
-        try require(!WorkflowOperation.createDubbing.isEnabledForCurrentRelease, "translation-dependent dubbing is enabled in the core release")
+        try require(WorkflowOperation.translateTranscript.isEnabledForCurrentRelease, "explicit EN-to-RU translation is disabled")
+        try require(!WorkflowOperation.createDubbing.isEnabledForCurrentRelease, "dubbing was enabled with translation")
         try require(WorkflowOperation.transcribe.isEnabledForCurrentRelease, "core transcription was disabled")
         try require(WorkflowOperation.topicTimecoding.isEnabledForCurrentRelease, "core topic operation was disabled")
         try require(WorkflowOperation.burnSubtitles.isEnabledForCurrentRelease, "core subtitle operation was disabled")
 
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("videotext-core-release-boundary-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let media = root.appendingPathComponent("source.mp4")
+        try Data("release-boundary".utf8).write(to: media)
         let settings = WorkflowSettings(
-            mediaURL: URL(fileURLWithPath: "/tmp/videotext-core-release-boundary.mp4"),
-            projectURL: nil,
+            mediaURL: media,
+            projectURL: root.appendingPathComponent("project"),
             selectedOperations: [.translateTranscript],
             mode: .newProject,
             rangeStart: 0,
@@ -195,14 +201,15 @@ struct SeminarTextCoreTranscriptionProbe {
             subtitleStyle: .standard,
             selectedTopicID: nil,
             whisperModelPath: "",
-            whisperLanguage: "en"
+            whisperLanguage: "en",
+            translationHumanReviewEnabled: true
         )
         do {
             _ = try await WorkflowEngine().run(settings: settings, onLog: { _ in })
-            throw WorkflowError.processFailed("disabled translation unexpectedly entered the workflow")
+            throw WorkflowError.processFailed("translation unexpectedly started without an approved EN project")
         } catch let error as WorkflowError {
             guard case .processFailed(let message) = error,
-                  message.contains("временно недоступны") else {
+                  message.contains("существующего проекта с утверждённой английской") else {
                 throw error
             }
         }

@@ -61,14 +61,17 @@ enum WorkflowOperation: String, CaseIterable, Identifiable, Codable {
         }
     }
 
-    /// Translation is retained in the project for a later release, but is not a
-    /// supported product operation in the current core-only release.
-    static let translationEnabledForCurrentRelease = false
+    /// Translation is exposed only through the explicit EN-to-RU action for an
+    /// approved source revision. Dubbing remains outside this product slice.
+    static let translationEnabledForCurrentRelease = true
+    static let dubbingEnabledForCurrentRelease = false
 
     var isEnabledForCurrentRelease: Bool {
         switch self {
-        case .translateTranscript, .createDubbing:
+        case .translateTranscript:
             return Self.translationEnabledForCurrentRelease
+        case .createDubbing:
+            return Self.dubbingEnabledForCurrentRelease
         default:
             return true
         }
@@ -87,7 +90,7 @@ enum WorkflowOperation: String, CaseIterable, Identifiable, Codable {
         case .detectLanguage: return [.createManifest]
         case .transcribe: return [.detectLanguage]
         case .assessTranscriptionQuality: return [.transcribe]
-        case .translateTranscript: return [.assessTranscriptionQuality]
+        case .translateTranscript: return []
         case .validateTimeline: return [.assessTranscriptionQuality]
         case .topicTimecoding: return [.validateTimeline]
         case .discoverResults: return [.createManifest]
@@ -353,8 +356,12 @@ struct ProjectOutput: Codable, Identifiable {
         [
             "fragment-video",
             "fragment-subtitled-video",
+            "fragment-subtitled-video-ru",
+            "fragment-subtitled-video-en",
             "processed-fragment-video",
             "subtitled-video",
+            "subtitled-video-ru",
+            "subtitled-video-en",
             "speed-adjusted-video",
             "blurred-video",
             "watermarked-video",
@@ -391,10 +398,14 @@ struct ProjectOutput: Codable, Identifiable {
         case "fragment-video": return "Видеофрагмент"
         case "fragment-srt": return "Субтитры фрагмента"
         case "fragment-subtitled-video": return "Фрагмент с субтитрами"
+        case "fragment-subtitled-video-ru": return "Фрагмент с русскими субтитрами"
+        case "fragment-subtitled-video-en": return "Фрагмент с английскими субтитрами"
         case "processed-fragment-video": return "Обработанный фрагмент"
         case "processed-fragment-srt": return "Субтитры обработанного фрагмента"
         case "processed-fragment-recipe": return "Рецепт обработанного фрагмента"
         case "subtitled-video": return "Полное видео с субтитрами"
+        case "subtitled-video-ru": return "Полное видео с русскими субтитрами"
+        case "subtitled-video-en": return "Полное видео с английскими субтитрами"
         case "speed-adjusted-video": return "Видео с изменённой скоростью"
         case "speed-adjusted-subtitles": return "Субтитры для изменённой скорости"
         case "speed-adjusted-topics": return "Темы для изменённой скорости"
@@ -659,6 +670,7 @@ struct WorkflowSettings {
     var transcriptionContext: String? = nil
     var topicGranularity: TopicGranularity = .normal
     var artifactLanguage: ArtifactLanguage? = nil
+    var subtitleSource: SubtitleSourceSelection = .source
     var quoteStart: String? = nil
     var quoteEnd: String? = nil
     var speedFactor: Double = 1

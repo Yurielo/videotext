@@ -1929,7 +1929,9 @@ struct EndToEndTest {
             WorkflowOperation.userSelectable == [.transcribe, .topicTimecoding, .burnSubtitles],
             "В пользовательском меню присутствуют служебные операции"
         )
-        try require(!WorkflowOperation.translateTranscript.isEnabledForCurrentRelease, "Core release неожиданно включил перевод")
+        try require(WorkflowOperation.translateTranscript.isEnabledForCurrentRelease, "Явный EN→RU перевод неожиданно выключен")
+        try require(!WorkflowOperation.userSelectable.contains(.translateTranscript), "Перевод не должен запускаться как часть обычной Core-обработки")
+        try require(!WorkflowOperation.createDubbing.isEnabledForCurrentRelease, "Дубляж неожиданно включён вместе с переводом")
         try require(WorkflowOperation.transcribe.title == "Расшифровать всё видео", "Операция расшифровки не переименована")
         try require(
             WorkflowViewModel().topicGranularity == .normal,

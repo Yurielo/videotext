@@ -269,7 +269,9 @@ private final class RecordingSimpleTranslator: SimpleTextTranslationProvider {
     }
     func translate(text: String, source: ArtifactLanguage, target: ArtifactLanguage) async throws -> String {
         requests.append(text)
-        return "RU \(text)"
+        return target == .ru
+            ? "Проверенный русский перевод \(requests.count)."
+            : "Verified English translation \(requests.count)."
     }
 }
 

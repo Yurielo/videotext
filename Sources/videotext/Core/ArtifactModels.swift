@@ -12,6 +12,26 @@ enum ArtifactLanguage: String, CaseIterable, Codable, Identifiable, Equatable {
     var id: String { rawValue }
 }
 
+/// An explicit subtitle choice for rendering. This is an in-memory workflow
+/// setting: it does not alter the source or translation revision.
+enum SubtitleSourceSelection: Hashable, Identifiable {
+    case source
+    case approvedTranslation(ArtifactLanguage)
+
+    var id: String {
+        switch self {
+        case .source: return "source"
+        case .approvedTranslation(let language): return "approved-\(language.rawValue)"
+        }
+    }
+}
+
+struct ResolvedSubtitleSource: Equatable {
+    let language: ArtifactLanguage
+    let srtURL: URL
+    let isTranslation: Bool
+}
+
 enum DetectedMediaLanguage: String, Codable, Equatable {
     case ru
     case en
@@ -200,6 +220,67 @@ extension ProjectManifest {
         return transcriptRevisions?.last(where: {
             $0.language == language && ($0.reviewStatus == .approved || $0.reviewStatus == nil)
         })
+    }
+}
+
+enum SubtitleSourceResolver {
+    static func availableSelections(manifest: ProjectManifest, projectURL: URL) -> [SubtitleSourceSelection] {
+        guard manifest.languageProfile?.effective == .en,
+              (try? resolve(.approvedTranslation(.ru), manifest: manifest, projectURL: projectURL)) != nil else {
+            return [.source]
+        }
+        return [.source, .approvedTranslation(.ru)]
+    }
+
+    static func resolve(
+        _ selection: SubtitleSourceSelection,
+        manifest: ProjectManifest,
+        projectURL: URL
+    ) throws -> ResolvedSubtitleSource {
+        let layout = ProjectLayout(root: projectURL)
+        guard let sourceLanguage = manifest.languageProfile?.effective else {
+            throw WorkflowError.processFailed("Не определён язык исходной расшифровки для выбора субтитров.")
+        }
+
+        switch selection {
+        case .source:
+            let srtURL = sourceLanguage == .en ? layout.fullSRTURL : layout.subtitlesURL(language: sourceLanguage)
+            guard nonemptyFile(srtURL) else { throw WorkflowError.missingFullSRT }
+            return ResolvedSubtitleSource(language: sourceLanguage, srtURL: srtURL, isTranslation: false)
+
+        case .approvedTranslation(let language):
+            guard sourceLanguage == .en, language == .ru else {
+                throw WorkflowError.processFailed("Для этого среза доступны только утверждённые субтитры EN→RU.")
+            }
+            guard let revision = manifest.activeTranscriptRevision(for: language),
+                  revision.reviewStatus == .approved,
+                  revision.origin == .translated || revision.origin == .userEdited else {
+                throw WorkflowError.processFailed("Выбранные субтитры \(language.rawValue.uppercased()) недоступны: перевод ещё не утверждён.")
+            }
+            let workingURL = layout.subtitlesURL(language: language)
+            let immutableURL = layout.subtitleRevisionURL(id: revision.id, language: language)
+            guard nonemptyFile(workingURL), nonemptyFile(immutableURL),
+                  let working = try? Data(contentsOf: workingURL),
+                  let immutable = try? Data(contentsOf: immutableURL),
+                  working == immutable else {
+                throw WorkflowError.processFailed("Выбранные субтитры \(language.rawValue.uppercased()) не совпадают с утверждённой ревизией и не будут использованы.")
+            }
+            return ResolvedSubtitleSource(language: language, srtURL: workingURL, isTranslation: true)
+        }
+    }
+
+    static func unavailableTranslationMessage(manifest: ProjectManifest?, projectURL: URL?) -> String? {
+        guard let manifest, let projectURL, manifest.languageProfile?.effective == .en else { return nil }
+        do {
+            _ = try resolve(.approvedTranslation(.ru), manifest: manifest, projectURL: projectURL)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    private static func nonemptyFile(_ url: URL) -> Bool {
+        ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 0
     }
 }
 
