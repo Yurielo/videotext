@@ -74,6 +74,15 @@ struct HumanReviewService {
             }
 
             if !enabled {
+                let hasUnresolvedTranslationTasks = kind == .translatedTranscript
+                    && (manifest.reviewTasks ?? []).contains { task in
+                        task.transcriptRevisionID == revisionID && task.status == .needsReview
+                    }
+                guard !hasUnresolvedTranslationTasks else {
+                    throw WorkflowError.processFailed(
+                        "Перевод содержит непроверенные или неполученные реплики и не может быть автоматически утверждён. Включите Human Review либо повторите перевод."
+                    )
+                }
                 revisions[index].reviewStatus = .approved
                 state.activeRevisionIDs[language.rawValue] = revisionID
                 state.pendingCheckpoint = nil

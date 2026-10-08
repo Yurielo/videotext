@@ -10,6 +10,7 @@ struct ContentView: View {
     @State private var showServiceResults = false
     @State private var previewTopic: TopicSegment?
     @State private var editingTopic: TopicSegment?
+    @State private var reviewingBoundaryTopic: TopicSegment?
     @State private var editingReviewTask: ReviewTask?
     @State private var editingReviewCue: SubtitleCue?
     @State private var reviewSearch = ""
@@ -57,6 +58,24 @@ struct ContentView: View {
         .sheet(item: $editingTopic) { topic in
             TopicEditView(topic: topic) { title, summary, start, end in
                 model.saveTopicEdits(title: title, summary: summary, startText: start, endText: end)
+            }
+        }
+        .sheet(item: $reviewingBoundaryTopic) { topic in
+            if let projectURL = model.projectURL,
+               let context = TopicReviewCueContext(
+                   topic: topic,
+                   topics: model.topics,
+                   cues: topicReviewCues(projectURL: projectURL, language: model.artifactLanguage)
+               ) {
+                TopicBoundaryReviewView(topic: topic, context: context) { start, end in
+                    model.selectedTopicID = topic.id
+                    return model.saveTopicEdits(
+                        title: topic.title,
+                        summary: topic.summary,
+                        startText: TimecodeParser.display(start),
+                        endText: TimecodeParser.display(end)
+                    )
+                }
             }
         }
         .sheet(item: $editingReviewTask) { task in
@@ -327,8 +346,19 @@ struct ContentView: View {
                             Text("EN").tag("en")
                         }
                         .pickerStyle(.segmented)
-                        TextField("Контекст и термины (необязательно)", text: $model.transcriptionContext)
-                            .help("Кратко укажите предметную область или редкие термины. Это подсказка модели, а не текст для расшифровки.")
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Label("Контекст и термины временно недоступны", systemImage: "info.circle")
+                                .foregroundStyle(.secondary)
+                            if model.hasUnsupportedTranscriptionContext {
+                                Spacer()
+                                Button("Удалить сохранённый контекст") {
+                                    model.clearUnsupportedTranscriptionContext()
+                                }
+                                .disabled(model.isRunning)
+                            }
+                        }
+                        .font(.caption)
+                        .help("Bundled SeminarText пока не поддерживает пользовательский контекст распознавания. Введённый ранее контекст не будет молча проигнорирован.")
                         Toggle("Human Review исходной расшифровки", isOn: $model.sourceHumanReviewEnabled)
                             .disabled(model.isRunning || model.humanReviewCheckpoint != nil)
                         Toggle("Анализировать слова-паразиты до Human Review", isOn: $model.fillerAnalysisBeforeReview)
@@ -390,7 +420,7 @@ struct ContentView: View {
                             Text(model.artifactLanguage == detectedSourceLanguage ? "Оригинал" : "Перевод")
                                 .foregroundStyle(.secondary)
                             Spacer()
-                            Text("Качественный: embeddinggemma + qwen3:8b / gemma3:4b")
+                            Text("Качественный: embeddinggemma + gemma3:4b")
                                 .foregroundStyle(.secondary)
                         }
                         .font(.caption)
@@ -833,24 +863,8 @@ struct ContentView: View {
 
                 GroupBox("Нейтральный дубляж") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Picker("Язык", selection: $model.dubbingLanguage) {
-                            Text("RU · Yuri улучшенный").tag(ArtifactLanguage.ru)
-                            Text("EN · Daniel улучшенный").tag(ArtifactLanguage.en)
-                        }
-                        .pickerStyle(.segmented)
-                        Picker("Оригинальный звук", selection: $model.dubbingMixMode) {
-                            ForEach(DubbingMixMode.allCases) { mode in
-                                Text(mode.title).tag(mode)
-                            }
-                        }
-                        Button {
-                            model.createDubbing()
-                        } label: {
-                            Label("Создать дубляж", systemImage: "person.wave.2")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.projectURL == nil)
-                        .help(model.dubbingLanguage == .ru ? "Создать дубляж голосом Yuri (Enhanced)" : "Создать дубляж голосом Daniel (Enhanced)")
+                        Text("Недоступен в текущей сборке: для дубляжа требуется перевод.")
+                            .foregroundStyle(.secondary)
                     }
                     .padding(6)
                 }
@@ -1003,16 +1017,33 @@ struct ContentView: View {
             Text("Файлы проекта")
                 .font(.subheadline.bold())
             List(model.outputs) { output in
-                VStack(alignment: .leading) {
-                    Text(output.title)
-                        .font(.subheadline.bold())
-                    Text(output.path)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .truncationMode(.middle)
-                        .help(output.path)
-                        .textSelection(.enabled)
+                HStack(alignment: .center, spacing: 8) {
+                    VStack(alignment: .leading) {
+                        Text(output.title)
+                            .font(.subheadline.bold())
+                        Text(output.path)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                            .help(output.path)
+                            .textSelection(.enabled)
+                    }
+                    Spacer(minLength: 8)
+                    Button {
+                        model.openResult(output)
+                    } label: {
+                        Image(systemName: "arrow.up.forward.app")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Открыть результат")
+                    Button {
+                        model.revealResult(output)
+                    } label: {
+                        Image(systemName: "folder")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Показать результат в Finder")
                 }
             }
         }
@@ -1038,7 +1069,7 @@ struct ContentView: View {
                         Button {
                             model.approveTopicReview()
                         } label: {
-                            Label("Завершить проверку", systemImage: "checkmark.seal.fill")
+                            Label("Завершить проверку тем", systemImage: "checkmark.seal.fill")
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(model.isRunning)
@@ -1046,11 +1077,25 @@ struct ContentView: View {
                 }
                 if model.topicReviewCheckpoint != nil {
                     Label(
-                        "Проверьте каждый язык и уровень детализации. Изменения привязываются к существующим cue.",
+                        "Проверка тем: выберите тему, сверьте её с исходными репликами и утвердите набор после правок.",
                         systemImage: "pause.circle.fill"
                     )
                     .font(.caption)
                     .foregroundStyle(.orange)
+                }
+                if model.topicReviewCheckpoint != nil, let topic = model.selectedTopic,
+                   let projectURL = model.projectURL {
+                    TopicReviewSurface(
+                        topic: topic,
+                        topics: model.topics,
+                        projectURL: projectURL,
+                        language: model.artifactLanguage,
+                        onPreview: { previewTopic = topic },
+                        onEdit: { editingTopic = topic },
+                        onChangeBoundary: { reviewingBoundaryTopic = topic },
+                        onSplit: { model.splitSelectedTopic() },
+                        onMerge: { model.mergeSelectedTopicWithNext() }
+                    )
                 }
                 HStack(spacing: 8) {
                     Spacer()
@@ -1465,6 +1510,230 @@ struct ContentView: View {
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = ["png", "jpg", "jpeg", "webp"].compactMap { UTType(filenameExtension: $0) }
         return panel.runModal() == .OK ? panel.url : nil
+    }
+}
+
+private func topicReviewCues(projectURL: URL, language: ArtifactLanguage) -> [SubtitleCue] {
+    let layout = ProjectLayout(root: projectURL)
+    let localized = layout.subtitlesURL(language: language)
+    let source = FileManager.default.fileExists(atPath: localized.path) ? localized : layout.fullSRTURL
+    return (try? SRTService().load(from: source)) ?? []
+}
+
+private struct TopicReviewSurface: View {
+    let topic: TopicSegment
+    let topics: [TopicSegment]
+    let projectURL: URL
+    let language: ArtifactLanguage
+    let onPreview: () -> Void
+    let onEdit: () -> Void
+    let onChangeBoundary: () -> Void
+    let onSplit: () -> Void
+    let onMerge: () -> Void
+
+    private var context: TopicReviewCueContext? {
+        TopicReviewCueContext(
+            topic: topic,
+            topics: topics,
+            cues: topicReviewCues(projectURL: projectURL, language: language)
+        )
+    }
+
+    private var canSplit: Bool { topic.cueIds.count >= 2 }
+
+    private var canMerge: Bool {
+        guard let index = topics.firstIndex(where: { $0.id == topic.id }) else { return false }
+        return index + 1 < topics.count
+    }
+
+    var body: some View {
+        GroupBox("Проверка выбранной темы") {
+            VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(topic.title)
+                        .font(.headline)
+                    Text(topic.summary)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 12) {
+                        Label("Начало: \(TimecodeParser.display(topic.start))", systemImage: "clock")
+                        Label("Конец: \(TimecodeParser.display(topic.end))", systemImage: "clock")
+                    }
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                }
+
+                Text("Действия")
+                    .font(.subheadline.bold())
+                VStack(alignment: .leading, spacing: 6) {
+                    topicAction("Просмотреть фрагмент", systemImage: "play.fill", action: onPreview)
+                    topicAction("Изменить название и описание", systemImage: "pencil", action: onEdit)
+                    topicAction("Изменить границы по репликам", systemImage: "arrow.left.and.right", action: onChangeBoundary)
+                    topicAction("Разделить по средней реплике", systemImage: "rectangle.split.2x1", action: onSplit)
+                        .disabled(!canSplit)
+                    topicAction("Объединить со следующей", systemImage: "arrow.triangle.merge", action: onMerge)
+                        .disabled(!canMerge)
+                }
+
+                Divider()
+                Text("Исходная расшифровка")
+                    .font(.subheadline.bold())
+                Text("Показаны реплики темы и соседний контекст. Границы можно ставить только между этими целыми репликами.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let context {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 6) {
+                            ForEach(context.contextCues, id: \.id) { cue in
+                                HStack(alignment: .top, spacing: 8) {
+                                    Text(roleTitle(context.role(for: cue)))
+                                        .font(.caption2.bold())
+                                        .foregroundStyle(roleColor(context.role(for: cue)))
+                                        .frame(width: 60, alignment: .leading)
+                                    Text(TimecodeParser.display(cue.start))
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 78, alignment: .leading)
+                                    Text(cue.text)
+                                        .font(.caption)
+                                        .textSelection(.enabled)
+                                }
+                                .padding(6)
+                                .background(context.role(for: cue) == .inside ? Color.accentColor.opacity(0.10) : Color.clear)
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                            }
+                        }
+                    }
+                    .frame(minHeight: 110, maxHeight: 190)
+                } else {
+                    Label("Не удалось сопоставить тему с репликами исходной расшифровки.", systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+            .padding(6)
+        }
+    }
+
+    private func roleTitle(_ role: TopicReviewCueContext.Role) -> String {
+        switch role {
+        case .before: return "До темы"
+        case .inside: return "В теме"
+        case .after: return "После темы"
+        }
+    }
+
+    private func roleColor(_ role: TopicReviewCueContext.Role) -> Color {
+        switch role {
+        case .inside: return .accentColor
+        case .before, .after: return .secondary
+        }
+    }
+
+    private func topicAction(
+        _ title: String,
+        systemImage: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .labelStyle(.titleAndIcon)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+    }
+}
+
+private struct TopicBoundaryReviewView: View {
+    let topic: TopicSegment
+    let context: TopicReviewCueContext
+    let onSave: (TimeInterval, TimeInterval) -> Bool
+    @Environment(\.dismiss) private var dismiss
+    @State private var startCueID: Int
+    @State private var endCueID: Int
+
+    init(
+        topic: TopicSegment,
+        context: TopicReviewCueContext,
+        onSave: @escaping (TimeInterval, TimeInterval) -> Bool
+    ) {
+        self.topic = topic
+        self.context = context
+        self.onSave = onSave
+        _startCueID = State(initialValue: context.currentStartCueID)
+        _endCueID = State(initialValue: context.currentEndCueID)
+    }
+
+    private var startCue: SubtitleCue? { context.cue(id: startCueID) }
+    private var endCue: SubtitleCue? { context.cue(id: endCueID) }
+    private var selectionIsValid: Bool {
+        guard let startCue, let endCue else { return false }
+        return startCue.start <= endCue.end
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Границы темы по репликам")
+                .font(.headline)
+            Text(topic.title)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Text("Выберите целые реплики, которые войдут в тему. VideoText сохранит cue-границы и автоматически перераспределит соседние темы без пропусков.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            cuePicker(
+                title: "Тема начинается с",
+                selection: $startCueID,
+                cues: context.startChoices,
+                disabled: context.startChoices.count == 1
+            )
+            cuePicker(
+                title: "Тема заканчивается после",
+                selection: $endCueID,
+                cues: context.endChoices,
+                disabled: context.endChoices.count == 1
+            )
+
+            HStack {
+                Spacer()
+                Button("Отмена") { dismiss() }
+                Button("Сохранить границы") {
+                    guard let startCue, let endCue,
+                          onSave(startCue.start, endCue.end) else { return }
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!selectionIsValid)
+            }
+        }
+        .padding()
+        .frame(width: 620)
+    }
+
+    @ViewBuilder
+    private func cuePicker(
+        title: String,
+        selection: Binding<Int>,
+        cues: [SubtitleCue],
+        disabled: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title).font(.caption.bold())
+            Picker(title, selection: selection) {
+                ForEach(cues, id: \.id) { cue in
+                    Text(cueTitle(cue)).tag(cue.id)
+                }
+            }
+            .labelsHidden()
+            .disabled(disabled)
+        }
+    }
+
+    private func cueTitle(_ cue: SubtitleCue) -> String {
+        let text = cue.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let preview = text.count > 88 ? String(text.prefix(87)) + "…" : text
+        return "\(TimecodeParser.display(cue.start)) · \(preview)"
     }
 }
 

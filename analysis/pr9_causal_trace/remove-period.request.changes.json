@@ -1,0 +1,14 @@
+{
+  "purpose": "CAUSAL_COUNTERFACTUAL_ONLY_NOT_A_REPAIR",
+  "originalRequestSHA256": "d20794f85cc98149d329a81fa689e891abc1007e7e11653356500a1d264bf119",
+  "counterfactualRequestSHA256": "b74a0ef94b28da95b8a6cba6966e8433e50c7afb37a45f7a8e7e1907a4ef062f",
+  "changes": [
+    {
+      "id": 17,
+      "original": "Юрий, а я еще.",
+      "counterfactual": "Юрий, а я еще"
+    }
+  ],
+  "contextAndOptionsUnchanged": true,
+  "noProductionIntegration": true
+}

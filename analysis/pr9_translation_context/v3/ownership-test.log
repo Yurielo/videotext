@@ -1,0 +1,18 @@
+evidence_directory=/Users/yurielokhin/Documents/Codex/videotext-pr9-context-review/../work/translation-ownership-evidence.nFPslk
+command=bash scripts/test_translation_ownership.sh
+started_at=2026-10-03T11:57:47Z
+compiled_source_manifest_sha256=ab8256409df169ddd4e0ca40f76f118e2df55b04805afd1f08f90646ed275a25  /Users/yurielokhin/Documents/Codex/videotext-pr9-context-review/../work/translation-ownership-evidence.nFPslk/sources-sha256.before
+compile_inputs_unchanged=true
+path_metadata_lineage=PASS metadata_bound=PASS no_guessed_description=PASS
+ownership=PASS boundary_context=PASS alignment=PASS duplicate_input=PASS
+context_only_response=PASS selective_retry=PASS provider_failure_retry=PASS unresolved_prefix=PASS
+checkpoint_write_failure_fatal=PASS
+cancellation_prefix=PASS resume_no_recompute=PASS
+cancelled_unit_not_committed=PASS source_echo_review=PASS name_exception=PASS quoted_context=PASS
+sparse_context_direction=PASS owner_context_association=PASS output_budget=PASS generic_fragment_instruction=PASS
+numeric_only=PASS protected_token_passthrough=PASS token_changes_rejected=PASS
+unchanged_cache=PASS ancestor_context_invalidation=PASS title_source_overlap_digest_protocol_identity_invalidation=PASS
+corrupt_checkpoint=PASS tampered_checkpoint=PASS
+legacy_report_decode=PASS machine_output_integrity=PASS human_revision_bytes_lineage=PASS
+TRANSLATION_OWNERSHIP_PROBE_PASS: deterministic mock checks only; no model or semantic acceptance
+exit_status=0

@@ -3,7 +3,7 @@ import Foundation
 struct OllamaTopicProvider: TopicAIProvider {
     static let chatTimeoutSeconds: TimeInterval = 360
     let embeddingModel = "embeddinggemma:latest"
-    let primaryLanguageModel = "qwen3:8b"
+    let primaryLanguageModel = "gemma3:4b"
     let fallbackLanguageModel = "gemma3:4b"
     private let baseURL = URL(string: "http://127.0.0.1:11434")!
 
@@ -12,7 +12,7 @@ struct OllamaTopicProvider: TopicAIProvider {
         guard names.contains(where: { matches($0, requested: embeddingModel) }) else {
             throw WorkflowError.topicServiceUnavailable("не найдена модель \(embeddingModel).")
         }
-        return [primaryLanguageModel, fallbackLanguageModel].filter { requested in
+        return [primaryLanguageModel].filter { requested in
             names.contains(where: { matches($0, requested: requested) })
         }
     }
@@ -233,7 +233,6 @@ struct OllamaTopicProvider: TopicAIProvider {
     private struct ChatRequest: Encodable {
         var model: String
         var stream: Bool
-        // qwen3 otherwise may spend the response budget in hidden reasoning and leave content empty.
         var think: Bool
         var format: TopicSchemaNode
         var messages: [ChatMessage]

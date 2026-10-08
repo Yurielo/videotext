@@ -15,27 +15,57 @@ PROMOTE=false
 PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
 usage() {
-  printf 'Использование: %s <короткое-видео> <модель-whisper> [--promote]\n' "$0"
+  printf 'Использование: %s --profile core <ru-видео> <модель-whisper> [--promote]\n' "$0"
+  printf '       или: %s --profile translation <ru-видео> <модель-whisper> <en-видео> <en-проект> [--promote]\n' "$0"
 }
 
-if [[ $# -lt 2 || $# -gt 3 ]]; then
+if [[ "${1:-}" != "--profile" || $# -lt 4 ]]; then
   usage >&2
   exit 2
 fi
+PROFILE="$2"
+shift 2
 
 VIDEO_PATH="$1"
 MODEL_PATH="$2"
-if [[ $# -eq 3 ]]; then
-  [[ "$3" == "--promote" ]] || { usage >&2; exit 2; }
+shift 2
+EN_VIDEO_PATH=""
+EN_PROJECT_PATH=""
+case "$PROFILE" in
+  core)
+    [[ $# -le 1 ]] || { usage >&2; exit 2; }
+    ;;
+  translation)
+    [[ $# -ge 2 && $# -le 3 ]] || { usage >&2; exit 2; }
+    EN_VIDEO_PATH="$1"
+    EN_PROJECT_PATH="$2"
+    shift 2
+    ;;
+  *) usage >&2; exit 2 ;;
+esac
+if [[ $# -eq 1 ]]; then
+  [[ "$1" == "--promote" ]] || { usage >&2; exit 2; }
   PROMOTE=true
 fi
 
-[[ -f "$VIDEO_PATH" ]] || { printf 'Не найдено короткое видео: %s\n' "$VIDEO_PATH" >&2; exit 2; }
+[[ -f "$VIDEO_PATH" ]] || { printf 'Не найдено RU-видео: %s\n' "$VIDEO_PATH" >&2; exit 2; }
 [[ -f "$MODEL_PATH" ]] || { printf 'Не найдена модель Whisper: %s\n' "$MODEL_PATH" >&2; exit 2; }
+if [[ "$PROFILE" == "translation" ]]; then
+  [[ -f "$EN_VIDEO_PATH" ]] || { printf 'Не найдено EN-видео: %s\n' "$EN_VIDEO_PATH" >&2; exit 2; }
+  [[ -d "$EN_PROJECT_PATH" ]] || { printf 'Не найден EN-проект: %s\n' "$EN_PROJECT_PATH" >&2; exit 2; }
+  [[ -f "$EN_PROJECT_PATH/Support files/manifest.json" ]] || {
+    printf 'В EN-проекте нет manifest.json: %s\n' "$EN_PROJECT_PATH" >&2
+    exit 2
+  }
+  [[ -f "$EN_PROJECT_PATH/Texts/full.srt" ]] || {
+    printf 'В EN-проекте нет full.srt: %s\n' "$EN_PROJECT_PATH" >&2
+    exit 2
+  }
+fi
 
 STAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
 RUN_DIR="$WORK_ROOT/release-gate/$STAMP"
-CANDIDATE_ROOT="${VIDEOTEXT_CANDIDATE_ROOT:-${RUN_DIR}/candidate}"
+CANDIDATE_ROOT="${VIDEOTEXT_CANDIDATE_ROOT:-/private/tmp/videotext-release-candidate-$STAMP}"
 CANDIDATE="$CANDIDATE_ROOT/videotext.app"
 EVIDENCE="$RUN_DIR/evidence.env"
 mkdir -p "$RUN_DIR" "$CANDIDATE_ROOT" "$OUTPUT_ROOT"
@@ -69,9 +99,24 @@ release_files() {
     "$ROOT/scripts/owned_tmp.py" \
     "$ROOT/scripts/test_project_schema.sh" \
     "$ROOT/scripts/test_human_review.sh" \
+    "$ROOT/scripts/test_diagnostics.sh" \
+    "$ROOT/scripts/test_result_access.sh" \
+    "$ROOT/scripts/test_core_product_workflow.sh" \
     "$ROOT/scripts/test_topics.sh" \
     "$ROOT/scripts/test_topic_matrix.sh" \
     "$ROOT/scripts/test_ollama_topics.sh" \
+    "$ROOT/scripts/test_candidate_lifecycle.sh" \
+    "$ROOT/scripts/test_candidate_active_quit.sh" \
+    "$ROOT/scripts/test_translation.sh" \
+    "$ROOT/scripts/test_translation_models.sh" \
+    "$ROOT/scripts/test_ollama_memory_shutdown.sh" \
+    "$ROOT/scripts/test_no_retired_translation_models.sh" \
+    "$ROOT/scripts/test_translation_ownership.sh" \
+    "$ROOT/scripts/test_translation_semantic_review.sh" \
+    "$ROOT/scripts/test_selected_timing_vertical_slice.sh" \
+    "$ROOT/scripts/test_owned_tmp.sh" \
+    "$ROOT/scripts/test_process_shutdown.sh" \
+    "$ROOT/scripts/test_application_lifecycle.sh" \
     "$ROOT/scripts/test_tool_runner.sh" \
     "$ROOT/scripts/test_whisper_vad.sh" \
     "$ROOT/scripts/test_transcription_quality.sh" \
@@ -81,9 +126,24 @@ release_files() {
     "$ROOT/Tests/EndToEnd.swift" \
     "$ROOT/Tests/ProjectSchemaProbe.swift" \
     "$ROOT/Tests/HumanReviewProbe.swift" \
+    "$ROOT/Tests/DiagnosticsProbe.swift" \
+    "$ROOT/Tests/ResultAccessProbe.swift" \
+    "$ROOT/Tests/CoreProductWorkflowProbe.swift" \
     "$ROOT/Tests/TopicAnalysisProbe.swift" \
     "$ROOT/Tests/TopicMatrixProbe.swift" \
     "$ROOT/Tests/OllamaTopicProbe.swift" \
+    "$ROOT/Tests/TranslationAdapterProbe.swift" \
+    "$ROOT/Tests/TranslationModelBenchmark.swift" \
+    "$ROOT/Tests/OllamaMemoryManagerProbe.swift" \
+    "$ROOT/Tests/TranslationOwnershipProbe.swift" \
+    "$ROOT/Tests/TranslationSemanticReviewProbe.swift" \
+    "$ROOT/Tests/SelectedTimingVerticalSliceProbe.swift" \
+    "$ROOT/Tests/OwnedTMPProbe.swift" \
+    "$ROOT/Tests/ProcessShutdownProbe.swift" \
+    "$ROOT/Tests/CandidateLifecycleProbe.swift" \
+    "$ROOT/Tests/CandidateActiveQuitProbe.swift" \
+    "$ROOT/Tests/ApplicationLifecycleProbe.swift" \
+    "$ROOT/Tests/test_owned_tmp.py" \
     "$ROOT/Tests/ToolRunnerProbe.swift" \
     "$ROOT/Tests/WhisperVADProbe.swift" \
     "$ROOT/Tests/TranscriptionQualityProbe.swift"
@@ -106,6 +166,16 @@ bundle_hash() {
   ) | shasum -a 256 | awk '{print $1}'
 }
 
+directory_hash() {
+  local directory="$1"
+  (
+    cd "$directory"
+    find . -type f -print | LC_ALL=C sort | while IFS= read -r path; do
+      printf '%s  %s\n' "$(shasum -a 256 "$path" | awk '{print $1}')" "$path"
+    done
+  ) | shasum -a 256 | awk '{print $1}'
+}
+
 assert_snapshot() {
   local current candidate_current
   current="$(release_inputs_hash)" || fail "не удалось вычислить hash release inputs"
@@ -115,15 +185,6 @@ assert_snapshot() {
   candidate_current="$(bundle_hash "$CANDIDATE")"
   [[ "$candidate_current" == "$CANDIDATE_HASH" ]] || fail "release candidate изменился после сборки"
 }
-
-stop_smoke_app() {
-  local pid
-  for pid in ${SMOKE_PIDS:-}; do
-    kill "$pid" 2>/dev/null || true
-  done
-}
-
-trap stop_smoke_app EXIT
 
 : > "$EVIDENCE"
 record status RUNNING
@@ -137,14 +198,26 @@ record source_commit "$SOURCE_COMMIT"
 record source_tree_clean true
 record source_version "$SOURCE_VERSION"
 record source_build "$SOURCE_BUILD"
+record release_profile "$PROFILE"
 if ! BASELINE_RESULT="$("$ROOT/scripts/check_baseline.sh" 2>&1)"; then
   fail "$BASELINE_RESULT"
 fi
 record baseline_status "$BASELINE_RESULT"
 record video_path "$VIDEO_PATH"
-record video_sha256 "$(shasum -a 256 "$VIDEO_PATH" | awk '{print $1}')"
+VIDEO_SHA256="$(shasum -a 256 "$VIDEO_PATH" | awk '{print $1}')"
+record video_sha256 "$VIDEO_SHA256"
 record whisper_model_path "$MODEL_PATH"
 record whisper_model_sha256 "$(shasum -a 256 "$MODEL_PATH" | awk '{print $1}')"
+if [[ "$PROFILE" == "translation" ]]; then
+  EN_VIDEO_SHA256="$(shasum -a 256 "$EN_VIDEO_PATH" | awk '{print $1}')"
+  EN_PROJECT_SHA256="$(directory_hash "$EN_PROJECT_PATH")"
+  record en_video_path "$EN_VIDEO_PATH"
+  record en_video_sha256 "$EN_VIDEO_SHA256"
+  record en_project_path "$EN_PROJECT_PATH"
+  record en_project_sha256 "$EN_PROJECT_SHA256"
+  record en_project_manifest_sha256 "$(shasum -a 256 "$EN_PROJECT_PATH/Support files/manifest.json" | awk '{print $1}')"
+  record en_project_full_srt_sha256 "$(shasum -a 256 "$EN_PROJECT_PATH/Texts/full.srt" | awk '{print $1}')"
+fi
 for tool in ffmpeg ffprobe whisper-cli; do
   command -v "$tool" >/dev/null 2>&1 || fail "не найден обязательный инструмент $tool"
 done
@@ -152,18 +225,49 @@ record ffmpeg_version "$(ffmpeg -version 2>/dev/null | sed -n '1p')"
 record ffprobe_version "$(ffprobe -version 2>/dev/null | sed -n '1p')"
 record whisper_version "$(whisper-cli --version 2>&1 | sed -n '1p')"
 
+BUNDLED_SEMINARTEXT="$ROOT/Resources/SeminarText/seminartext"
+[[ -x "$BUNDLED_SEMINARTEXT" ]] || fail "не найден bundled SeminarText component"
+SEMINARTEXT_HELP="$("$BUNDLED_SEMINARTEXT" transcribe --help 2>&1)" || fail "не удалось проверить bundled SeminarText"
+printf '%s\n' "$SEMINARTEXT_HELP" | /usr/bin/grep -Fq -- '--language' || fail "bundled SeminarText не поддерживает --language"
+printf '%s\n' "$SEMINARTEXT_HELP" | /usr/bin/grep -Fq -- '--structured-timing' || fail "bundled SeminarText не поддерживает --structured-timing"
+record seminartext_executable "$BUNDLED_SEMINARTEXT"
+record seminartext_sha256 "$(shasum -a 256 "$BUNDLED_SEMINARTEXT" | awk '{print $1}')"
+record seminartext_runtime_identity "$("$BUNDLED_SEMINARTEXT" runtime-identity 2>&1)"
+
 require_no_active_tools
 SOURCE_HASH="$(release_inputs_hash)" || fail "не удалось вычислить hash release inputs"
 record release_inputs_sha256 "$SOURCE_HASH"
 
-for focused in \
-  test_project_schema.sh \
-  test_human_review.sh \
-  test_topics.sh \
-  test_topic_matrix.sh \
-  test_ollama_topics.sh \
-  test_whisper_vad.sh \
-  test_transcription_quality.sh; do
+focused_checks=(
+  test_project_schema.sh
+  test_human_review.sh
+  test_diagnostics.sh
+  test_result_access.sh
+  test_topics.sh
+  test_topic_matrix.sh
+  test_ollama_topics.sh
+  test_ollama_memory_shutdown.sh
+  test_no_retired_translation_models.sh
+  test_fragment_processing.sh
+  test_filler_mute.sh
+  test_speed_adjustment.sh
+  test_blur.sh
+  test_watermark.sh
+  test_audio_enhancement.sh
+  test_owned_tmp.sh
+  test_process_shutdown.sh
+  test_application_lifecycle.sh
+  test_whisper_vad.sh
+  test_transcription_quality.sh
+)
+if [[ "$PROFILE" == "translation" ]]; then
+  focused_checks+=(
+    test_translation.sh
+    test_translation_ownership.sh
+    test_selected_timing_vertical_slice.sh
+  )
+fi
+for focused in "${focused_checks[@]}"; do
   log="$RUN_DIR/$focused.log"
   if ! "$ROOT/scripts/$focused" > "$log" 2>&1; then
     record "${focused%.sh}_exit_status" 1
@@ -173,6 +277,16 @@ for focused in \
   record "${focused%.sh}_exit_status" 0
   record "${focused%.sh}_log" "$log"
 done
+if [[ "$PROFILE" == "translation" ]]; then
+  log="$RUN_DIR/test_translation_semantic_review.sh.log"
+  if ! "$ROOT/scripts/test_translation_semantic_review.sh" --check-alarms > "$log" 2>&1; then
+    record test_translation_semantic_review_exit_status 1
+    record test_translation_semantic_review_log "$log"
+    fail "focused-проверка test_translation_semantic_review.sh завершилась ошибкой"
+  fi
+  record test_translation_semantic_review_exit_status 0
+  record test_translation_semantic_review_log "$log"
+fi
 log="$RUN_DIR/test_tool_runner.sh.log"
 if ! "$ROOT/scripts/test_tool_runner.sh" "$VIDEO_PATH" > "$log" 2>&1; then
   record test_tool_runner_exit_status 1
@@ -182,6 +296,49 @@ fi
 record test_tool_runner_exit_status 0
 record test_tool_runner_log "$log"
 assert_snapshot
+
+for run in 1 2; do
+  log="$RUN_DIR/e2e-$run.log"
+  e2e_evidence="$RUN_DIR/e2e-$run-evidence"
+  mkdir -p "$e2e_evidence"
+  e2e_command=("$ROOT/scripts/test_e2e.sh" --profile "$PROFILE" "$VIDEO_PATH" "$MODEL_PATH")
+  if [[ "$PROFILE" == "translation" ]]; then
+    e2e_command+=("$EN_VIDEO_PATH" "$EN_PROJECT_PATH")
+  fi
+  if ! QA_E2E_EVIDENCE_DIR="$e2e_evidence" "${e2e_command[@]}" > "$log" 2>&1; then
+    record "e2e_${run}_command" "${e2e_command[*]}"
+    record "e2e_${run}_exit_status" 1
+    record "e2e_${run}_log" "$log"
+    fail "E2E #$run завершился с ненулевым кодом"
+  fi
+  /usr/bin/grep -Fq 'E2E PASS' "$log" || fail "E2E #$run не содержит E2E PASS"
+  if [[ "$PROFILE" == "core" ]]; then
+    /usr/bin/grep -Fq 'CORE_E2E_PASS' "$log" || fail "E2E #$run не доказал core profile"
+    if /usr/bin/grep -Fq 'REAL_TRANSLATION_' "$log"; then
+      fail "Core E2E #$run неожиданно запустил перевод"
+    fi
+  else
+    [[ "$(/usr/bin/grep -Fc 'REAL_TRANSLATION_PASS ru->en:' "$log")" -eq 1 ]] || \
+      fail "E2E #$run не доказал единственный RU->EN production-проход"
+    [[ "$(/usr/bin/grep -Fc 'REAL_TRANSLATION_PASS en->ru:' "$log")" -eq 1 ]] || \
+      fail "E2E #$run не доказал успешный EN->RU valid-full.srt проход"
+  fi
+  [[ "$(shasum -a 256 "$VIDEO_PATH" | awk '{print $1}')" == "$VIDEO_SHA256" ]] || \
+    fail "E2E #$run изменил RU-видео"
+  if [[ "$PROFILE" == "translation" ]]; then
+    [[ "$(shasum -a 256 "$EN_VIDEO_PATH" | awk '{print $1}')" == "$EN_VIDEO_SHA256" ]] || \
+      fail "E2E #$run изменил EN-видео"
+    [[ "$(directory_hash "$EN_PROJECT_PATH")" == "$EN_PROJECT_SHA256" ]] || \
+      fail "E2E #$run изменил исходный EN-проект"
+  fi
+  record "e2e_${run}_command" "${e2e_command[*]}"
+  record "e2e_${run}_exit_status" 0
+  record "e2e_${run}_status" PASS
+  record "e2e_${run}_log" "$log"
+  record "e2e_${run}_evidence" "$e2e_evidence"
+  assert_snapshot
+  require_no_active_tools
+done
 
 if ! VIDEOTEXT_APP_PATH="$CANDIDATE" "$ROOT/scripts/build_app.sh" > "$RUN_DIR/build.log" 2>&1; then
   record build_command "VIDEOTEXT_APP_PATH=$CANDIDATE $ROOT/scripts/build_app.sh"
@@ -193,6 +350,13 @@ record build_command "VIDEOTEXT_APP_PATH=$CANDIDATE $ROOT/scripts/build_app.sh"
 record build_exit_status 0
 record build_log "$RUN_DIR/build.log"
 [[ -d "$CANDIDATE" ]] || fail "candidate не создан"
+Candidate_SEMINARTEXT="$CANDIDATE/Contents/Resources/SeminarText/seminartext"
+[[ -x "$Candidate_SEMINARTEXT" ]] || fail "candidate не содержит bundled SeminarText"
+[[ "$(shasum -a 256 "$Candidate_SEMINARTEXT" | awk '{print $1}')" == "$(shasum -a 256 "$BUNDLED_SEMINARTEXT" | awk '{print $1}')" ]] || fail "candidate SeminarText differs from release E2E component"
+"$Candidate_SEMINARTEXT" transcribe --help 2>&1 | /usr/bin/grep -Fq -- '--language' || fail "candidate SeminarText не поддерживает --language"
+record candidate_seminartext_path "$Candidate_SEMINARTEXT"
+record candidate_seminartext_sha256 "$(shasum -a 256 "$Candidate_SEMINARTEXT" | awk '{print $1}')"
+record candidate_seminartext_runtime_identity "$("$Candidate_SEMINARTEXT" runtime-identity 2>&1)"
 record codesign_before_command "codesign --verify --deep --strict $CANDIDATE"
 if ! codesign --verify --deep --strict "$CANDIDATE" > "$RUN_DIR/codesign-before.log" 2>&1; then
   record codesign_before_exit_status 1
@@ -214,45 +378,33 @@ record candidate_path "$CANDIDATE"
 record candidate_sha256 "$CANDIDATE_HASH"
 assert_snapshot
 
-for run in 1 2; do
-  log="$RUN_DIR/e2e-$run.log"
-  if ! "$ROOT/scripts/test_e2e.sh" "$VIDEO_PATH" "$MODEL_PATH" > "$log" 2>&1; then
-    record "e2e_${run}_command" "$ROOT/scripts/test_e2e.sh $VIDEO_PATH $MODEL_PATH"
-    record "e2e_${run}_exit_status" 1
-    record "e2e_${run}_log" "$log"
-    fail "E2E #$run завершился с ненулевым кодом"
-  fi
-  /usr/bin/grep -Fq 'E2E PASS' "$log" || fail "E2E #$run не содержит E2E PASS"
-  record "e2e_${run}_command" "$ROOT/scripts/test_e2e.sh $VIDEO_PATH $MODEL_PATH"
-  record "e2e_${run}_exit_status" 0
-  record "e2e_${run}_status" PASS
-  record "e2e_${run}_log" "$log"
-  assert_snapshot
-  require_no_active_tools
-done
-
-record smoke_command "open -n $CANDIDATE"
-if ! open -n "$CANDIDATE" > "$RUN_DIR/smoke-open.log" 2>&1; then
-  record smoke_open_exit_status 1
-  record smoke_log "$RUN_DIR/smoke-open.log"
-  fail "candidate не запускается"
+record candidate_lifecycle_command "$ROOT/scripts/test_candidate_lifecycle.sh $CANDIDATE"
+if ! "$ROOT/scripts/test_candidate_lifecycle.sh" "$CANDIDATE" > "$RUN_DIR/candidate-lifecycle.log" 2>&1; then
+  record candidate_lifecycle_exit_status 1
+  record candidate_lifecycle_log "$RUN_DIR/candidate-lifecycle.log"
+  fail "candidate не прошел normal Quit/reopen lifecycle"
 fi
-record smoke_open_exit_status 0
-record smoke_log "$RUN_DIR/smoke-open.log"
-sleep 5
-SMOKE_PIDS="$(pgrep -x videotext 2>/dev/null || true)"
-[[ -n "$SMOKE_PIDS" ]] || fail "после smoke-запуска не найден процесс videotext"
-for pid in $SMOKE_PIDS; do
-  kill -0 "$pid" 2>/dev/null || fail "smoke-процесс videotext завершился преждевременно"
-done
-stop_smoke_app
-SMOKE_PIDS=""
-
-for _ in 1 2 3 4 5; do
-  pgrep -x videotext >/dev/null || break
-  sleep 1
-done
+record candidate_lifecycle_exit_status 0
+record candidate_lifecycle_log "$RUN_DIR/candidate-lifecycle.log"
 require_no_active_tools
+record candidate_active_quit_command "$ROOT/scripts/test_candidate_active_quit.sh $CANDIDATE $VIDEO_PATH"
+if ! "$ROOT/scripts/test_candidate_active_quit.sh" "$CANDIDATE" "$VIDEO_PATH" > "$RUN_DIR/candidate-active-quit.log" 2>&1; then
+  record candidate_active_quit_exit_status 1
+  record candidate_active_quit_log "$RUN_DIR/candidate-active-quit.log"
+  fail "candidate не прошел active-process normal Quit/reopen lifecycle"
+fi
+record candidate_active_quit_exit_status 0
+record candidate_active_quit_log "$RUN_DIR/candidate-active-quit.log"
+require_no_active_tools
+record smoke_metadata_cleanup_command "xattr -cr $CANDIDATE"
+if ! xattr -cr "$CANDIDATE" > "$RUN_DIR/smoke-metadata-cleanup.log" 2>&1; then
+  record smoke_metadata_cleanup_exit_status 1
+  record smoke_metadata_cleanup_log "$RUN_DIR/smoke-metadata-cleanup.log"
+  fail "не удалось удалить служебные xattr после smoke-запуска"
+fi
+record smoke_metadata_cleanup_exit_status 0
+record smoke_metadata_cleanup_log "$RUN_DIR/smoke-metadata-cleanup.log"
+assert_snapshot
 record codesign_after_command "codesign --verify --deep --strict $CANDIDATE"
 if ! codesign --verify --deep --strict "$CANDIDATE" > "$RUN_DIR/codesign-after.log" 2>&1; then
   record codesign_after_exit_status 1
@@ -326,13 +478,15 @@ record completed_at "$(date -u '+%Y%m%dT%H%M%SZ')"
 record status PASS
 
 required_evidence=(
-  source_commit source_tree_clean source_version source_build
+  source_commit source_tree_clean source_version source_build release_profile
   release_inputs_sha256 candidate_sha256
   candidate_version candidate_build
   build_command build_exit_status build_log
   e2e_1_command e2e_1_exit_status e2e_1_log
   e2e_2_command e2e_2_exit_status e2e_2_log
-  smoke_command smoke_open_exit_status smoke_log
+  candidate_lifecycle_command candidate_lifecycle_exit_status candidate_lifecycle_log
+  candidate_active_quit_command candidate_active_quit_exit_status candidate_active_quit_log
+  smoke_metadata_cleanup_command smoke_metadata_cleanup_exit_status smoke_metadata_cleanup_log
   codesign_before_command codesign_before_exit_status codesign_before_log
   codesign_after_command codesign_after_exit_status codesign_after_log
 )

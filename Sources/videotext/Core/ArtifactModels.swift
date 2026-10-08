@@ -245,10 +245,15 @@ struct TranslationReport: Codable, Equatable {
     var sourceLanguage: ArtifactLanguage
     var targetLanguage: ArtifactLanguage
     var model: String
+    var modelDigest: String?
+    var protocolVersion: String?
     var translatedAt: Date
     var cueCount: Int
     var reviewTaskIDs: [String]
     var status: ArtifactValidationStatus
+    var contextIdentity: String? = nil
+    var subtitleSHA256: String? = nil
+    var transcriptSHA256: String? = nil
 }
 
 struct SpeedAdjustmentRecord: Codable, Equatable {

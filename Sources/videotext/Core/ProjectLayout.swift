@@ -45,6 +45,10 @@ struct ProjectLayout {
     func translationReportURL(source: ArtifactLanguage, target: ArtifactLanguage) -> URL {
         languageDirectory.appendingPathComponent("translation.\(source.rawValue)-\(target.rawValue).json")
     }
+    func translationCacheDirectory(source: ArtifactLanguage, target: ArtifactLanguage) -> URL {
+        languageDirectory.appendingPathComponent("Translation cache", isDirectory: true)
+            .appendingPathComponent("\(source.rawValue)-\(target.rawValue)", isDirectory: true)
+    }
     var transcriptionQualityURL: URL { qualityDirectory.appendingPathComponent("transcription_quality.json") }
     var reviewTasksURL: URL { supportReviewDirectory.appendingPathComponent("review_tasks.json") }
     var transcriptReviewHTMLURL: URL { reviewDirectory.appendingPathComponent("transcript_review.html") }
@@ -53,6 +57,23 @@ struct ProjectLayout {
     var fullSRTURL: URL { textsDirectory.appendingPathComponent("full.srt") }
     var transcriptURL: URL { textsDirectory.appendingPathComponent("transcript.txt") }
     var whisperJSONURL: URL { supportDirectory.appendingPathComponent("whisper.json") }
+    /// Opt-in evidence imported from SeminarText selected-attempt JSON-full.
+    /// This is deliberately separate from the legacy VideoText Whisper outputs.
+    var selectedTimingDirectory: URL { supportDirectory.appendingPathComponent("Selected timing", isDirectory: true) }
+    var selectedTimingSeminarTextDirectory: URL {
+        selectedTimingDirectory.appendingPathComponent("SeminarText", isDirectory: true)
+    }
+    /// SeminarText's ordinary transcription output retained as core provenance.
+    /// It intentionally does not require selected-timing translation evidence.
+    var seminarTextCoreDirectory: URL { supportDirectory.appendingPathComponent("SeminarText", isDirectory: true) }
+    var seminarTextCoreEvidenceURL: URL { seminarTextCoreDirectory.appendingPathComponent("core_transcription.json") }
+    var selectedTimingSourceUnitsURL: URL { selectedTimingDirectory.appendingPathComponent("source_units.json") }
+    func selectedTimingTranslationsURL(source: ArtifactLanguage, target: ArtifactLanguage) -> URL {
+        selectedTimingDirectory.appendingPathComponent("translations.\(source.rawValue)-\(target.rawValue).json")
+    }
+    var selectedTimingTranslationCacheDirectory: URL {
+        selectedTimingDirectory.appendingPathComponent("Translation cache", isDirectory: true)
+    }
     var topicsURL: URL { textsDirectory.appendingPathComponent("topics.json") }
     var topicsTextURL: URL { textsDirectory.appendingPathComponent("topics.txt") }
     var topicCacheDirectory: URL { supportDirectory.appendingPathComponent("Topic cache", isDirectory: true) }

@@ -73,12 +73,264 @@ final class RecordingTopicAdapter: TopicAdapter {
     }
 }
 
+private struct E2ETranslationRow: Codable {
+    var cueId: Int
+    var sourceEcho: String
+    var text: String
+}
+
+private struct E2EContextIdentity: Encodable {
+    var contract: String
+    var cues: [SubtitleCue]
+    var requests: [TranslationRequestCue]
+}
+
+// Observe the production HTTP seam without rewriting requests or model replies.
+private actor E2ETranslationWire {
+    static let digest = "c49d986b0764f5881c476eb21435bb62b7abc62347aab3d4a6071e811be510a1"
+    static let protocolVersion = "translategemma-booktext-owned-tasks-v6-docmeta512-lineage2-overlap2x600-source-echo1-ctx8k"
+    static let contract = "booktext-owned-cue-context-v1-docmeta512-lineage2-overlap2x600"
+
+    let requests: [TranslationRequestCue]
+    let contextIdentity: String
+    private(set) var chats: [[Int]] = []
+    private(set) var rows: [Int: String] = [:]
+    private(set) var tagCalls = 0
+
+    private let directory: URL
+    private let scripted: ((URLRequest) throws -> Data)?
+    private let ownershipUnitSize: Int
+    private let started = Date()
+    private var sequence = 0
+
+    init(
+        cues: [SubtitleCue],
+        media: URL,
+        directory: URL,
+        ownershipUnitSize: Int = 32,
+        scripted: ((URLRequest) throws -> Data)? = nil
+    ) throws {
+        self.directory = directory
+        self.scripted = scripted
+        self.ownershipUnitSize = ownershipUnitSize
+        let parent = media.deletingLastPathComponent()
+        let title = [
+            parent.deletingLastPathComponent().lastPathComponent,
+            parent.lastPathComponent,
+            media.lastPathComponent
+        ]
+        .filter { !$0.isEmpty }
+        .joined(separator: " / ")
+        let document = """
+        Document type: timecoded spoken audio/video transcript. Short utterances may belong to different speakers.
+        Document title (source metadata only): \(String(title.prefix(160)))
+        Logical source units: original subtitle cues. Execution chunks are checkpoints, not semantic boundaries.
+        """
+
+        func neighbors(_ index: Int, _ direction: Int) -> [TranslationContextCue] {
+            var result: [TranslationContextCue] = []
+            var length = 0
+            for distance in 1...2 {
+                let next = index + distance * direction
+                guard cues.indices.contains(next) else { break }
+                let text = cues[next].text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard length + text.count + 1 <= 600 else { break }
+                result.append(TranslationContextCue(id: cues[next].id, text: text))
+                length += text.count + 1
+            }
+            return direction < 0 ? result.reversed() : result
+        }
+
+        requests = cues.indices.map { index in
+            TranslationRequestCue(
+                id: cues[index].id,
+                text: cues[index].text,
+                context: TranslationCueContext(
+                    document: document,
+                    before: neighbors(index, -1),
+                    after: neighbors(index, 1)
+                )
+            )
+        }
+        contextIdentity = try TranslationFingerprint.value(
+            E2EContextIdentity(contract: Self.contract, cues: cues, requests: requests)
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try JSONEncoder().encode(cues).write(to: directory.appendingPathComponent("source-cues.json"))
+        try JSONEncoder().encode(requests).write(to: directory.appendingPathComponent("expected-contexts.json"))
+    }
+
+    func send(_ request: URLRequest) async throws -> Data {
+        sequence += 1
+        let prefix = directory.appendingPathComponent(String(format: "wire-%03d", sequence))
+        try (request.httpBody ?? Data()).write(to: prefix.appendingPathExtension("request.json"))
+        var metadata: [String: Any] = [
+            "url": request.url?.absoluteString ?? "",
+            "method": request.httpMethod ?? "GET",
+            "headers": request.allHTTPHeaderFields ?? [:],
+            "timeout": request.timeoutInterval,
+            "mode": scripted == nil ? "REAL_UNMODIFIED_TRANSPORT" : "MOCK_NO_NETWORK"
+        ]
+        do {
+            try check(
+                request.url?.host == "127.0.0.1" && request.url?.port == 11434,
+                "Unexpected translation endpoint"
+            )
+            try check(Date().timeIntervalSince(started) < 2400, "Bounded translation exceeded 40 minutes")
+            let owned = try validateRequest(request)
+            let data: Data
+            if let scripted {
+                data = try scripted(request)
+                metadata["httpStatus"] = 200
+            } else {
+                let (received, response) = try await URLSession.shared.data(for: request)
+                data = received
+                let http = response as? HTTPURLResponse
+                metadata["httpStatus"] = http?.statusCode
+                try check(http?.statusCode == 200, "Translation HTTP failure")
+            }
+            try data.write(to: prefix.appendingPathExtension("response.json"))
+            let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+            if request.url?.path == "/api/tags" {
+                tagCalls += 1
+                let models = root["models"] as? [[String: Any]] ?? []
+                let model = models.first {
+                    ($0["name"] as? String) == OllamaTranslationProvider.model
+                        || ($0["model"] as? String) == OllamaTranslationProvider.model
+                }
+                try check(
+                    model?["digest"] as? String == Self.digest,
+                    "TranslateGemma digest differs from accepted model"
+                )
+            } else {
+                try check(root["model"] as? String == OllamaTranslationProvider.model, "Chat response model differs")
+                try check(
+                    root["done"] as? Bool == true && root["done_reason"] as? String == "stop",
+                    "Incomplete chat response"
+                )
+                let content = (root["message"] as? [String: Any])?["content"] as? String ?? ""
+                let reply = try JSONDecoder().decode([E2ETranslationRow].self, from: Data(content.utf8))
+                let replyIDs = reply.map(\.cueId)
+                let sourceByID = Dictionary(uniqueKeysWithValues: requests.map { ($0.id, $0.text) })
+                try check(
+                    reply.count == owned.count && Set(replyIDs) == Set(owned) && Set(replyIDs).count == reply.count
+                        && reply.allSatisfy { sourceByID[$0.cueId] == $0.sourceEcho },
+                    "Response emitted missing, duplicate, context-only or source-mismatched ownership"
+                )
+                for row in reply {
+                    rows[row.cueId] = row.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+            }
+            try JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys])
+                .write(to: prefix.appendingPathExtension("metadata.json"))
+            return data
+        } catch {
+            metadata["error"] = String(describing: error)
+            try JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys])
+                .write(to: prefix.appendingPathExtension("metadata.json"))
+            throw error
+        }
+    }
+
+    private func validateRequest(_ request: URLRequest) throws -> [Int] {
+        if request.url?.path == "/api/tags" {
+            try check(request.httpMethod == "GET" && request.httpBody == nil, "Unexpected identity request")
+            return []
+        }
+        try check(request.url?.path == "/api/chat" && request.httpMethod == "POST", "Unexpected translation route")
+        let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any] ?? [:]
+        let bodyText = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+        try check(bodyText.contains(#""properties":{"cueId":{"type":"integer""#),
+                  "Output schema no longer emits cueId before sourceEcho/text")
+        let options = body["options"] as? [String: Any] ?? [:]
+        try check(
+            body["model"] as? String == OllamaTranslationProvider.model && body["stream"] as? Bool == false,
+            "Production translation model/stream changed"
+        )
+        try check(
+            options["num_ctx"] as? Int == 8192 && options["temperature"] as? Int == 0,
+            "Context/options changed"
+        )
+        let messages = body["messages"] as? [[String: String]] ?? []
+        try check(messages.count == 1 && messages[0]["role"] == "user", "Unexpected prompt routing")
+        let prompt = messages[0]["content"] ?? ""
+        let tasksData = Data((prompt.components(separatedBy: "TRANSLATION_TASKS:\n").last ?? "").utf8)
+        let tasks = try JSONDecoder().decode([TranslationOwnershipTask].self, from: tasksData)
+        let ids = tasks.map(\.cueId)
+        try check(
+            !ids.isEmpty && ids.count <= ownershipUnitSize && Set(ids).count == ids.count,
+            "Invalid owned content"
+        )
+        let expected = requests.filter { ids.contains($0.id) }
+        try check(
+            expected.map(\.id) == ids && zip(tasks, expected).allSatisfy { $0.source == $1.text },
+            "Owned source/order changed"
+        )
+        let indices = ids.compactMap { id in requests.firstIndex { $0.id == id } }
+        try check(
+            Set(indices.map { $0 / ownershipUnitSize }).count == 1,
+            "Cross-checkpoint ownership routing"
+        )
+        let schema = body["format"] as? [String: Any] ?? [:]
+        let properties = (schema["items"] as? [String: Any])?["properties"] as? [String: Any] ?? [:]
+        let idSchema = properties["cueId"] as? [String: Any] ?? [:]
+        let sourceSchema = properties["sourceEcho"] as? [String: Any] ?? [:]
+        try check(
+            schema["minItems"] as? Int == ids.count
+                && schema["maxItems"] as? Int == ids.count
+                && idSchema["enum"] as? [Int] == ids
+                && sourceSchema["enum"] as? [String] == expected.map(\.text),
+            "Output ownership schema changed"
+        )
+
+        func jsonLine<T: Decodable>(_ label: String, _ type: T.Type) throws -> T {
+            let lines = prompt.components(separatedBy: "\n").filter { $0.hasPrefix(label) }
+            try check(lines.count == 1, "Missing/duplicate context field: \(label)")
+            return try JSONDecoder().decode(type, from: Data(lines[0].dropFirst(label.count).utf8))
+        }
+
+        let document = try jsonLine("DOCUMENT_CONTEXT (read-only): ", String.self)
+        try check(expected.allSatisfy { $0.context?.document.replacingOccurrences(of: "\n", with: " ") == document }, "Full-document metadata differs")
+        for (task, cue) in zip(tasks, expected) {
+            try check(
+                task.contextBefore == cue.context?.before && task.contextAfter == cue.context?.after,
+                "Owner-scoped local overlap differs for \(cue.id)"
+            )
+        }
+        chats.append(ids)
+        try check(
+            chats.count <= requests.count * 2,
+            "Unexpected extra translation chats"
+        )
+        return ids
+    }
+
+    private func check(_ condition: Bool, _ message: String) throws {
+        guard condition else { throw EndToEndError.failed(message) }
+    }
+}
+
 @main
 struct EndToEndTest {
+    private enum Profile: String {
+        case core
+        case translation
+    }
+
     static func main() async {
         do {
-            guard CommandLine.arguments.count == 3 else {
-                throw EndToEndError.failed("Использование: videotext-e2e <видео> <модель-whisper>")
+            if CommandLine.arguments == [CommandLine.arguments[0], "--translation-wire-self-test"] {
+                try await validateTranslationWireMock()
+                return
+            }
+            let inferredProfile: Profile = CommandLine.arguments.count == 5 ? .translation : .core
+            let profile = ProcessInfo.processInfo.environment["VIDEOTEXT_E2E_PROFILE"]
+                .flatMap(Profile.init(rawValue:)) ?? inferredProfile
+            guard (profile == .core && CommandLine.arguments.count == 3)
+                || (profile == .translation && CommandLine.arguments.count == 5) else {
+                throw EndToEndError.failed(
+                    "Core E2E требует RU-видео и модель Whisper; translation E2E дополнительно требует EN-видео и EN-проект."
+                )
             }
 
             let mediaURL = URL(fileURLWithPath: CommandLine.arguments[1])
@@ -88,6 +340,9 @@ struct EndToEndTest {
             try require(WhisperModelLocator().bestModelPath() == modelPath, "Автопоиск выбрал неверную модель Whisper")
             try validateTimecodes()
             try validateZeroDurationSubtitles()
+            if profile == .translation {
+                try await validateTranslationWireMock()
+            }
             try await validateUserOperationSurface()
 
             let initialController = ProcessController()
@@ -192,6 +447,32 @@ struct EndToEndTest {
                 requireWhisperProgress: false
             )
             try validateHybridTopics(initialResult.projectURL)
+            if profile == .translation {
+                try await validateRealTranslation(
+                    mediaURL: mediaURL,
+                    projectURL: initialResult.projectURL,
+                    modelPath: modelPath,
+                    sourceLanguage: .ru,
+                    targetLanguage: .en
+                )
+                let englishMediaURL = URL(fileURLWithPath: CommandLine.arguments[3])
+                let englishProjectURL = URL(fileURLWithPath: CommandLine.arguments[4], isDirectory: true)
+                try require(
+                    FileManager.default.fileExists(atPath: englishMediaURL.path),
+                    "Английское тестовое видео не найдено"
+                )
+                try require(
+                    FileManager.default.fileExists(atPath: ProjectLayout(root: englishProjectURL).manifestURL.path),
+                    "Английский тестовый проект не найден"
+                )
+                try await validateRealTranslation(
+                    mediaURL: englishMediaURL,
+                    projectURL: englishProjectURL,
+                    modelPath: modelPath,
+                    sourceLanguage: .en,
+                    targetLanguage: .ru
+                )
+            }
             try await validateExplicitTopicVariant(
                 mediaURL: mediaURL,
                 projectURL: initialResult.projectURL,
@@ -313,12 +594,614 @@ struct EndToEndTest {
             try require(finalHistory.contains { $0.projectPath == initialResult.projectURL.path && $0.status == .completed }, "История не обновилась после продолжения")
             try require(noActiveTools(), "После E2E остались активные videotext/whisper-cli/ffmpeg/ffprobe")
 
-            print("E2E PASS: Human Review, гибридные темы, обычные и обработанный фрагменты, ffprobe, кэш и остановка проверены")
+            if profile == .core {
+                print("CORE_E2E_PASS: bundled SeminarText, Human Review, gemma3 topics, fragments, result discovery, reopen, ffprobe and cancellation; translation not required")
+            } else {
+                print("TRANSLATION_E2E_PASS: Human Review, real TranslateGemma BookText ownership/cache/resume/provenance, gemma3 topics, fragments, ffprobe and cancellation")
+            }
+            print("E2E PASS")
             print("QA_PROJECT=\(initialResult.projectURL.path)")
         } catch {
             fputs("E2E FAIL: \(error.localizedDescription)\n", stderr)
             exit(1)
         }
+    }
+
+    private static func validateRealTranslation(
+        mediaURL: URL,
+        projectURL: URL,
+        modelPath: String,
+        sourceLanguage: ArtifactLanguage,
+        targetLanguage: ArtifactLanguage
+    ) async throws {
+        let layout = ProjectLayout(root: projectURL)
+        let store = ProjectStore()
+        let before = try store.load(from: projectURL)
+        try require(
+            before.languageProfile?.effective == sourceLanguage,
+            "Release translation source language differs from the retained project"
+        )
+        try require(sourceLanguage != targetLanguage, "Release translation languages must differ")
+        try require(
+            (before.durationSeconds ?? 0) > 0 && (before.durationSeconds ?? 0) <= 190,
+            "Translation media exceeds the bounded short-media contract"
+        )
+
+        let localizedSourceURL = layout.subtitlesURL(language: sourceLanguage)
+        let materializesLegacySource = !FileManager.default.fileExists(atPath: localizedSourceURL.path)
+        let sourceURL = materializesLegacySource ? layout.fullSRTURL : localizedSourceURL
+        let source = try SRTService().load(from: sourceURL)
+        try require((1...128).contains(source.count), "Bounded full-document translation needs 1...128 cues")
+        var sourceFiles = [
+            layout.fullSRTURL,
+            layout.transcriptURL
+        ]
+        if !materializesLegacySource {
+            sourceFiles += [localizedSourceURL, layout.transcriptURL(language: sourceLanguage)]
+        }
+        let sourceBytes = try sourceFiles.map { try Data(contentsOf: $0) }
+        let sourceDates = sourceFiles.map { modificationDate($0) }
+        let evidenceRoot = ProcessInfo.processInfo.environment["QA_E2E_EVIDENCE_DIR"].map {
+            URL(fileURLWithPath: $0, isDirectory: true)
+        } ?? mediaURL.deletingLastPathComponent()
+        let evidence = evidenceRoot
+            .appendingPathComponent(
+                "real-translation-\(sourceLanguage.rawValue)-to-\(targetLanguage.rawValue)-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        let defaultAdapter = TranslationAdapter()
+        try require(
+            defaultAdapter.batchSize == 32 && defaultAdapter.maximumAttempts == 2,
+            "Default translation execution policy changed"
+        )
+        let wire = try E2ETranslationWire(cues: source, media: mediaURL, directory: evidence)
+        let provider = OllamaTranslationProvider(transport: { try await wire.send($0) })
+        let adapter = TranslationAdapter(provider: provider)
+        try require(
+            OllamaTranslationProvider.model == "translategemma:4b"
+                && OllamaTranslationProvider.protocolVersion == E2ETranslationWire.protocolVersion
+                && TranslationContextPlan.contract == E2ETranslationWire.contract,
+            "Accepted model/protocol/context contract changed"
+        )
+        let settings = WorkflowSettings(
+            mediaURL: mediaURL,
+            projectURL: projectURL,
+            selectedOperations: [.translateTranscript],
+            mode: .resumeProject,
+            rangeStart: 0,
+            rangeEnd: 1,
+            fragmentName: "",
+            burnFragmentSubtitles: false,
+            subtitleStyle: .standard,
+            selectedTopicID: nil,
+            whisperModelPath: modelPath,
+            whisperLanguage: "auto",
+            sourceHumanReviewEnabled: false,
+            translationHumanReviewEnabled: false,
+            fillerAnalysisBeforeReview: false
+        )
+
+        func engine(_ controller: ProcessController) -> WorkflowEngine {
+            WorkflowEngine(controller: controller, translationAdapter: adapter)
+        }
+
+        func assertSourceUnchanged() throws {
+            for (index, url) in sourceFiles.enumerated() {
+                let currentBytes = try Data(contentsOf: url)
+                try require(currentBytes == sourceBytes[index], "Translation changed source bytes: \(url.path)")
+                try require(modificationDate(url) == sourceDates[index], "Translation rewrote source: \(url.path)")
+            }
+        }
+
+        func assertLegacySourceWasMaterialized() throws {
+            guard materializesLegacySource else { return }
+            let localized = try SRTService().load(from: localizedSourceURL)
+            try require(
+                localized.count == source.count
+                    && zip(localized, source).allSatisfy {
+                        $0.id == $1.id && $0.start == $1.start && $0.end == $1.end && $0.text == $1.text
+                    },
+                "Legacy full.srt was not materialized as the active source language artifact"
+            )
+            let localizedTranscript = try String(contentsOf: layout.transcriptURL(language: sourceLanguage), encoding: .utf8)
+            try require(
+                localizedTranscript == source.map(\.text).joined(separator: "\n\n") + "\n",
+                "Legacy full.srt was not materialized as the active source language transcript"
+            )
+        }
+
+        func saveManifest(_ name: String) throws {
+            let manifestBytes = try Data(contentsOf: layout.manifestURL)
+            try manifestBytes.write(to: evidence.appendingPathComponent(name))
+        }
+
+        let identity = TranslationModelIdentity(
+            model: OllamaTranslationProvider.model,
+            digest: E2ETranslationWire.digest,
+            protocolVersion: E2ETranslationWire.protocolVersion
+        )
+        let plan = try TranslationContextPlan(
+            cues: source,
+            documentTitle: TranslationContextPlan.documentTitle(for: mediaURL),
+            chunkSize: defaultAdapter.batchSize
+        )
+        let wireContextIdentity = wire.contextIdentity
+        try require(
+            plan.contextIdentity == wireContextIdentity,
+            "Independent full-document context fingerprint differs"
+        )
+        let usesSelectedTiming = try SelectedTimingVerticalSlice().loadPersistedSource(
+            projectURL: projectURL,
+            mediaURL: mediaURL
+        ) != nil
+        let executionController = ProcessController()
+        let resumed: WorkflowResult
+        do {
+            resumed = try await engine(executionController).run(settings: settings, onLog: { print($0) })
+        } catch {
+            guard !usesSelectedTiming else { throw error }
+            try assertLegacySourceWasMaterialized()
+            try require(
+                error.localizedDescription.contains("не может быть автоматически утверждён"),
+                "Legacy full.srt rejected a translation without a fail-closed error"
+            )
+            let failedManifest = try store.load(from: projectURL)
+            let targetRevision = failedManifest.transcriptRevisions?.last(where: {
+                $0.language == targetLanguage && $0.origin == .translated
+            })
+            let report = try store.decoder.decode(
+                TranslationReport.self,
+                from: Data(contentsOf: layout.translationReportURL(source: sourceLanguage, target: targetLanguage))
+            )
+            let fallback = try SRTService().load(from: layout.subtitlesURL(language: targetLanguage))
+            try require(
+                targetRevision?.reviewStatus == .pending
+                    && failedManifest.activeTranscriptRevision(for: targetLanguage) == nil
+                    && report.status == .needsReview
+                    && !report.reviewTaskIDs.isEmpty,
+                "Legacy full.srt promoted an untranslated fallback revision"
+            )
+            let targetArtifacts = (failedManifest.artifacts ?? []).filter {
+                $0.sourceRevision == targetRevision?.id
+            }
+            try require(
+                !targetArtifacts.isEmpty
+                    && targetArtifacts.allSatisfy { $0.validationStatus == .needsReview }
+                    && fallback.count == source.count
+                    && zip(fallback, source).allSatisfy { $0.id == $1.id && $0.text == $1.text },
+                "Legacy full.srt exposed source fallback as a ready translation"
+            )
+            try require(
+                failedManifest.workflow?.status == .failed
+                    && failedManifest.workflow?.operations[WorkflowOperation.translateTranscript.rawValue]?.status == .failed,
+                "Legacy full.srt did not record failed translation state"
+            )
+            do {
+                _ = try await engine(ProcessController()).run(settings: settings, onLog: { print($0) })
+                throw EndToEndError.failed("Legacy full.srt resume converted source fallback into success")
+            } catch {
+                try require(
+                    error.localizedDescription.contains("не может быть автоматически утверждён"),
+                    "Legacy full.srt resume changed the fail-closed outcome"
+                )
+            }
+            try assertSourceUnchanged()
+            try saveManifest("manifest-legacy-fallback-failed.json")
+            try require(noActiveTools(), "Legacy full.srt fail-closed translation left active child processes")
+            print("REAL_TRANSLATION_FAIL_CLOSED_PASS \(sourceLanguage.rawValue)->\(targetLanguage.rawValue): valid full.srt preserved, unresolved source fallback is pending/needsReview and cannot become ready through resume")
+            print("TRANSLATION_EVIDENCE=\(evidence.path)")
+            return
+        }
+        try assertLegacySourceWasMaterialized()
+        try require(
+            resumed.checkpoint == nil && resumed.topicReviewCheckpoint == nil,
+            "Translation unexpectedly opened a review checkpoint"
+        )
+        let current = try store.load(from: projectURL)
+        guard let sourceRevision = current.activeTranscriptRevision(for: sourceLanguage) else {
+            throw EndToEndError.failed("Translation did not create the source revision")
+        }
+        let checkpoints = try TranslationCheckpointStore(
+            directory: layout.translationCacheDirectory(source: sourceLanguage, target: targetLanguage),
+            plan: plan,
+            identity: identity,
+            source: sourceLanguage,
+            target: targetLanguage,
+            sourceIdentity: sourceRevision.id
+        )
+        if let persistedSelectedSource = try SelectedTimingVerticalSlice().loadPersistedSource(
+            projectURL: projectURL,
+            mediaURL: mediaURL
+        ) {
+            let selectedSlice = SelectedTimingVerticalSlice()
+            let selectedSource = try selectedSlice.sourceDocument(
+                persistedSelectedSource,
+                reconciledWith: source
+            )
+            let selectedURL = layout.selectedTimingTranslationsURL(source: sourceLanguage, target: targetLanguage)
+            let selected = try store.decoder.decode(
+                TimedTranslationDocument.self,
+                from: Data(contentsOf: selectedURL)
+            )
+            try selected.validate()
+            try require(
+                selected.source == selectedSource
+                    && selected.units.map(\.sourceUnitID) == selectedSource.units.map(\.id),
+                "Selected timing translation lost source-unit ownership"
+            )
+            let translated = try SRTService().load(from: layout.subtitlesURL(language: targetLanguage))
+            let expectedCues = try selected.subtitleCues()
+            try require(
+                translated.count == expectedCues.count
+                    && zip(translated, expectedCues).allSatisfy {
+                        $0.id == $1.id && $0.start == $1.start && $0.end == $1.end && $0.text == $1.text
+                    },
+                "Selected timing translation changed unit order, source ranges or text"
+            )
+            let initialSelectedChats = await wire.chats
+            try require(initialSelectedChats.isEmpty, "Selected timing translation fell back to retired ownership routing")
+
+            let reportURL = layout.translationReportURL(source: sourceLanguage, target: targetLanguage)
+            let report = try store.decoder.decode(TranslationReport.self, from: Data(contentsOf: reportURL))
+            let (_, reopenedMedia) = try ProjectStore().openProject(at: projectURL)
+            try require(
+                reopenedMedia.standardizedFileURL == mediaURL.standardizedFileURL
+                    && report.schemaVersion == 3
+                    && report.sourceRevisionID == sourceRevision.id
+                    && report.cueCount == expectedCues.count
+                    && report.sourceLanguage == sourceLanguage
+                    && report.targetLanguage == targetLanguage
+                    && report.status == .ready
+                    && report.reviewTaskIDs.isEmpty
+                    && report.model == selected.model.model
+                    && report.modelDigest == selected.model.digest
+                    && report.protocolVersion == selected.model.protocolVersion
+                    && report.contextIdentity == selectedSource.upstreamManifestSHA256,
+                "Selected timing translation report lost exact provenance"
+            )
+            let outputs = [layout.subtitlesURL(language: targetLanguage), layout.transcriptURL(language: targetLanguage), reportURL, selectedURL]
+            let outputBytes = try outputs.map { try Data(contentsOf: $0) }
+            let outputDates = outputs.map { modificationDate($0) }
+            let reopenedController = ProcessController()
+            _ = try await engine(reopenedController).run(settings: settings, onLog: { print($0) })
+            let completedSelectedChats = await wire.chats
+            try require(completedSelectedChats.isEmpty, "Selected timing completed resume used ownership routing")
+            for (index, url) in outputs.enumerated() {
+                let currentBytes = try Data(contentsOf: url)
+                let currentDate = modificationDate(url)
+                try require(currentBytes == outputBytes[index] && currentDate == outputDates[index], "Selected timing completed resume rewrote translation output")
+            }
+            try FileManager.default.removeItem(at: reportURL)
+            let cachedController = ProcessController()
+            _ = try await engine(cachedController).run(settings: settings, onLog: { print($0) })
+            let replaySelectedChats = await wire.chats
+            try require(replaySelectedChats.isEmpty, "Selected timing cache replay used ownership routing")
+            let rebuilt = try store.decoder.decode(TranslationReport.self, from: Data(contentsOf: reportURL))
+            try require(
+                rebuilt.targetRevisionID == report.targetRevisionID
+                    && rebuilt.modelDigest == report.modelDigest
+                    && rebuilt.protocolVersion == report.protocolVersion
+                    && rebuilt.contextIdentity == report.contextIdentity
+                    && rebuilt.status == .ready,
+                "Selected timing cache replay changed provenance"
+            )
+            try assertSourceUnchanged()
+            try saveManifest("manifest-selected-timing-cache-replayed.json")
+            try require(noActiveTools(), "Selected timing translation left active child processes")
+            print("REAL_TRANSLATION_PASS \(sourceLanguage.rawValue)->\(targetLanguage.rawValue): selected JSON-full source units, text-only TranslateGemma, exact source ranges, source bytes, resume/cache, manifest/reopen")
+            print("TRANSLATION_EVIDENCE=\(evidence.path)")
+            return
+        }
+        let chats = await wire.chats
+        let expectedUnits = plan.units.map { $0.owned.map(\.id) }
+        let expectedBatches = try plan.units.map { unit in
+            try OllamaTranslationProvider().ownershipBatches(
+                cues: unit.owned,
+                source: sourceLanguage,
+                target: targetLanguage,
+                model: OllamaTranslationProvider.model,
+                correction: nil
+            ).map { $0.map(\.id) }
+        }
+        var chatIndex = 0
+        for (unitIndex, expectedIDs) in expectedUnits.enumerated() {
+            let unitStart = chatIndex
+            for batchIDs in expectedBatches[unitIndex] {
+                try require(
+                    chatIndex < chats.count && chats[chatIndex] == batchIDs,
+                    "Ownership unit batch was skipped, reordered or rerouted"
+                )
+                chatIndex += 1
+            }
+            let nextExpected = expectedBatches.indices.contains(unitIndex + 1)
+                ? expectedBatches[unitIndex + 1].first
+                : nil
+            while chatIndex < chats.count && chats[chatIndex] != nextExpected {
+                let retryIDs = chats[chatIndex]
+                let retrySet = Set(retryIDs)
+                try require(
+                    !retryIDs.isEmpty
+                        && retryIDs == expectedIDs.filter { retrySet.contains($0) }
+                        && retrySet.isSubset(of: Set(expectedIDs)),
+                    "Retry escaped its ownership unit or changed cue order"
+                )
+                chatIndex += 1
+            }
+            try require(
+                chatIndex - unitStart <= expectedBatches[unitIndex].count * defaultAdapter.maximumAttempts,
+                "Ownership unit exceeded bounded batch retries"
+            )
+        }
+        try require(
+            chatIndex == chats.count,
+            "Resume repeated completed ownership or made extra chats"
+        )
+        let translated = try SRTService().load(from: layout.subtitlesURL(language: targetLanguage))
+        try require(
+            translated.count == source.count
+                && translated.map(\.id) == source.map(\.id)
+                && zip(source, translated).allSatisfy { $0.start == $1.start && $0.end == $1.end },
+            "Translation changed exact count/IDs/order/times"
+        )
+        let rawRows = await wire.rows
+        try require(
+            Set(rawRows.keys) == Set(source.map(\.id))
+                && translated.allSatisfy { rawRows[$0.id] == $0.text },
+            "Final SRT contains fallback, context-only output or differs from real owned replies"
+        )
+
+        let reportURL = layout.translationReportURL(source: sourceLanguage, target: targetLanguage)
+        let reportBytes = try Data(contentsOf: reportURL)
+        let report = try store.decoder.decode(TranslationReport.self, from: reportBytes)
+        let (manifest, reopenedMedia) = try ProjectStore().openProject(at: projectURL)
+        try require(
+            reopenedMedia.standardizedFileURL == mediaURL.standardizedFileURL,
+            "Translated project reopened the wrong source"
+        )
+        try require(
+            report.schemaVersion == 3
+                && report.sourceRevisionID == sourceRevision.id
+                && report.cueCount == source.count
+                && report.sourceLanguage == sourceLanguage
+                && report.targetLanguage == targetLanguage
+                && report.status == .ready
+                && report.reviewTaskIDs.isEmpty,
+            "Translation report has unresolved technical validation or wrong source lineage"
+        )
+        try require(
+            report.model == identity.model
+                && report.modelDigest == identity.digest
+                && report.protocolVersion == identity.protocolVersion
+                && report.contextIdentity == wireContextIdentity,
+            "Translation report lost exact model/protocol/context provenance"
+        )
+        let translatedSubtitleBytes = try Data(contentsOf: layout.subtitlesURL(language: targetLanguage))
+        let translatedTranscriptBytes = try Data(contentsOf: layout.transcriptURL(language: targetLanguage))
+        try require(
+            report.subtitleSHA256 == TranslationFingerprint.data(translatedSubtitleBytes)
+                && report.transcriptSHA256 == TranslationFingerprint.data(translatedTranscriptBytes),
+            "Translation output hashes differ"
+        )
+        guard let revision = manifest.activeTranscriptRevision(for: targetLanguage) else {
+            throw EndToEndError.failed("Reopened manifest lost translated revision")
+        }
+        try require(
+            revision.id == report.targetRevisionID
+                && revision.origin == .translated
+                && revision.parentRevisionID == sourceRevision.id,
+            "Manifest translation ownership lineage differs"
+        )
+        let artifacts = manifest.artifacts ?? []
+        for id in [revision.transcriptArtifactID, revision.subtitleArtifactID] {
+            try require(
+                artifacts.contains {
+                    $0.id == id
+                        && $0.model == identity.model
+                        && $0.sourceRevision == revision.id
+                        && $0.validationStatus == .ready
+                },
+                "Manifest lost a ready translated artifact: \(id)"
+            )
+        }
+        try require(
+            manifest.workflow?.operations[WorkflowOperation.translateTranscript.rawValue]?.status == .completed,
+            "Manifest did not complete translation"
+        )
+        try saveManifest("manifest-translated.json")
+
+        let outputs = [
+            layout.subtitlesURL(language: targetLanguage),
+            layout.transcriptURL(language: targetLanguage),
+            reportURL
+        ]
+        let outputBytes = try outputs.map { try Data(contentsOf: $0) }
+        let outputDates = outputs.map { modificationDate($0) }
+        let reopenedController = ProcessController()
+        _ = try await engine(reopenedController).run(settings: settings, onLog: { print($0) })
+        let chatsAfterCompletedResume = await wire.chats
+        try require(chatsAfterCompletedResume == chats, "Completed resume unnecessarily called chat")
+        for (index, url) in outputs.enumerated() {
+            let currentBytes = try Data(contentsOf: url)
+            try require(
+                currentBytes == outputBytes[index] && modificationDate(url) == outputDates[index],
+                "Completed resume rewrote translation output"
+            )
+        }
+
+        // Rebuild only the generated report from the real persisted unit checkpoints.
+        try FileManager.default.removeItem(at: reportURL)
+        let cachedController = ProcessController()
+        _ = try await engine(cachedController).run(settings: settings, onLog: { print($0) })
+        let chatsAfterCheckpointReplay = await wire.chats
+        try require(chatsAfterCheckpointReplay == chats, "Real checkpoint replay unnecessarily called chat")
+        let rebuiltBytes = try Data(contentsOf: reportURL)
+        let rebuilt = try store.decoder.decode(TranslationReport.self, from: rebuiltBytes)
+        try require(
+            rebuilt.targetRevisionID == report.targetRevisionID
+                && rebuilt.modelDigest == report.modelDigest
+                && rebuilt.protocolVersion == report.protocolVersion
+                && rebuilt.contextIdentity == report.contextIdentity
+                && rebuilt.reviewTaskIDs.isEmpty
+                && rebuilt.status == .ready,
+            "Checkpoint replay changed provenance or left review issues"
+        )
+        for (index, url) in outputs.prefix(2).enumerated() {
+            let currentBytes = try Data(contentsOf: url)
+            try require(currentBytes == outputBytes[index], "Checkpoint replay changed translated bytes")
+        }
+        for unit in plan.units {
+            try require(
+                checkpoints.load(unit).map(\.cueID) == unit.owned.map(\.id),
+                "Checkpoint ownership is incomplete"
+            )
+        }
+        let tagCalls = await wire.tagCalls
+        try require(
+            tagCalls == 3,
+            "Initial translation and checkpoint replay did not perform the expected model identity checks"
+        )
+        for controller in [executionController, reopenedController, cachedController] {
+            let whisperLaunches = controller.launchedExecutables.filter {
+                URL(fileURLWithPath: $0).lastPathComponent == "whisper-cli"
+            }
+            try require(
+                whisperLaunches.count == 1,
+                "Translation resume performed Whisper work beyond the mandatory diagnostics probe"
+            )
+        }
+        try assertSourceUnchanged()
+        try saveManifest("manifest-cache-replayed.json")
+        try require(noActiveTools(), "Translation left active child processes")
+        print("REAL_TRANSLATION_PASS \(sourceLanguage.rawValue)->\(targetLanguage.rawValue): full document metadata/local overlap/owned routing, exact cue IDs/count/order/times, source bytes, completed resume, real checkpoint replay, manifest/reopen, pinned digest/protocol/context")
+        print("TRANSLATION_EVIDENCE=\(evidence.path)")
+    }
+
+    private static func validateTranslationWireMock() async throws {
+        guard let path = ProcessInfo.processInfo.environment["QA_E2E_EVIDENCE_DIR"] else {
+            throw EndToEndError.failed("Mock checks require an owned evidence directory")
+        }
+        let directory = URL(fileURLWithPath: path)
+            .appendingPathComponent("wire-mock-\(UUID().uuidString)", isDirectory: true)
+        let media = directory.appendingPathComponent("recording.mp4")
+        let cues: [SubtitleCue] = (0..<35).map { index -> SubtitleCue in
+            let sourceText = String(repeating: "Проверяем запись номер \(index). ", count: 8)
+                .trimmingCharacters(in: .whitespaces)
+            return SubtitleCue(
+                id: index * 3 + 7,
+                start: Double(index * 2) + 0.125,
+                end: Double(index * 2) + 1.625,
+                text: sourceText
+            )
+        }
+        let wire = try E2ETranslationWire(
+            cues: cues,
+            media: media,
+            directory: directory,
+            scripted: { request in
+                if request.url?.path == "/api/tags" {
+                    return try JSONSerialization.data(withJSONObject: [
+                        "models": [[
+                            "name": OllamaTranslationProvider.model,
+                            "digest": E2ETranslationWire.digest
+                        ]]
+                    ])
+                }
+                let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any] ?? [:]
+                let messages = body["messages"] as? [[String: String]] ?? []
+                let message = messages.first?["content"] ?? ""
+                let tasksData = Data((message.components(separatedBy: "TRANSLATION_TASKS:\n").last ?? "").utf8)
+                let tasks = try JSONDecoder().decode([TranslationOwnershipTask].self, from: tasksData)
+                let rows = tasks.reversed().map { task in
+                    let translatedText = String(
+                        repeating: "We check record number \((task.cueId - 7) / 3). ",
+                        count: 8
+                    ).trimmingCharacters(in: .whitespaces)
+                    return E2ETranslationRow(
+                        cueId: task.cueId,
+                        sourceEcho: task.source,
+                        text: translatedText
+                    )
+                }
+                return try JSONSerialization.data(withJSONObject: [
+                    "model": OllamaTranslationProvider.model,
+                    "done": true,
+                    "done_reason": "stop",
+                    "message": [
+                        "content": String(decoding: try JSONEncoder().encode(rows), as: UTF8.self)
+                    ]
+                ])
+            }
+        )
+        let adapter = TranslationAdapter(
+            provider: OllamaTranslationProvider(transport: { try await wire.send($0) })
+        )
+        let cache = directory.appendingPathComponent("cache")
+
+        func run(_ cancel: Bool) async throws -> TranslationAdapterResult {
+            try await adapter.translate(
+                cues: cues,
+                source: ArtifactLanguage.ru,
+                target: ArtifactLanguage.en,
+                documentTitle: TranslationContextPlan.documentTitle(for: media),
+                sourceIdentity: "mock-source",
+                checkpointDirectory: cache,
+                onProgress: { fraction in
+                    if cancel && fraction > 0 {
+                        withUnsafeCurrentTask { $0?.cancel() }
+                    }
+                },
+                onLog: { print($0) }
+            )
+        }
+
+        let stopped = Task { try await run(true) }
+        do {
+            _ = try await stopped.value
+            throw EndToEndError.failed("Mock checkpoint cancellation failed")
+        } catch is CancellationError {
+            // Expected after the first persisted ownership unit.
+        }
+        let result = try await run(false)
+        let replay = try await run(false)
+        let chats = await wire.chats
+        let plan = try TranslationContextPlan(
+            cues: cues,
+            documentTitle: TranslationContextPlan.documentTitle(for: media),
+            chunkSize: adapter.batchSize
+        )
+        let expectedChats = try plan.units.flatMap { unit in
+            try OllamaTranslationProvider().ownershipBatches(
+                cues: unit.owned,
+                source: .ru,
+                target: .en,
+                model: OllamaTranslationProvider.model,
+                correction: nil
+            ).map { $0.map(\.id) }
+        }
+        try require(
+            expectedChats.count > plan.units.count && chats == expectedChats,
+            "Mock adaptive batching or replay chat contract changed"
+        )
+        let wireContextIdentity = wire.contextIdentity
+        try require(
+            result.issues.isEmpty
+                && replay.issues.isEmpty
+                && result.contextIdentity == wireContextIdentity,
+            "Mock adapter/context validation failed"
+        )
+        let sourceIDs = cues.map { $0.id }
+        try require(
+            result.cues.map(\.id) == sourceIDs
+                && zip(cues, result.cues).allSatisfy {
+                    $0.start == $1.start && $0.end == $1.end
+                },
+            "Mock reordered reply changed exact IDs/times"
+        )
+        try require(
+            zip(result.cues, replay.cues).allSatisfy { $0.text == $1.text },
+            "Mock checkpoint replay changed text"
+        )
+        print("TRANSLATION_WIRE_MOCK_PASS: independent context oracle, exact HTTP envelope, reordered rows, cancellation/persisted prefix, resume/cache without extra chat; no network or semantic verdict")
     }
 
     private static func validateInitialProject(
@@ -333,9 +1216,8 @@ struct EndToEndTest {
         try require(directoryExists(layout.videoDirectory), "Не создана папка Video")
         try require(directoryExists(layout.textsDirectory), "Не создана папка Texts")
         try require(directoryExists(layout.supportDirectory), "Не создана папка Support files")
-        let requiredFiles = [
+        var requiredFiles = [
             layout.manifestURL,
-            layout.sourceAudioURL,
             layout.diagnosticsURL,
             layout.timelineValidationURL,
             layout.ffprobeReportURL,
@@ -345,6 +1227,25 @@ struct EndToEndTest {
             layout.topicsTextURL,
             layout.subtitledVideoURL
         ]
+        let selectedTimingSource = nonemptyFile(at: layout.selectedTimingSourceUnitsURL)
+        if selectedTimingSource {
+            let selected = try JSONDecoder().decode(TimedSourceDocument.self, from: Data(contentsOf: layout.selectedTimingSourceUnitsURL))
+            try selected.validateCoverage()
+            try require(selected.selectedTimingEnd != nil, "Selected timing source не содержит published timing envelope")
+        } else if nonemptyFile(at: layout.seminarTextCoreEvidenceURL) {
+            let evidence = try JSONDecoder().decode(
+                SeminarTextCoreTranscriptionEvidence.self,
+                from: Data(contentsOf: layout.seminarTextCoreEvidenceURL)
+            )
+            try require(
+                evidence.selectedTimingManifestSHA256 != nil
+                    && evidence.selectedWhisperJSONSHA256 == SelectedTimingHash.file(layout.whisperJSONURL),
+                "Core SeminarText provenance не связан с выбранной Whisper-попыткой"
+            )
+            requiredFiles.append(layout.seminarTextCoreEvidenceURL)
+        } else {
+            requiredFiles.append(layout.sourceAudioURL)
+        }
         for url in requiredFiles { try require(nonemptyFile(at: url), "Отсутствует или пуст результат: \(url.path)") }
         let cues = try SRTService().load(from: layout.fullSRTURL)
         try require(!cues.isEmpty, "full.srt не содержит субтитров")
@@ -368,7 +1269,7 @@ struct EndToEndTest {
         try require(file.adapter == "HybridTopicAdapter", "Использован неверный адаптер тем")
         try require(file.sourceSignature == StableTopicHash.string(sourceText), "Сигнатура исходного SRT не совпадает")
         try require(file.embeddingModel?.contains("embeddinggemma") == true, "В topics.json не записана embedding-модель")
-        try require(file.languageModel?.isEmpty == false, "В topics.json не записана языковая модель")
+        try require(file.languageModel == "gemma3:4b", "Темы построены не через gemma3:4b")
         try require(file.topics.allSatisfy { topic in
             let wordCount = topic.title.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).count
             return (3...8).contains(wordCount)
@@ -1025,9 +1926,10 @@ struct EndToEndTest {
     @MainActor
     private static func validateUserOperationSurface() async throws {
         try require(
-            WorkflowOperation.userSelectable == [.transcribe, .translateTranscript, .topicTimecoding, .burnSubtitles],
+            WorkflowOperation.userSelectable == [.transcribe, .topicTimecoding, .burnSubtitles],
             "В пользовательском меню присутствуют служебные операции"
         )
+        try require(!WorkflowOperation.translateTranscript.isEnabledForCurrentRelease, "Core release неожиданно включил перевод")
         try require(WorkflowOperation.transcribe.title == "Расшифровать всё видео", "Операция расшифровки не переименована")
         try require(
             WorkflowViewModel().topicGranularity == .normal,

@@ -1,0 +1,125 @@
+{
+  "httpStatus" : 200,
+  "index" : 1,
+  "method" : "POST",
+  "originalBodyFile" : "001-request-original.body.bin",
+  "originalBodySHA256" : "1ffb9274d7d83b668ac41432cb3d99ab8c5216f9088ae216cd0a4c1b267ee415",
+  "originalHeaders" : {
+    "Content-Type" : "application\/json"
+  },
+  "originalTimeout" : 300,
+  "overrideApplied" : true,
+  "path" : "\/api\/chat",
+  "rawRows" : [
+    {
+      "cueId" : 1,
+      "text" : "Okay, I'll ask later."
+    },
+    {
+      "cueId" : 2,
+      "text" : "Irina Adamovich."
+    },
+    {
+      "cueId" : 3,
+      "text" : "I'm here. Hello."
+    },
+    {
+      "cueId" : 4,
+      "text" : "Hello. Ready. Thank you."
+    },
+    {
+      "cueId" : 5,
+      "text" : "Lyubov Zueva."
+    },
+    {
+      "cueId" : 6,
+      "text" : "Hello. I'm here."
+    },
+    {
+      "cueId" : 7,
+      "text" : "Hello. Ready. Thank you."
+    },
+    {
+      "cueId" : 8,
+      "text" : "Margarita Miroschenko."
+    },
+    {
+      "cueId" : 9,
+      "text" : "Good afternoon. I'm here."
+    },
+    {
+      "cueId" : 10,
+      "text" : "Ready. Thank you."
+    },
+    {
+      "cueId" : 11,
+      "text" : "Marina Kushnareva."
+    },
+    {
+      "cueId" : 12,
+      "text" : "Good evening. I'm here."
+    },
+    {
+      "cueId" : 13,
+      "text" : "Tatiana."
+    },
+    {
+      "cueId" : 14,
+      "text" : "I'm here."
+    },
+    {
+      "cueId" : 15,
+      "text" : "Ready."
+    },
+    {
+      "cueId" : 16,
+      "text" : "So, we have distance learners now."
+    },
+    {
+      "cueId" : 17,
+      "text" : "Yuri, and I'm still"
+    },
+    {
+      "cueId" : 18,
+      "text" : "Oh, yes, Svetlana."
+    },
+    {
+      "cueId" : 19,
+      "text" : "Hello. I'm here."
+    },
+    {
+      "cueId" : 20,
+      "text" : "Hello."
+    },
+    {
+      "cueId" : 21,
+      "text" : "Something keeps throwing me off today."
+    },
+    {
+      "cueId" : 22,
+      "text" : "It's just awful every minute."
+    },
+    {
+      "cueId" : 23,
+      "text" : "Well, I'm ready."
+    },
+    {
+      "cueId" : 24,
+      "text" : "Now definitely distance learners, right?"
+    }
+  ],
+  "responseFile" : "001-response.raw.bin",
+  "responseHeaders" : {
+    "Content-Length" : "1465",
+    "Content-Type" : "application\/json; charset=utf-8",
+    "Date" : "Sat, 03 Oct 2026 13:50:01 GMT"
+  },
+  "responseSHA256" : "c4d81f996abc08300b976c3f95fce74ff276512b310efe8f2ff4ddbdc660b7d5",
+  "sentBodyFile" : "001-request-sent.body.bin",
+  "sentBodySHA256" : "b74a0ef94b28da95b8a6cba6966e8433e50c7afb37a45f7a8e7e1907a4ef062f",
+  "sentHeaders" : {
+    "Content-Type" : "application\/json"
+  },
+  "sentTimeout" : 180,
+  "url" : "http:\/\/127.0.0.1:11434\/api\/chat"
+}

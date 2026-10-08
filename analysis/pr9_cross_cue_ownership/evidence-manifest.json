@@ -1,0 +1,43 @@
+{
+  "baseHead": "cdd35fe6ccc6decef2dd0f2224a2c1adbbdc667d",
+  "createdAt": "2026-10-04T07:47:48Z",
+  "githubActions": {
+    "annotation": "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings",
+    "jobId": 111302732385,
+    "runId": 37156042095,
+    "runnerId": 0,
+    "status": "GITHUB_ACTIONS_INFRA_BLOCKED",
+    "steps": []
+  },
+  "model": {
+    "digest": "c49d986b0764f5881c476eb21435bb62b7abc62347aab3d4a6071e811be510a1",
+    "name": "translategemma:4b",
+    "ollamaVersion": "0.33.1"
+  },
+  "outputs": {
+    "enToRuSHA256": "e67185b12fd2ee86b806798caeb20ed0856341861cdcad05959f07de6214a66a",
+    "ruToEnSHA256": "cc30112833a9ec9d1bee837bc316a8d5408aeeecb193200d724642a2fe2f8c95"
+  },
+  "protocol": "translategemma-booktext-owned-tasks-v6-docmeta512-lineage2-overlap2x600-source-echo1-ctx8k",
+  "realModelCommand": "scripts/test_translation_semantic_review.sh analysis/pr9_cross_cue_ownership/en-to-ru-fixture.json analysis/pr9_cross_cue_ownership/en-to-ru-output.json && ../work/videotext-translation-semantic-review-probe analysis/pr9_translation_context/v3/source-fixture.json analysis/pr9_cross_cue_ownership/ru-to-en-output.json",
+  "realModelExitStatus": 0,
+  "translationWireMock": {
+    "networkUsed": false,
+    "result": "TRANSLATION_WIRE_MOCK_PASS"
+  },
+  "sourceHashes": {
+    "Sources/videotext/Adapters/TranslationAdapter.swift": "b2fc13f6844b8c55b02a0a0b26094e9f2da59ce73f8167f4d1bfab92c64b36b7",
+    "Tests/EndToEnd.swift": "d798ec1824b41487949e63f708fddbb8cbe559d8cda61aaf3bd0d58bcce71618",
+    "Tests/TranslationCausalTraceProbe.swift": "93767664daba976a326781faff784fc15e8b465fc50987fcbf3045aef23235b7",
+    "Tests/TranslationOwnershipProbe.swift": "5717bdee727f662032490c2377dc7bc75736327d6b9c091bc0f1250fc5554210",
+    "Tests/TranslationSemanticReviewProbe.swift": "1a94259bb0873e15857e605905017a51ee7bb122a175590f374fa668555926f7"
+  },
+  "structuralIssues": {
+    "enToRu": 0,
+    "ruToEn": 0
+  },
+  "wireDirectoryDigests": {
+    "enToRu": "c660c33eea4903b4b50b3816b6a7cee6ab880ac5b775ac103f3505aa04c70637",
+    "ruToEn": "dbc85c9f3aa68702db684f4a29024ab1fd864f19cd6bd93468365e5e715e5494"
+  }
+}

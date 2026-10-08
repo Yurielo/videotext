@@ -1,0 +1,6138 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+SEMINARTEXT_ENTRYPOINT="${BASH_SOURCE[0]}"
+while [[ -L "$SEMINARTEXT_ENTRYPOINT" ]]; do
+  SEMINARTEXT_ENTRYPOINT_DIR="$(cd -P "$(dirname "$SEMINARTEXT_ENTRYPOINT")" >/dev/null 2>&1 && pwd)"
+  SEMINARTEXT_ENTRYPOINT="$(readlink "$SEMINARTEXT_ENTRYPOINT")"
+  [[ "$SEMINARTEXT_ENTRYPOINT" == /* ]] \
+    || SEMINARTEXT_ENTRYPOINT="$SEMINARTEXT_ENTRYPOINT_DIR/$SEMINARTEXT_ENTRYPOINT"
+done
+SEMINARTEXT_ENTRYPOINT_DIR="$(cd -P "$(dirname "$SEMINARTEXT_ENTRYPOINT")" >/dev/null 2>&1 && pwd)"
+SEMINARTEXT_ENTRYPOINT="$SEMINARTEXT_ENTRYPOINT_DIR/$(basename "$SEMINARTEXT_ENTRYPOINT")"
+# A supervisor owns all queue/subtitle/tool scratch, independently of local traps.
+SEMINARTEXT_TMP_HELPER="$SEMINARTEXT_ENTRYPOINT_DIR/seminartext_modules/owned_tmp.py"
+[[ -f "$SEMINARTEXT_TMP_HELPER" ]] || { echo "Missing owned TMP lifecycle helper" >&2; exit 1; }
+if ! python3 "$SEMINARTEXT_TMP_HELPER" --check; then
+  exec python3 "$SEMINARTEXT_TMP_HELPER" -- /bin/bash "$SEMINARTEXT_ENTRYPOINT" "$@"
+fi
+SEMINARTEXT_VERSION_FILE="${SEMINARTEXT_VERSION_FILE:-$SEMINARTEXT_ENTRYPOINT_DIR/SEMINARTEXT_VERSION}"
+[[ -f "$SEMINARTEXT_VERSION_FILE" ]] || {
+  echo "Ошибка: не найден authoritative version-файл: $SEMINARTEXT_VERSION_FILE" >&2
+  exit 1
+}
+VERSION="$(tr -d '[:space:]' < "$SEMINARTEXT_VERSION_FILE")"
+[[ "$VERSION" =~ ^4\.[0-9]+\.[0-9]+$ ]] || {
+  echo "Ошибка: некорректная версия SeminarText: $VERSION" >&2
+  exit 1
+}
+TRANSCRIPTS_ROOT="${SEMINARTEXT_OUTPUT:-$HOME/Documents/Расшифровки}"
+MODEL="${SEMINARTEXT_MODEL:-}"
+VAD_MODEL="${SEMINARTEXT_VAD_MODEL:-}"
+SEMINARTEXT_PYTHON="${SEMINARTEXT_PYTHON:-$HOME/.seminartext-venv/bin/python}"
+MODE="normal"
+SOURCE_LANGUAGE="ru"
+STRUCTURED_TIMING=0
+FORCE=0
+LIST_ONLY=0
+OPEN_RESULTS=1
+INPUTS=()
+
+# Automated runs must never trigger macOS GUI applications. Interactive shell
+# use keeps the historical auto-open behavior unless the user passes --no-open.
+if [[ "${SEMINARTEXT_HEADLESS:-}" == "1" \
+   || -n "${CI:-}" \
+   || -n "${PYTEST_CURRENT_TEST:-}" \
+   || -n "${CODEX_HOME:-}" ]]; then
+  OPEN_RESULTS=0
+fi
+
+PROJECT_MODE=0
+PROJECT_OUTPUT_DIR=""
+PROJECT_SOURCE_ID=""
+
+PROMPT="Семинар на русском языке. Целостное Метоисцеление, кинезиология, прикладная кинезиология, Биологическое Центрирование, иглорефлексотерапия, акупунктура, меридиан, мышечное тестирование, психосоматика, метафизика, каббала, кли, масах, клипот, сфирот, Новолуние, Полнолуние."
+
+sha256_file() {
+  local file="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  else
+    echo "Ошибка: для runtime-диагностики требуется shasum или sha256sum." >&2
+    return 1
+  fi
+}
+
+resolve_runtime_module() {
+  local kind="$1" override_name filename label override candidate
+  case "$kind" in
+    topics)
+      override_name="SEMINARTEXT_TOPICS_MODULE"
+      filename="seminartext_topics.py"
+      label="Topic Engine"
+      ;;
+    translate)
+      override_name="SEMINARTEXT_TRANSLATE_MODULE"
+      filename="seminartext_translate.py"
+      label="Translate"
+      ;;
+    dataset_governance)
+      override_name="SEMINARTEXT_DATASET_GOVERNANCE_MODULE"
+      filename="dataset_governance.py"
+      label="Dataset Governance"
+      ;;
+    *)
+      echo "Ошибка: неизвестный runtime-модуль: $kind" >&2
+      return 2
+      ;;
+  esac
+
+  override="${!override_name:-}"
+  if [[ -n "$override" ]]; then
+    override="${override/#\~/$HOME}"
+    if [[ -f "$override" ]]; then
+      printf '%s\n' "$override"
+      return 0
+    fi
+    echo "Ошибка: $override_name указывает на отсутствующий $label-модуль:" >&2
+    echo "  $override" >&2
+    echo "Исправьте путь или удалите $override_name, чтобы использовать bundled-модуль." >&2
+    return 1
+  fi
+
+  for candidate in \
+    "$SEMINARTEXT_ENTRYPOINT_DIR/seminartext_modules/$filename" \
+    "$SEMINARTEXT_ENTRYPOINT_DIR/$filename"; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  echo "Ошибка: не найден $label-модуль $filename." >&2
+  echo "Проверены пути:" >&2
+  echo "  $SEMINARTEXT_ENTRYPOINT_DIR/seminartext_modules/$filename" >&2
+  echo "  $SEMINARTEXT_ENTRYPOINT_DIR/$filename" >&2
+  echo "Задайте $override_name=/полный/путь/$filename или установите bundled-модуль рядом с CLI." >&2
+  return 1
+}
+
+runtime_identity() {
+  local topics_module translate_module dataset_governance_module
+  topics_module="$(resolve_runtime_module topics)" || return 1
+  translate_module="$(resolve_runtime_module translate)" || return 1
+  dataset_governance_module="$(resolve_runtime_module dataset_governance)" || return 1
+
+  echo "SeminarText runtime identity"
+  echo "version=$VERSION"
+  echo "cli.path=$SEMINARTEXT_ENTRYPOINT"
+  echo "cli.sha256=$(sha256_file "$SEMINARTEXT_ENTRYPOINT")"
+  echo "topics.path=$topics_module"
+  echo "topics.sha256=$(sha256_file "$topics_module")"
+  echo "topics.engine_id=legacy_ollama_gemma_runtime"
+  echo "topics.role_id=production_legacy"
+  echo "topics.production_runtime=true"
+  echo "topics.production_promoted=false"
+  echo "translate.path=$translate_module"
+  echo "translate.sha256=$(sha256_file "$translate_module")"
+  echo "dataset_governance.path=$dataset_governance_module"
+  echo "dataset_governance.sha256=$(sha256_file "$dataset_governance_module")"
+}
+
+resolve_governance_pair() {
+  local state_override="${SEMINARTEXT_STATE_FILE:-}"
+  local roadmap_override="${SEMINARTEXT_ROADMAP_FILE:-}"
+  local repo_override="${SEMINARTEXT_REPO:-}"
+  local detected_root=""
+
+  if [[ -n "$state_override" || -n "$roadmap_override" ]]; then
+    [[ -n "$state_override" && -n "$roadmap_override" ]] || {
+      echo "Ошибка: SEMINARTEXT_STATE_FILE и SEMINARTEXT_ROADMAP_FILE задаются вместе." >&2
+      return 1
+    }
+    GOVERNANCE_STATE="${state_override/#\~/$HOME}"
+    GOVERNANCE_ROADMAP="${roadmap_override/#\~/$HOME}"
+    GOVERNANCE_SOURCE_KIND="explicit_pair"
+  elif [[ -n "$repo_override" ]]; then
+    repo_override="${repo_override/#\~/$HOME}"
+    GOVERNANCE_STATE="$repo_override/SEMINARTEXT_4_STATE.json"
+    GOVERNANCE_ROADMAP="$repo_override/SEMINARTEXT_4_ROADMAP.md"
+    GOVERNANCE_SOURCE_KIND="repository_override"
+  elif command -v git >/dev/null 2>&1; then
+    detected_root="$(git -C "$SEMINARTEXT_ENTRYPOINT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [[ -n "$detected_root" && "$SEMINARTEXT_ENTRYPOINT" == "$detected_root/"* ]]; then
+      GOVERNANCE_STATE="$detected_root/SEMINARTEXT_4_STATE.json"
+      GOVERNANCE_ROADMAP="$detected_root/SEMINARTEXT_4_ROADMAP.md"
+      GOVERNANCE_SOURCE_KIND="repository"
+    fi
+  fi
+
+  if [[ -z "${GOVERNANCE_STATE:-}" ]]; then
+    GOVERNANCE_STATE="$SEMINARTEXT_ENTRYPOINT_DIR/SEMINARTEXT_4_STATE.json"
+    GOVERNANCE_ROADMAP="$SEMINARTEXT_ENTRYPOINT_DIR/SEMINARTEXT_4_ROADMAP.md"
+    GOVERNANCE_SOURCE_KIND="deployed_snapshot"
+  fi
+
+  [[ -f "$GOVERNANCE_STATE" ]] || {
+    echo "Ошибка: не найден governed State: $GOVERNANCE_STATE" >&2
+    echo "Для installed CLI задайте SEMINARTEXT_REPO=/путь/к/repository или установите verified deploy snapshot." >&2
+    return 1
+  }
+  [[ -f "$GOVERNANCE_ROADMAP" ]] || {
+    echo "Ошибка: не найден governed Roadmap: $GOVERNANCE_ROADMAP" >&2
+    return 1
+  }
+}
+
+find_model() {
+  local name="$1" candidate
+  for candidate in \
+    "$HOME/whisper-models/$name" \
+    "$HOME/models/$name" \
+    "$HOME/.cache/whisper/$name" \
+    "$HOME/Library/Application Support/whisper.cpp/$name" \
+    "/opt/homebrew/share/whisper.cpp/models/$name" \
+    "/usr/local/share/whisper.cpp/models/$name"; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_models() {
+  [[ -n "$MODEL" ]] || MODEL="$(find_model ggml-large-v3.bin || true)"
+  [[ -n "$VAD_MODEL" ]] || VAD_MODEL="$(find_model ggml-silero-v5.1.2.bin || true)"
+}
+
+show_help() {
+  printf 'SEMINARTEXT %s\n\n' "$VERSION"
+cat <<'HELP'
+ОСНОВНЫЕ КОМАНДЫ
+
+  seminartext файл.mp4
+  seminartext transcribe файл.mp4
+  seminartext transcribe файл.mp4 --language ru|en
+  seminartext transcribe файл.mp4 --structured-timing
+
+      Расшифровка аудио/видео.
+      Старый вызов без команды сохранён и равнозначен transcribe.
+      Язык источника по умолчанию: ru. Поддерживаются ru и en.
+
+  seminartext topics файл.mp4
+
+      Тематический анализ готового SRT через локальный Ollama/Gemma.
+      Поддерживает --detail low|auto|high.
+
+  seminartext subtitles файл.mp4
+
+      Создаёт отдельный SRT из существующей расшифровки.
+      --burn дополнительно вшивает субтитры в видео.
+
+  seminartext translate файл.mp4
+
+      Для английского видео создаёт русские копии SRT и таймкодинга.
+
+  seminartext cut файл.mp4 START END
+
+      Вырезание фрагмента видео.
+      По умолчанию — точный режим; --fast — без перекодирования.
+
+  seminartext doctor
+
+      Проверка установленных программ, моделей и окружения.
+
+  seminartext clean файл.txt
+
+      Очистка уже существующей расшифровки без повторного Whisper.
+
+ПРОЕКТНЫЙ WORKFLOW
+
+  seminartext init PROJECT
+  seminartext project-add PROJECT [sources]
+  seminartext project-link-youtube PROJECT SOURCE_ID URL
+  seminartext project-check PROJECT
+  seminartext project-promote-transcript PROJECT --source-id ID --text-file FILE --state verified --reviewer NAME
+  seminartext project-align PROJECT --source-id ID --revision-id REVISION --alignment-json FILE [--media FILE]
+  seminartext project-evidence-check PROJECT [--json]
+  seminartext project-review-prepare PROJECT --drafts FILE --output DIR
+  seminartext project-review-status PROJECT --package FILE [--decisions FILE]
+  seminartext project-review-apply PROJECT --package FILE --decisions FILE --output FILE
+  seminartext project-review-v2-status PROJECT --package FILE --decisions FILE
+  seminartext project-review-v2-apply PROJECT --package FILE --decisions FILE --output FILE
+  seminartext project-review-boundary-prepare PROJECT --package FILE --requests FILE --output DIR
+  seminartext project-review-boundary-resolve PROJECT --proposals FILE --ledger FILE --output FILE
+  seminartext project-review-boundary-status PROJECT --proposals FILE --decisions FILE
+  seminartext project-obsidian-export PROJECT --knowledge-input FILE --destination DIR [--dry-run]
+  seminartext project-transcribe PROJECT [--structured-timing] [--combined-clear] [--combined-with-sources]
+  seminartext project-documents PROJECT
+  seminartext project-corpus PROJECT
+  seminartext project-topics PROJECT
+
+      Создание, наполнение, проверка и обработка seminar-проекта.
+
+      --combined-clear дополнительно собирает чистые individual transcripts
+      локальных частей в один chronological derived artifact. Источники
+      упорядочиваются по embedded creation date, затем macOS birth time,
+      затем mtime; individual transcripts и provenance сохраняются.
+
+BENCHMARK И GOLD
+
+  seminartext dataset-policy-check DATASET_ID OPERATION [--json]
+
+  seminartext project-topic-benchmark-init PROJECT
+  seminartext project-topic-benchmark-label PROJECT CASE_ID [options]
+  seminartext project-topic-benchmark-check PROJECT
+  seminartext project-topic-benchmark-run PROJECT [options]
+  seminartext project-topic-benchmark-show PROJECT CASE_ID
+
+      Подготовка, ручная разметка, read-only проверка и запуск Topic benchmark.
+
+СТАТУС И ДИАГНОСТИКА
+
+  seminartext roadmap-status
+  seminartext runtime-identity
+  seminartext doctor
+
+      Governed roadmap/state, runtime SHA-256 identity и проверка окружения.
+
+  seminartext help
+
+      Эта справка.
+
+ПАРАМЕТРЫ РАСШИФРОВКИ
+
+  --careful   более тщательное распознавание
+  --structured-timing
+              сохранить JSON-full выбранных Whisper-попыток и manifest
+  --force     повторно обработать уже готовую запись
+  --list      только показать найденные записи
+  --no-open   не открывать папку результатов после завершения
+  -h, --help  справка
+  -v, --version
+
+ПОДДЕРЖИВАЕМЫЕ ИСТОЧНИКИ
+
+  аудио-файлы
+  видео-файлы
+  папки Zoom
+  YouTube-ссылки
+
+НАДЁЖНОСТЬ ДЛИННЫХ ЗАПИСЕЙ
+
+  Аудио автоматически делится на независимые фрагменты.
+  Подозрительные фрагменты распознаются повторно.
+  Зацикливание Whisper не портит оставшуюся часть записи.
+
+НУМЕРАЦИЯ
+
+  Новые комплекты получают общий номер:
+  transcript4.txt
+  transcript_clean4.txt
+  transcript_review4.txt
+  transcript4.srt
+  и далее.
+
+ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ
+
+  SEMINARTEXT_OUTPUT
+  SEMINARTEXT_MODEL
+  SEMINARTEXT_VAD_MODEL
+  SEMINARTEXT_PYTHON
+  SEMINARTEXT_PROJECTS
+  SEMINARTEXT_REPO
+  SEMINARTEXT_STATE_FILE + SEMINARTEXT_ROADMAP_FILE
+  SEMINARTEXT_DEPLOY_DIR
+  SEMINARTEXT_TOPICS_MODULE
+  SEMINARTEXT_TRANSLATE_MODULE
+  SEMINARTEXT_YTDLP_COOKIES_FROM_BROWSER
+  SEMINARTEXT_HEADLESS=1 (не открывать GUI в automated/Codex run)
+
+По умолчанию результаты:
+  ~/Documents/Расшифровки
+HELP
+}
+doctor() {
+  resolve_models
+  echo "SeminarText $VERSION"
+  echo
+  local bad=0 p
+  for p in python3 ffmpeg ffprobe whisper-cli; do
+    if command -v "$p" >/dev/null 2>&1; then
+      echo "[OK] $p: $(command -v "$p")"
+    else
+      echo "[НЕТ] $p"
+      bad=1
+    fi
+  done
+  echo
+  echo "Python-модули SeminarText:"
+
+  if [[ -x "$SEMINARTEXT_PYTHON" ]]; then
+    echo "[OK] SeminarText Python: $SEMINARTEXT_PYTHON"
+
+    if "$SEMINARTEXT_PYTHON" -c 'import pptx' >/dev/null 2>&1; then
+      echo "[OK] python-pptx"
+    else
+      echo "[НЕТ] python-pptx"
+      bad=1
+    fi
+
+    if "$SEMINARTEXT_PYTHON" -c 'import pymupdf' >/dev/null 2>&1; then
+      echo "[OK] PyMuPDF"
+    else
+      echo "[НЕТ] PyMuPDF"
+      bad=1
+    fi
+  else
+    echo "[НЕТ] Python-окружение SeminarText:"
+    echo "      $SEMINARTEXT_PYTHON"
+    bad=1
+  fi
+
+  echo
+
+  if command -v pandoc >/dev/null 2>&1; then
+    echo "[OK] pandoc: $(command -v pandoc)"
+  else
+    echo "[ПРЕДУПРЕЖДЕНИЕ] pandoc не найден — DOCX не будет создан"
+  fi
+  if command -v yt-dlp >/dev/null 2>&1; then
+    echo "[OK] yt-dlp: $(command -v yt-dlp)"
+  else
+    echo "[ПРЕДУПРЕЖДЕНИЕ] yt-dlp не найден — YouTube-ссылки недоступны (brew install yt-dlp)"
+  fi
+  if [[ -n "$MODEL" && -f "$MODEL" ]]; then
+    echo "[OK] Whisper model: $MODEL"
+  else
+    echo "[НЕТ] ggml-large-v3.bin"
+    bad=1
+  fi
+  if [[ -n "$VAD_MODEL" && -f "$VAD_MODEL" ]]; then
+    echo "[OK] VAD model: $VAD_MODEL"
+  else
+    echo "[НЕТ] ggml-silero-v5.1.2.bin"
+    bad=1
+  fi
+  mkdir -p "$TRANSCRIPTS_ROOT" 2>/dev/null || true
+  if [[ -d "$TRANSCRIPTS_ROOT" && -w "$TRANSCRIPTS_ROOT" ]]; then
+    echo "[OK] Папка результатов: $TRANSCRIPTS_ROOT"
+  else
+    echo "[НЕТ ДОСТУПА] $TRANSCRIPTS_ROOT"
+    bad=1
+  fi
+  return "$bad"
+}
+
+sanitize_name() {
+  local s="$1"
+  s="${s//$'\n'/ }"
+  s="${s//$'\r'/ }"
+  s="${s//\//-}"
+  s="${s//:/-}"
+  while [[ "$s" == *"  "* ]]; do s="${s//  / }"; done
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  [[ -n "$s" ]] || s="Расшифровка"
+  printf '%s\n' "$s"
+}
+
+is_youtube_url() {
+  [[ "$1" =~ ^https?://([^/]+\.)?(youtube\.com|youtu\.be)(/|$) ]]
+}
+
+download_youtube_audio() {
+  local url="$1" dir="$2" log="$3" out="" status=1
+  command -v yt-dlp >/dev/null 2>&1 || {
+    echo "Ошибка: для YouTube требуется yt-dlp. Установите: brew install yt-dlp" >&2
+    return 1
+  }
+
+  rm -f "$dir"/.youtube_source.* 2>/dev/null || true
+  local ytdlp_help=""
+  ytdlp_help="$(yt-dlp --help 2>/dev/null || true)"
+
+  local args=(--ignore-config --no-playlist -f "bestaudio/best" -x --audio-format m4a --audio-quality 0 -o "$dir/.youtube_source.%(ext)s")
+  [[ "$ytdlp_help" == *"--force-ipv4"* ]] && args+=(--force-ipv4)
+  [[ "$ytdlp_help" == *"--http-chunk-size"* ]] && args+=(--http-chunk-size 10M)
+
+  if [[ -n "${SEMINARTEXT_YTDLP_COOKIES_FROM_BROWSER:-}" ]]; then
+    [[ "$ytdlp_help" == *"--cookies-from-browser"* ]] || {
+      echo "Ошибка: установленный yt-dlp не поддерживает --cookies-from-browser." >&2
+      return 1
+    }
+    args+=(--cookies-from-browser "$SEMINARTEXT_YTDLP_COOKIES_FROM_BROWSER")
+  fi
+
+  echo "Скачиваю аудиодорожку YouTube..." | tee -a "$log" >&2
+  local -a attempt_args
+  attempt_args=("${args[@]}")
+
+  set +e
+  yt-dlp "${attempt_args[@]}" "$url" 2>&1 | tee -a "$log" >&2
+  status=${PIPESTATUS[0]}
+  set -e
+
+  if (( status != 0 )) && [[ "$ytdlp_help" == *"--extractor-args"* ]]; then
+    echo "yt-dlp не смог скачать аудио; повторяю с YouTube client fallback..." | tee -a "$log" >&2
+    rm -f "$dir"/.youtube_source.* 2>/dev/null || true
+    attempt_args=("${args[@]}" --extractor-args "youtube:player_client=android,web")
+    set +e
+    yt-dlp "${attempt_args[@]}" "$url" 2>&1 | tee -a "$log" >&2
+    status=${PIPESTATUS[0]}
+    set -e
+  fi
+
+  if (( status != 0 )); then
+    echo "Ошибка: yt-dlp не смог скачать аудиодорожку YouTube. Если видео доступно только через браузерную сессию, задайте SEMINARTEXT_YTDLP_COOKIES_FROM_BROWSER." >&2
+    return "$status"
+  fi
+
+  out="$(find "$dir" -maxdepth 1 -type f -name '.youtube_source.*' | head -n1)"
+  [[ -n "$out" && -s "$out" ]] || {
+    echo "Ошибка: yt-dlp завершился, но аудиофайл не найден." >&2
+    return 1
+  }
+  printf '%s\n' "$out"
+}
+
+parse_args() {
+  while (($#)); do
+    case "$1" in
+      doctor) doctor; exit $? ;;
+      --careful) MODE="careful" ;;
+      --language)
+        shift
+        (($#)) || { echo "Ошибка: после --language укажите ru или en." >&2; exit 2; }
+        case "$1" in
+          ru|en) SOURCE_LANGUAGE="$1" ;;
+          *) echo "Ошибка: неподдерживаемый язык '$1'. Допустимые значения: ru, en." >&2; exit 2 ;;
+        esac
+        ;;
+      --language=*)
+        case "${1#*=}" in
+          ru|en) SOURCE_LANGUAGE="${1#*=}" ;;
+          *) echo "Ошибка: неподдерживаемый язык '${1#*=}'. Допустимые значения: ru, en." >&2; exit 2 ;;
+        esac
+        ;;
+      --structured-timing) STRUCTURED_TIMING=1 ;;
+      --force) FORCE=1 ;;
+      --list) LIST_ONLY=1 ;;
+      --no-open) OPEN_RESULTS=0 ;;
+      -h|--help) show_help; exit 0 ;;
+      -v|--version) echo "seminartext $VERSION"; exit 0 ;;
+      --) shift; while (($#)); do INPUTS+=("$1"); shift; done; break ;;
+      -*) echo "Неизвестный параметр: $1" >&2; show_help; exit 2 ;;
+      *) INPUTS+=("$1") ;;
+    esac
+    shift
+  done
+}
+
+build_queue() {
+  local q
+  q="$(mktemp -t seminartext_queue.XXXXXX)"
+  python3 - "$q" "${INPUTS[@]}" <<'PY'
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from urllib.parse import urlparse, parse_qs
+
+out = Path(sys.argv[1])
+raw_inputs = sys.argv[2:]
+audio = {'.m4a', '.mp3', '.wav', '.aac', '.flac', '.ogg', '.opus'}
+video = {'.mp4', '.mov', '.mkv', '.avi', '.webm', '.m4v'}
+media = audio | video
+ignored_names = {
+    'audio record', 'audio records', 'audio_record', 'audio_records',
+    'separate audio', 'separate_audio', 'individual audio', 'individual_audio',
+    'participants', 'participant audio', 'participant_audio',
+    'chat', 'transcripts', 'transcript'
+}
+seen = set()
+records = []
+
+def is_youtube_url(value: str) -> bool:
+    try:
+        host = (urlparse(value).hostname or '').lower()
+    except Exception:
+        return False
+    return host == 'youtu.be' or host == 'youtube.com' or host.endswith('.youtube.com')
+
+def fallback_title(url: str) -> str:
+    p = urlparse(url)
+    vid = ''
+    if (p.hostname or '').lower() == 'youtu.be':
+        vid = p.path.strip('/').split('/')[0]
+    else:
+        vid = (parse_qs(p.query).get('v') or [''])[0]
+        if not vid and p.path.startswith('/shorts/'):
+            vid = p.path.split('/shorts/', 1)[1].split('/')[0]
+    return 'YouTube ' + (vid or 'video')
+
+def youtube_title(url: str) -> str:
+    try:
+        r = subprocess.run(
+            ['yt-dlp', '--ignore-config', '--no-playlist', '--skip-download',
+             '--print', '%(title)s', url],
+            capture_output=True, text=True, timeout=60, check=False
+        )
+        title = (r.stdout or '').splitlines()[0].strip() if r.stdout else ''
+        return title or fallback_title(url)
+    except Exception:
+        return fallback_title(url)
+
+def file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+def is_ignored_dir(path: Path) -> bool:
+    return any(part.lower() in ignored_names for part in path.parts)
+
+def choose_recording(directory: Path):
+    try:
+        files = [
+            p for p in directory.iterdir()
+            if p.is_file() and p.suffix.lower() in media and not p.name.startswith('.')
+        ]
+    except OSError:
+        return None
+
+    exact = [p for p in files if p.name.lower() == 'audio_only.m4a']
+    if exact:
+        return max(exact, key=file_size)
+
+    audios = [p for p in files if p.suffix.lower() in audio]
+    if audios:
+        return max(audios, key=file_size)
+
+    videos = [p for p in files if p.suffix.lower() in video]
+    return max(videos, key=file_size) if videos else None
+
+def add(key: str, title: str, source_type: str):
+    if key in seen:
+        return
+    seen.add(key)
+    records.append({'path': key, 'title': title, 'source': source_type})
+
+for raw in raw_inputs:
+    if is_youtube_url(raw):
+        add(raw, youtube_title(raw), 'YouTube')
+        continue
+
+    if raw.startswith(('http://', 'https://')):
+        print(f'Неподдерживаемая ссылка: {raw}', file=sys.stderr)
+        continue
+
+    source = Path(raw).expanduser()
+    if not source.exists():
+        print(f'Не найдено: {source}', file=sys.stderr)
+        continue
+
+    if source.is_file():
+        if source.suffix.lower() in media:
+            add(str(source.resolve()), source.stem, 'файл')
+        else:
+            print(f'Неподдерживаемый файл: {source}', file=sys.stderr)
+        continue
+
+    directories = []
+    for root, names, filenames in os.walk(source):
+        names[:] = [
+            n for n in names
+            if n.lower() not in ignored_names and not n.startswith('.')
+        ]
+        directory = Path(root)
+        if is_ignored_dir(directory):
+            continue
+        if any(Path(name).suffix.lower() in media and not name.startswith('.') for name in filenames):
+            directories.append(directory)
+
+    for directory in sorted(set(directories), key=lambda p: str(p).lower()):
+        recording = choose_recording(directory)
+        if recording:
+            add(str(recording.resolve()), directory.name, 'папка Zoom')
+
+with out.open('w', encoding='utf-8') as handle:
+    for record in records:
+        handle.write(json.dumps(record, ensure_ascii=False) + '\n')
+PY
+  printf '%s\n' "$q"
+}
+
+clean_text() {
+  python3 - "$1" "$2" "${3:-}" "${4:-ru}" <<'PY'
+import collections
+import re
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+report_path = Path(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else None
+language = sys.argv[4]
+text = src.read_text(encoding='utf-8', errors='replace')
+
+FALSE_PHRASES = [
+    r'продолжение следует', r'спасибо за просмотр', r'спасибо за внимание',
+    r'субтитры сделал', r'субтитры подготов', r'редактор субтитров',
+    r'подписывайтесь на канал', r'ставьте лайк'
+] if language == 'ru' else []
+
+REPLACEMENTS = {
+    r'\bвсеоблимливающ(?:ий|ая|ее|ие|ими|их)\b': 'всеобъемлющие',
+    r'\bпостепат(?:а|ом|у|ы|ов)?\b': 'остеопат',
+    r'\bгрифрук(?:т|та|ту|том|те)?\b': 'грейпфрут',
+    r'\bгрифрукт(?:а|у|ом|е|ы|ов)?\b': 'грейпфрут',
+    r'\bадипол(?:ь|я|ю|ем|е)?\b': 'диполь',
+    r'\bкиноэстетик(?:а|у|ом|е|и|ов)?\b': 'кинестетик',
+    r'\bотсослать\b': 'отослать',
+    r'\bпровождаются\b': 'сопровождаются',
+    r'\bправа почки\b': 'правой почки',
+} if language == 'ru' else {}
+
+SUSPICIOUS = [
+    'резонансный расход', 'динамического сапатического', 'тамуашеки',
+    'можно в состав стола', 'подорваться за ручку', 'майтик',
+    'весновидение', 'пальцы начинают тягаться', 'партиру двумя руками'
+] if language == 'ru' else []
+
+LANGUAGE_BOUNDARIES = {'камера мотор', 'голос за кадром'} if language == 'ru' else set()
+
+def norm(s: str) -> str:
+    s = s.lower().replace('ё', 'е')
+    s = re.sub(r'[^0-9a-zа-я]+', ' ', s, flags=re.I)
+    return re.sub(r'\s+', ' ', s).strip()
+
+def apply_replacements(s: str) -> tuple[str, int]:
+    total = 0
+    for pattern, replacement in REPLACEMENTS.items():
+        s, n = re.subn(pattern, replacement, s, flags=re.I)
+        total += n
+    return s, total
+
+paragraphs = []
+current = []
+for raw in text.splitlines():
+    line = re.sub(r'^\s*\[[^]]+-->[^]]+\]\s*', '', raw.strip())
+    line = re.sub(r'\s+', ' ', line).strip()
+    if not line:
+        if current:
+            paragraphs.append(' '.join(current)); current = []
+        continue
+    if any(re.match(r'^' + pattern, line, re.I) for pattern in FALSE_PHRASES):
+        continue
+    current.append(line)
+if current:
+    paragraphs.append(' '.join(current))
+
+joined = '\n\n'.join(paragraphs)
+sentences = [x.strip() for x in re.split(r'(?<=[.!?…])\s+', joined) if x.strip()]
+
+cleaned = []
+removed_exact = removed_blocks = removed_runaway = replacement_count = 0
+seen_recent = collections.deque(maxlen=30)
+occurrences = collections.Counter()
+
+for sentence in sentences:
+    sentence, nrep = apply_replacements(sentence)
+    replacement_count += nrep
+    key = norm(sentence)
+    if not key:
+        continue
+    if cleaned and key == norm(cleaned[-1]) and len(cleaned) >= 2 and key == norm(cleaned[-2]):
+        removed_exact += 1
+        continue
+    trial = cleaned + [sentence]
+    block_removed = False
+    for size in range(1, min(6, len(trial)//3) + 1):
+        a = [norm(x) for x in trial[-size:]]
+        b = [norm(x) for x in trial[-2*size:-size]]
+        c = [norm(x) for x in trial[-3*size:-2*size]]
+        if a == b == c:
+            removed_blocks += 1
+            block_removed = True
+            break
+    if block_removed:
+        continue
+    occurrences[key] += 1
+    if len(key.split()) <= 12 and occurrences[key] > 3 and key in seen_recent:
+        removed_runaway += 1
+        continue
+    cleaned.append(sentence)
+    seen_recent.append(key)
+
+out_paragraphs = []
+buf = []
+for sentence in cleaned:
+    low = norm(sentence)
+    boundary = low in LANGUAGE_BOUNDARIES or sentence.endswith(':') or len(buf) >= 6
+    if boundary and buf:
+        out_paragraphs.append(' '.join(buf)); buf = []
+    buf.append(sentence)
+    if low in LANGUAGE_BOUNDARIES:
+        out_paragraphs.append(' '.join(buf)); buf = []
+if buf:
+    out_paragraphs.append(' '.join(buf))
+
+dst.write_text('\n\n'.join(out_paragraphs).strip() + '\n', encoding='utf-8')
+
+if report_path:
+    lower = text.lower()
+    suspicious_found = [(p, lower.count(p.lower())) for p in SUSPICIOUS if lower.count(p.lower())]
+    lines = [
+        'ОТЧЁТ ПРОВЕРКИ SEMINARTEXT', '', f'Исходный файл: {src}',
+        f'Предложений до очистки: {len(sentences)}',
+        f'Предложений после очистки: {len(cleaned)}',
+        f'Удалено точных повторов: {removed_exact}',
+        f'Удалено повторяющихся блоков: {removed_blocks}',
+        f'Удалено зацикленных коротких реплик: {removed_runaway}',
+        f'Выполнено безопасных словарных исправлений: {replacement_count}', '',
+        'ФРАГМЕНТЫ ДЛЯ РУЧНОЙ ПРОВЕРКИ'
+    ]
+    lines += [f'- «{p}» — найдено {n} раз(а)' for p, n in suspicious_found] or ['- Явных подозрительных фраз из встроенного списка не найдено.']
+    lines += ['', 'Примечание: неоднозначные фамилии и специальные термины без сверки с аудио автоматически не исправляются.']
+    report_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+PY
+}
+
+clean_existing() {
+  local input="$1" output report
+  [[ -f "$input" ]] || { echo "Файл не найден: $input" >&2; return 1; }
+  output="${input%.*}_cleaned.txt"
+  report="${input%.*}_review.txt"
+  clean_text "$input" "$output" "$report"
+  echo "Очищенный текст: $output"
+  echo "Отчёт проверки: $report"
+}
+
+source_key() {
+  python3 - "$1" <<'PY'
+import hashlib, sys
+print(hashlib.sha256(sys.argv[1].encode('utf-8')).hexdigest()[:12])
+PY
+}
+
+choose_output_dir() {
+  local requested="$1" input="$2" name base dir n existing_source
+
+  if [[ -n "${PROJECT_OUTPUT_DIR:-}" ]]; then
+    printf '%s\n' "$PROJECT_OUTPUT_DIR"
+    return 0
+  fi
+  name="$(sanitize_name "$requested")"
+  base="$TRANSCRIPTS_ROOT/$name"
+  dir="$base"
+  n=2
+
+  while [[ -d "$dir" ]]; do
+    if [[ -f "$dir/.source_path" ]]; then
+      existing_source="$(cat "$dir/.source_path" 2>/dev/null || true)"
+      if [[ "$existing_source" == "$input" ]]; then
+        printf '%s\n' "$dir"
+        return 0
+      fi
+    fi
+    dir="$base [$n]"
+    ((n+=1))
+  done
+
+  printf '%s\n' "$dir"
+}
+
+next_transcript_number() {
+  local counter_file="$TRANSCRIPTS_ROOT/.next_transcript_number"
+  python3 - "$TRANSCRIPTS_ROOT" "$counter_file" <<'PYINNER'
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+counter_file = Path(sys.argv[2])
+root.mkdir(parents=True, exist_ok=True)
+
+maximum = 3
+patterns = [
+    re.compile(r'^transcript_clean(\d+)\.txt$'),
+    re.compile(r'^transcript(\d+)\.txt$'),
+]
+for path in root.rglob('*'):
+    if not path.is_file():
+        continue
+    for pattern in patterns:
+        match = pattern.match(path.name)
+        if match:
+            maximum = max(maximum, int(match.group(1)))
+            break
+    if path.name == '.transcript_number':
+        try:
+            maximum = max(maximum, int(path.read_text(encoding='utf-8').strip()))
+        except (OSError, ValueError):
+            pass
+
+stored = 4
+try:
+    stored = int(counter_file.read_text(encoding='utf-8').strip())
+except (OSError, ValueError):
+    pass
+
+number = max(4, stored, maximum + 1)
+counter_file.write_text(str(number + 1) + '\n', encoding='utf-8')
+print(number)
+PYINNER
+}
+
+get_or_assign_transcript_number() {
+  local dir="$1" number_file="$1/.transcript_number" number
+  if [[ -s "$number_file" ]]; then
+    number="$(tr -dc '0-9' < "$number_file")"
+  else
+    number="$(next_transcript_number)"
+    printf '%s\n' "$number" > "$number_file"
+  fi
+  [[ -n "$number" ]] || { echo "Не удалось назначить номер расшифровки." >&2; return 1; }
+  printf '%s\n' "$number"
+}
+
+quality_check() {
+  python3 - "$1" <<'PYCHECK'
+import re, sys
+from collections import Counter
+from difflib import SequenceMatcher
+from pathlib import Path
+
+def reject(reason, detail=''):
+    suffix = f' {detail}' if detail else ''
+    print(f'ASR quality gate: REJECT reason={reason}{suffix}', file=sys.stderr)
+    raise SystemExit(1)
+
+p=Path(sys.argv[1])
+if not p.is_file() or p.stat().st_size == 0:
+    reject('missing_or_empty_transcript')
+t=p.read_text(encoding='utf-8', errors='replace').strip()
+if len(t) < 20:
+    reject('transcript_too_short')
+sents=[re.sub(r'\s+',' ',x.strip().lower()) for x in re.split(r'(?<=[.!?…])\s+',t) if x.strip()]
+if not sents:
+    reject('no_sentences')
+c=Counter(sents)
+most,n=c.most_common(1)[0]
+if len(most.split()) <= 6 and n >= 12 and n/max(1,len(sents)) >= .45:
+    reject('exact_short_sentence_loop', f'repeats={n}')
+tail=sents[-30:]
+if len(tail) >= 15 and len(set(tail)) <= 3:
+    reject('collapsed_tail_loop', f'sentences={len(tail)} unique={len(set(tail))}')
+words=re.findall(r'[а-яёa-z0-9]+',t.lower())
+if words:
+    w,n=Counter(words).most_common(1)[0]
+    if len(w) <= 12 and n >= 40 and n/len(words) >= .55:
+        reject('single_word_loop', f'repeats={n} word_ratio={n/len(words):.2f}')
+
+# Whisper contextual loops often keep a long local anchor while changing a few
+# surrounding words.  Whole-sentence equality misses that pattern, especially
+# when several repetitions land inside one punctuated sentence.  Look for four
+# near-identical 12-token spans (at least 10 tokens aligned in order) inside a
+# bounded 180-token neighbourhood.  Matches must be separated so overlapping
+# windows from one occurrence cannot count as multiple repetitions.
+normalized_words=[word.replace('ё', 'е') for word in words]
+stopwords={
+    'а', 'без', 'бы', 'в', 'во', 'вот', 'все', 'всего', 'всей', 'всем', 'всех',
+    'вы', 'где', 'да', 'для', 'до', 'его', 'ее', 'ей', 'есть', 'еще', 'же', 'за', 'и', 'из',
+    'или', 'им', 'их', 'к', 'как', 'ко', 'кто', 'ли', 'меня', 'мне', 'мы', 'на', 'нам', 'нас',
+    'не', 'нет', 'но', 'о', 'об', 'он', 'она', 'они', 'оно', 'от', 'по', 'при', 'с', 'себя',
+    'так', 'такой', 'там', 'тем', 'то', 'того', 'тоже', 'тут', 'ты', 'у', 'уже', 'чем', 'чего',
+    'что', 'чтобы', 'это', 'этого', 'этой', 'я',
+    'a', 'an', 'and', 'are', 'as', 'at', 'be', 'but', 'by', 'for', 'from', 'in',
+    'is', 'it', 'of', 'on', 'or', 'that', 'the', 'this', 'to', 'was', 'we', 'with',
+}
+phrase_words=12
+local_window_words=180
+minimum_gap_words=8
+minimum_content_words=3
+minimum_common_words=9
+minimum_similarity=.82
+minimum_repetitions=4
+ordinal_roots=(
+    'перв', 'втор', 'трет', 'четверт', 'пят',
+    'шест', 'седьм', 'восьм', 'девят', 'десят',
+)
+english_ordinals={
+    'first', 'second', 'third', 'fourth', 'fifth',
+    'sixth', 'seventh', 'eighth', 'ninth', 'tenth',
+}
+
+def ordinal_kinds(tokens):
+    kinds={word for word in tokens if word in english_ordinals}
+    kinds.update(root for root in ordinal_roots if any(word.startswith(root) for word in tokens))
+    return kinds
+
+structured_repetition_until=-1
+for start in range(max(0, len(normalized_words) - phrase_words + 1)):
+    if start < structured_repetition_until:
+        continue
+    anchor=normalized_words[start:start + phrase_words]
+    content={word for word in anchor if len(word) > 2 and word not in stopwords}
+    if len(content) < minimum_content_words:
+        continue
+    anchor_counts=Counter(anchor)
+    matches=[start]
+    last_match=start
+    stop=min(len(normalized_words) - phrase_words + 1, start + local_window_words + 1)
+    for candidate_start in range(start + minimum_gap_words, stop):
+        if candidate_start - last_match < minimum_gap_words:
+            continue
+        candidate=normalized_words[candidate_start:candidate_start + phrase_words]
+        common=sum((anchor_counts & Counter(candidate)).values())
+        if common < minimum_common_words:
+            continue
+        similarity=SequenceMatcher(None, anchor, candidate, autojunk=False).ratio()
+        if similarity < minimum_similarity:
+            continue
+        matches.append(candidate_start)
+        last_match=candidate_start
+        if len(matches) >= minimum_repetitions:
+            # Repeated syntax can be legitimate when a speaker develops an
+            # explicit list.  Three distinct ordinal markers inside the same
+            # candidate cluster are strong textual evidence of enumerative
+            # progression, which a lexical-window similarity score otherwise
+            # mistakes for cycling.  Suppress only this local detector region;
+            # exact/tail/word-loop checks above remain unchanged.
+            cluster=normalized_words[matches[0]:matches[-1] + phrase_words]
+            if len(ordinal_kinds(cluster)) >= 3:
+                structured_repetition_until=min(
+                    len(normalized_words),
+                    matches[-1] + phrase_words + local_window_words,
+                )
+                break
+            reject(
+                'fuzzy_contextual_repetition',
+                f'repeats={len(matches)} phrase_words={phrase_words} '
+                f'span_words={matches[-1] - matches[0]} similarity>={minimum_similarity:.2f}',
+            )
+raise SystemExit(0)
+PYCHECK
+}
+
+merge_srt_with_offset() {
+  local src="$1" offset_ms="$2" dst="$3"
+  python3 - "$src" "$offset_ms" "$dst" <<'PYSRT'
+import re,sys
+from pathlib import Path
+src=Path(sys.argv[1]); off=int(sys.argv[2]); dst=Path(sys.argv[3])
+if not src.exists(): raise SystemExit(0)
+def parse(x):
+    h,m,rest=x.split(':'); s,ms=rest.split(',')
+    return ((int(h)*60+int(m))*60+int(s))*1000+int(ms)
+def fmt(v):
+    v=max(0,v); ms=v%1000; v//=1000; s=v%60; v//=60; m=v%60; h=v//60
+    return f'{h:02d}:{m:02d}:{s:02d},{ms:03d}'
+text=src.read_text(encoding='utf-8',errors='replace')
+blocks=re.split(r'\n\s*\n',text.strip()) if text.strip() else []
+out=[]
+for block in blocks:
+    lines=block.splitlines()
+    ti=next((i for i,x in enumerate(lines) if '-->' in x),None)
+    if ti is None: continue
+    a,b=[x.strip() for x in lines[ti].split('-->',1)]
+    lines[ti]=f'{fmt(parse(a)+off)} --> {fmt(parse(b)+off)}'
+    out.append('\n'.join(lines[ti:]))
+with dst.open('a',encoding='utf-8') as f:
+    for block in out:
+        f.write(block+'\n\n')
+PYSRT
+}
+
+run_whisper_piece() {
+  local wav="$1" prefix="$2" log="$3" retry="${4:-0}"
+  local threshold silence beam best threads
+  threads="$(sysctl -n hw.logicalcpu 2>/dev/null || echo 4)"
+  ((threads > 8)) && threads=8
+  if [[ "$MODE" == "careful" ]]; then
+    threshold=0.45; silence=700; beam=8; best=8
+  else
+    threshold=0.55; silence=550; beam=5; best=5
+  fi
+  (( retry == 1 )) && { threshold=0.68; silence=350; beam=3; best=3; }
+  rm -f "$prefix.txt" "$prefix.srt" "$prefix.json"
+  local -a cmd=(whisper-cli -m "$MODEL" -f "$wav" -l "$SOURCE_LANGUAGE" -t "$threads" -bo "$best" -bs "$beam")
+  [[ "$SOURCE_LANGUAGE" == "ru" && "$retry" -eq 0 ]] && cmd+=(--prompt "$PROMPT")
+  cmd+=(--vad -vm "$VAD_MODEL" -vt "$threshold" -vspd 250 -vsd "$silence" -vp 200 -vo 0.10 -nth 0.60 -sns -ml 80 -sow -otxt -osrt)
+  (( STRUCTURED_TIMING == 1 )) && cmd+=(-ojf)
+  cmd+=(-nt -pp -of "$prefix")
+  set +e
+  "${cmd[@]}" 2>&1 | tee -a "$log"
+  local status=${PIPESTATUS[0]}
+  set -e
+  if (( status == 0 && STRUCTURED_TIMING == 1 )) && [[ ! -s "$prefix.json" ]]; then
+    echo "Whisper не создал JSON-full для выбранной попытки." | tee -a "$log" >&2
+    return 1
+  fi
+  return "$status"
+}
+
+retain_selected_timing_part() {
+  local prefix="$1" stage="$2" idx="$3" offset_seconds="$4" duration_seconds="$5" selected_attempt="$6" ledger="$7"
+  local part_id extension
+  part_id="part_$(printf '%04d' "$idx")"
+  mkdir -p "$stage/parts"
+  for extension in txt srt json; do
+    [[ -f "$prefix.$extension" ]] || {
+      echo "Ошибка: выбранная Whisper-попытка не содержит $extension для $part_id." >&2
+      return 1
+    }
+    cp -f "$prefix.$extension" "$stage/parts/$part_id.$extension"
+  done
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$idx" "$offset_seconds" "$duration_seconds" "$selected_attempt" "$part_id" >> "$ledger"
+}
+
+publish_structured_timing_manifest() {
+  local stage="$1" ledger="$2" source_reference="$3" source_type="$4" media="$5" language="$6" mode="$7" model="$8" vad_model="$9" chunk_seconds="${10}"
+  python3 - "$stage" "$ledger" "$source_reference" "$source_type" "$media" "$language" "$mode" "$model" "$vad_model" "$chunk_seconds" "$VERSION" <<'PYTIMING'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+stage = Path(sys.argv[1])
+ledger = Path(sys.argv[2])
+source_reference = sys.argv[3]
+source_type = sys.argv[4]
+media = Path(sys.argv[5])
+language = sys.argv[6]
+mode = sys.argv[7]
+model = Path(sys.argv[8])
+vad_model = Path(sys.argv[9])
+chunk_seconds = int(sys.argv[10])
+version = sys.argv[11]
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def sha256_text(value):
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def artifact(part_id, extension):
+    relative = f"parts/{part_id}.{extension}"
+    path = stage / relative
+    return {"path": relative, "sha256": sha256_file(path)}
+
+
+def selected_timing_range(part_id):
+    """Return the local envelope of all published JSON-full and SRT timing.
+
+    `absolute_range` deliberately describes the prepared audio chunk. Whisper's
+    VAD/timestamp padding can legitimately make selected evidence extend beyond
+    that chunk duration, so its envelope is published separately rather than
+    clipping or rewriting the selected artifacts.
+    """
+    ends = []
+    starts = []
+
+    def collect_offsets(value):
+        if isinstance(value, dict):
+            offsets = value.get("offsets")
+            if isinstance(offsets, dict):
+                start = offsets.get("from")
+                end = offsets.get("to")
+                if isinstance(start, (int, float)):
+                    starts.append(float(start) / 1000.0)
+                if isinstance(end, (int, float)):
+                    ends.append(float(end) / 1000.0)
+            for nested in value.values():
+                collect_offsets(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                collect_offsets(nested)
+
+    collect_offsets(json.loads((stage / "parts" / f"{part_id}.json").read_text(encoding="utf-8")))
+    srt = (stage / "parts" / f"{part_id}.srt").read_text(encoding="utf-8")
+    for start, end in __import__("re").findall(
+        r"(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})", srt
+    ):
+        def seconds(value):
+            hours, minutes, remainder = value.split(":")
+            whole, millis = remainder.split(",")
+            return int(hours) * 3600 + int(minutes) * 60 + int(whole) + int(millis) / 1000
+        starts.append(seconds(start))
+        ends.append(seconds(end))
+
+    if not starts and not ends:
+        return None
+    if not starts or not ends:
+        raise SystemExit(f"selected timing artifact for {part_id} has incomplete timestamps")
+    return {"start_seconds": round(min(starts), 6), "end_seconds": round(max(ends), 6)}
+
+
+parts = []
+for line in ledger.read_text(encoding="utf-8").splitlines():
+    if not line.strip():
+        continue
+    index, offset, duration, selected_attempt, part_id = line.split("\t")
+    start = float(offset)
+    end = start + float(duration)
+    txt_path = stage / "parts" / f"{part_id}.txt"
+    local_selected_range = selected_timing_range(part_id)
+    selected_absolute_range = None
+    if local_selected_range is not None:
+        selected_absolute_range = {
+            "start_seconds": round(start + local_selected_range["start_seconds"], 6),
+            "end_seconds": round(start + local_selected_range["end_seconds"], 6),
+        }
+    parts.append(
+        {
+            "id": part_id,
+            "order": int(index),
+            "absolute_offset_seconds": round(start, 6),
+            "absolute_range": {
+                "start_seconds": round(start, 6),
+                "end_seconds": round(end, 6),
+            },
+            "selected_timing_absolute_range": selected_absolute_range,
+            "selected_attempt": selected_attempt,
+            "speech_detected": txt_path.stat().st_size > 0,
+            "artifacts": {
+                "txt": artifact(part_id, "txt"),
+                "srt": artifact(part_id, "srt"),
+                "json_full": artifact(part_id, "json"),
+            },
+        }
+    )
+
+if [part["order"] for part in parts] != list(range(len(parts))):
+    raise SystemExit("structured timing parts are not contiguous and ordered")
+
+document = {
+    "schema_version": 1,
+    "artifact_type": "seminartext.selected_whisper_timing",
+    "seminartext_version": version,
+    "source": {
+        "type": source_type,
+        "reference": source_reference,
+        "reference_sha256": sha256_text(source_reference),
+        "media_sha256": sha256_file(media),
+    },
+    "transcription": {
+        "language": language,
+        "mode": mode,
+        "chunk_seconds": chunk_seconds,
+        "whisper_model": {
+            "path": str(model.resolve()),
+            "sha256": sha256_file(model),
+        },
+        "vad_model": {
+            "path": str(vad_model.resolve()),
+            "sha256": sha256_file(vad_model),
+        },
+    },
+    "parts": parts,
+}
+(stage / "manifest.json").write_text(
+    json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PYTIMING
+}
+
+process_record() {
+  local input="$1" requested="$2" source_type="${3:-файл}"
+  local name="" dir="" wav="" raw="" clean="" review="" srt="" docx="" log="" info="" marker="" transcript_number="" quality_message=""
+  local timing_dir="" timing_stage="" timing_ledger=""
+  local media_input="$input" youtube_media=""
+  name="$(sanitize_name "$requested")"
+  dir="$(choose_output_dir "$name" "$input")"
+  marker="$dir/.seminartext_complete"
+
+  if [[ -f "$marker" && "$FORCE" -eq 0 ]]; then
+    echo "Пропущено (уже готово): $(basename "$dir")"
+    return 0
+  fi
+
+  mkdir -p "$dir"
+  printf '%s' "$input" > "$dir/.source_path"
+  if (( PROJECT_MODE == 1 )); then
+    transcript_number=""
+  else
+    transcript_number="$(get_or_assign_transcript_number "$dir")"
+  fi
+
+  wav="$dir/.temporary_audio.wav"
+
+  if (( PROJECT_MODE == 1 )); then
+    raw="$dir/transcript.txt"
+    clean="$dir/transcript_clean.txt"
+    review="$dir/transcript_review.txt"
+    srt="$dir/transcript.srt"
+    docx="$dir/transcript.docx"
+  else
+    raw="$dir/transcript${transcript_number}.txt"
+    clean="$dir/transcript_clean${transcript_number}.txt"
+    review="$dir/transcript_review${transcript_number}.txt"
+    srt="$dir/transcript${transcript_number}.srt"
+    docx="$dir/transcript${transcript_number}.docx"
+  fi
+  log="$dir/transcription.log"
+  info="$dir/info.txt"
+  local chunks="$dir/.chunks" parts="$dir/.parts"
+  local chunk_seconds="${SEMINARTEXT_CHUNK_SECONDS:-300}"
+  if (( PROJECT_MODE == 1 )); then
+    timing_dir="$dir/structured_timing"
+  else
+    timing_dir="$dir/structured_timing${transcript_number}"
+  fi
+  timing_stage="$parts/selected_timing"
+  timing_ledger="$parts/selected_timing.tsv"
+
+  cleanup_temp() {
+    [[ -n "${wav:-}" ]] && rm -f "$wav"
+    [[ -n "${youtube_media:-}" ]] && rm -f "$youtube_media"
+    [[ -n "${chunks:-}" ]] && rm -rf "$chunks"
+    [[ -n "${parts:-}" ]] && rm -rf "$parts"
+  }
+  trap cleanup_temp RETURN INT TERM
+
+  echo
+  echo "=================================================="
+  echo "Запись: $(basename "$dir")"
+  echo "Источник: $input"
+  echo "Тип источника: $source_type"
+  echo "Результаты: $dir"
+  : > "$log"
+
+  if [[ "$source_type" == "YouTube" ]] || is_youtube_url "$input"; then
+    youtube_media="$(download_youtube_audio "$input" "$dir" "$log")" || return 1
+    media_input="$youtube_media"
+  fi
+  rm -f "$marker" "$raw" "$clean" "$review" "$srt" "$docx"
+  rm -rf "$timing_dir"
+  mkdir -p "$chunks" "$parts"
+  if (( STRUCTURED_TIMING == 1 )); then
+    mkdir -p "$timing_stage"
+    : > "$timing_ledger"
+  fi
+
+  echo "1/5 Подготавливаю аудио..."
+  ffmpeg -nostdin -hide_banner -loglevel error -stats -y -i "$media_input" -vn -ar 16000 -ac 1 -c:a pcm_s16le "$wav"
+
+  echo "2/5 Разбиваю запись на фрагменты по $((chunk_seconds/60)) мин..."
+  ffmpeg -nostdin -hide_banner -loglevel error -y -i "$wav" -f segment -segment_time "$chunk_seconds" -reset_timestamps 1 -c:a pcm_s16le "$chunks/chunk_%04d.wav"
+
+  echo "3/5 Распознаю речь по фрагментам..."
+  local idx=0 bad=0 piece prefix offset_ms piece_duration selected_attempt
+  shopt -s nullglob
+  local chunk_files=("$chunks"/chunk_*.wav)
+  shopt -u nullglob
+  ((${#chunk_files[@]} > 0)) || { echo "Ошибка: не удалось разбить аудио." >&2; return 1; }
+
+  for piece in "${chunk_files[@]}"; do
+    prefix="$parts/part_$(printf '%04d' "$idx")"
+    selected_attempt="initial"
+    echo "--- Фрагмент $((idx+1)) из ${#chunk_files[@]} ---" | tee -a "$log"
+    if ! run_whisper_piece "$piece" "$prefix" "$log" 0; then
+      echo "Первичная попытка завершилась ошибкой; повторяю фрагмент." | tee -a "$log"
+      run_whisper_piece "$piece" "$prefix" "$log" 1 || { echo "Ошибка Whisper на фрагменте $((idx+1))." >&2; return 1; }
+      selected_attempt="retry"
+    fi
+    # Полностью тихий фрагмент является нормальной частью записи.
+    # Whisper + VAD при отсутствии речи создаёт пустой TXT.
+    if [[ ! -s "$prefix.txt" ]]; then
+      echo "Фрагмент $((idx+1)): речь не обнаружена — пропускаю как тишину." | tee -a "$log"
+      if (( STRUCTURED_TIMING == 1 )); then
+        piece_duration="$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$piece")"
+        retain_selected_timing_part "$prefix" "$timing_stage" "$idx" "$((idx * chunk_seconds))" "$piece_duration" "$selected_attempt" "$timing_ledger" || return 1
+      fi
+      ((idx+=1))
+      continue
+    fi
+
+    if ! quality_message="$(quality_check "$prefix.txt" 2>&1)"; then
+      [[ -z "$quality_message" ]] || printf '%s\n' "$quality_message" | tee -a "$log"
+      echo "Обнаружено возможное зацикливание; повторяю с защитными параметрами." | tee -a "$log"
+      cp -f "$prefix.txt" "$prefix.first.txt" 2>/dev/null || true
+      run_whisper_piece "$piece" "$prefix" "$log" 1 || true
+      selected_attempt="retry"
+      if ! quality_message="$(quality_check "$prefix.txt" 2>&1)"; then
+        [[ -z "$quality_message" ]] || printf '%s\n' "$quality_message" | tee -a "$log"
+        echo "ПРЕДУПРЕЖДЕНИЕ: фрагмент $((idx+1)) остаётся подозрительным." | tee -a "$log"
+        ((bad+=1))
+      else
+        echo "Повторная расшифровка фрагмента успешна." | tee -a "$log"
+      fi
+    fi
+    [[ -s "$prefix.txt" ]] || { echo "Ошибка: пустой текст фрагмента $((idx+1))." >&2; return 1; }
+    cat "$prefix.txt" >> "$raw"
+    printf '\n\n' >> "$raw"
+    offset_ms=$((idx * chunk_seconds * 1000))
+    merge_srt_with_offset "$prefix.srt" "$offset_ms" "$srt"
+    if (( STRUCTURED_TIMING == 1 )); then
+      piece_duration="$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$piece")"
+      retain_selected_timing_part "$prefix" "$timing_stage" "$idx" "$((idx * chunk_seconds))" "$piece_duration" "$selected_attempt" "$timing_ledger" || return 1
+    fi
+    ((idx+=1))
+  done
+
+  echo "4/5 Очищаю и проверяю текст..."
+  clean_text "$raw" "$clean" "$review" "$SOURCE_LANGUAGE"
+  [[ -s "$clean" ]] || { echo "Ошибка: очищенный текст пуст." >&2; return 1; }
+  if (( bad > 0 )); then
+    printf '\nПРЕДУПРЕЖДЕНИЕ: %d фрагмент(а/ов) требуют ручной проверки по аудио. См. transcription.log.\n' "$bad" >> "$review"
+  fi
+
+  echo "5/5 Создаю DOCX..."
+  if command -v pandoc >/dev/null 2>&1; then
+    if ! pandoc "$clean" -f markdown -t docx -o "$docx" --metadata title="$(basename "$dir")"; then
+      echo "Предупреждение: DOCX создать не удалось, остальные файлы сохранены." >&2
+      rm -f "$docx"
+    fi
+  fi
+
+  if (( STRUCTURED_TIMING == 1 )); then
+    publish_structured_timing_manifest \
+      "$timing_stage" "$timing_ledger" "$input" "$source_type" "$media_input" \
+      "$SOURCE_LANGUAGE" "$MODE" "$MODEL" "$VAD_MODEL" "$chunk_seconds"
+    mv "$timing_stage" "$timing_dir"
+  fi
+
+  {
+    echo "SEMINARTEXT $VERSION PRO"
+    echo "Название: $(basename "$dir")"
+    echo "Источник: $input"
+    echo "Тип источника: $source_type"
+    echo "Идентификатор: $(source_key "$input")"
+    if (( PROJECT_MODE == 1 )); then
+      echo "Source ID: ${PROJECT_SOURCE_ID:-project}"
+    else
+      echo "Номер расшифровки: $transcript_number"
+    fi
+    echo "Режим: $MODE"
+    echo "Язык источника: $SOURCE_LANGUAGE"
+    echo "Дата: $(date '+%d.%m.%Y %H:%M')"
+    echo "Модель: $MODEL"
+    echo "VAD: $VAD_MODEL"
+    echo "Размер фрагмента: ${chunk_seconds} сек."
+    echo "Количество фрагментов: $idx"
+    echo "Подозрительных фрагментов: $bad"
+    if (( STRUCTURED_TIMING == 1 )); then
+      echo "Structured timing: $(basename "$timing_dir")/manifest.json"
+    fi
+    if (( PROJECT_MODE == 1 )); then
+      echo "Файлы: transcript.txt, transcript_clean.txt, transcript_review.txt, transcript.srt$( [[ -f "$docx" ]] && printf ', transcript.docx' )"
+    else
+      echo "Файлы: transcript${transcript_number}.txt, transcript_clean${transcript_number}.txt, transcript_review${transcript_number}.txt, transcript${transcript_number}.srt$( [[ -f "$docx" ]] && printf ', transcript%s.docx' "$transcript_number" )"
+    fi
+  } > "$info"
+
+  touch "$marker"
+  cleanup_temp
+  trap - RETURN INT TERM
+  echo "ГОТОВО: $clean"
+  if (( bad > 0 )); then
+    if (( PROJECT_MODE == 1 )); then
+      echo "Внимание: проверьте transcript_review.txt и transcription.log."
+    else
+      echo "Внимание: проверьте transcript_review${transcript_number}.txt и transcription.log."
+    fi
+  fi
+}
+
+
+topics_command() {
+  local input="" detail="auto" model="${SEMINARTEXT_TOPICS_MODEL:-gemma3:4b}"
+  local force_arg=""
+
+  if [[ $# -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'TOPICSHELP'
+Использование:
+  seminartext topics файл.mp4
+  seminartext topics файл.mp4 --detail low
+  seminartext topics файл.mp4 --detail high
+  seminartext topics файл.mp4 --force
+
+Описание:
+  Анализирует существующий SRT через локальный Ollama.
+  Whisper повторно не запускается.
+  Границы тем выбираются только по реальным SRT-сегментам.
+
+Детализация:
+  low   крупные главы
+  auto  естественная детализация (по умолчанию)
+  high  подробные смысловые блоки
+
+Результаты:
+  topics.txt
+  topics.md
+  topics.json
+
+Параметры:
+  --detail low|auto|high
+  --model MODEL
+  --force
+  -h, --help
+TOPICSHELP
+    return 0
+  fi
+
+  input="$1"
+  shift
+
+  while (($#)); do
+    case "$1" in
+      --detail)
+        shift
+        [[ $# -gt 0 ]] || { echo "Ошибка: после --detail требуется low, auto или high." >&2; return 2; }
+        detail="$1"
+        [[ "$detail" =~ ^(low|auto|high)$ ]] || { echo "Ошибка: --detail = low|auto|high" >&2; return 2; }
+        ;;
+      --model)
+        shift
+        [[ $# -gt 0 ]] || { echo "Ошибка: после --model требуется имя модели." >&2; return 2; }
+        model="$1"
+        ;;
+      --force)
+        force_arg="--force"
+        ;;
+      -h|--help)
+        topics_command --help
+        return 0
+        ;;
+      *)
+        echo "Ошибка: неизвестный параметр topics: $1" >&2
+        return 2
+        ;;
+    esac
+    shift
+  done
+
+  command -v ollama >/dev/null 2>&1 || { echo "Ошибка: ollama не найден." >&2; return 1; }
+  local topics_module
+  topics_module="$(resolve_runtime_module topics)" || return 1
+
+  local -a args=(
+    "$topics_module"
+    "$input"
+    --root "$TRANSCRIPTS_ROOT"
+    --detail "$detail"
+    --model "$model"
+  )
+  [[ -n "$force_arg" ]] && args+=("$force_arg")
+
+  python3 "${args[@]}"
+}
+
+translate_command() {
+  local input="" force_arg=""
+  if [[ $# -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'TRANSLATEHELP'
+Использование:
+  seminartext translate файл.mp4
+  seminartext translate файл.mp4 --force
+
+Создаёт для английского видео transcript_ru.srt, topics_ru.json и topics_ru.txt.
+Временные метки исходных файлов сохраняются.
+TRANSLATEHELP
+    return 0
+  fi
+  input="$1"; shift
+  while (($#)); do
+    case "$1" in
+      --force) force_arg="--force" ;;
+      -h|--help) translate_command --help; return 0 ;;
+      *) echo "Ошибка: неизвестный параметр translate: $1" >&2; return 2 ;;
+    esac
+    shift
+  done
+  command -v ollama >/dev/null 2>&1 || { echo "Ошибка: ollama не найден." >&2; return 1; }
+  local translate_module
+  translate_module="$(resolve_runtime_module translate)" || return 1
+  local -a args=("$translate_module" "$input" --root "$TRANSCRIPTS_ROOT")
+  [[ -n "$force_arg" ]] && args+=("$force_arg")
+  python3 "${args[@]}"
+}
+
+normalize_srt_for_ffmpeg() {
+  local input="$1" output="$2"
+  python3 - "$input" "$output" <<'PYNORMALIZE'
+import re, sys
+from pathlib import Path
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+raw = src.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").strip()
+blocks = re.split(r"\n\s*\n", raw) if raw else []
+out = []
+number = 1
+for block in blocks:
+    lines = [line.rstrip() for line in block.splitlines()]
+    ti = next((i for i, line in enumerate(lines) if "-->" in line), None)
+    if ti is None:
+        continue
+    timing = lines[ti].strip()
+    body = [line.strip() for line in lines[ti + 1:] if line.strip()]
+    if not body:
+        continue
+    out.append("\n".join([str(number), timing] + body))
+    number += 1
+if not out:
+    raise SystemExit("Не удалось нормализовать SRT для FFmpeg")
+dst.write_text("\n\n".join(out) + "\n", encoding="utf-8")
+PYNORMALIZE
+}
+
+subtitles_command() {
+  local input="" burn=0 russian=0 output="" source_dir="" srt="" base="" stem="" target="" subtitle_tmp=""
+
+  if [[ $# -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'SUBHELP'
+Использование:
+  seminartext subtitles файл.mp4
+  seminartext subtitles файл.mp4 --burn
+  seminartext subtitles файл.mp4 --output файл.srt
+
+Логика:
+  1. Ищет уже существующую расшифровку SeminarText для этого видео.
+  2. Использует готовый transcriptN.srt без повторного Whisper.
+  3. Копирует его рядом с видео как <имя>_subtitles.srt.
+  4. При --burn дополнительно создаёт видео с вшитыми субтитрами.
+
+Параметры:
+  --burn          вшить субтитры в видео
+  --russian       использовать готовый перевод transcript_ru.srt
+  --output FILE   имя выходного .srt
+  --force         разрешить перезапись
+  -h, --help      справка
+SUBHELP
+    return 0
+  fi
+
+  input="$1"
+  shift
+
+  [[ -f "$input" ]] || {
+    echo "Ошибка: видеофайл не найден: $input" >&2
+    return 2
+  }
+
+  while (($#)); do
+    case "$1" in
+      --burn)
+        burn=1
+        ;;
+      --russian)
+        russian=1
+        ;;
+      --output)
+        shift
+        [[ $# -gt 0 ]] || { echo "Ошибка: после --output требуется имя файла." >&2; return 2; }
+        output="$1"
+        ;;
+      --force)
+        FORCE=1
+        ;;
+      -h|--help)
+        subtitles_command --help
+        return 0
+        ;;
+      *)
+        echo "Ошибка: неизвестный параметр subtitles: $1" >&2
+        return 2
+        ;;
+    esac
+    shift
+  done
+
+  if [[ -f "$input.seminartext.json" ]]; then
+    local derived_status=0
+    python3 - "$TRANSCRIPTS_ROOT" "$input" "$input.seminartext.json" "$output" "$FORCE" "$russian" <<'PYCLIP' || derived_status=$?
+import json, re, sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+clip = Path(sys.argv[2])
+meta_path = Path(sys.argv[3])
+requested_output = sys.argv[4]
+force = int(sys.argv[5])
+russian = int(sys.argv[6])
+
+meta = json.loads(meta_path.read_text(encoding="utf-8"))
+source = str(Path(meta["source"]).resolve())
+start = float(meta["start_seconds"])
+end = float(meta["end_seconds"])
+
+source_dir = None
+if root.is_dir():
+    for p in root.rglob(".source_path"):
+        try:
+            value = p.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        try:
+            resolved = str(Path(value).expanduser().resolve())
+        except Exception:
+            resolved = value
+        if resolved == source:
+            source_dir = p.parent
+            break
+
+if source_dir is None:
+    source_name = Path(source).name
+    for p in root.rglob(".source_path"):
+        try:
+            value = p.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if Path(value).name == source_name:
+            source_dir = p.parent
+            break
+
+if source_dir is None:
+    raise SystemExit(10)
+
+candidates = []
+plain = source_dir / ("transcript_ru.srt" if russian else "transcript.srt")
+if plain.is_file():
+    candidates.append((0, plain))
+for p in source_dir.glob("transcript*.srt"):
+    if russian and p.name == "transcript_ru.srt":
+        candidates.append((10**9, p))
+        continue
+    m = re.fullmatch(r"transcript(\d+)\.srt", p.name)
+    if m:
+        candidates.append((int(m.group(1)), p))
+if not candidates:
+    raise SystemExit(11)
+candidates.sort(key=lambda x: x[0])
+src = candidates[-1][1]
+
+dst = Path(requested_output).expanduser() if requested_output else clip.with_name(clip.stem + "_subtitles.srt")
+if dst.exists() and not force:
+    print(f"Готовый SRT уже существует, используется повторно: {dst}")
+    raise SystemExit(0)
+
+def parse_time(s):
+    h, m, rest = s.split(":")
+    sec, ms = rest.split(",")
+    return ((int(h)*60+int(m))*60+int(sec))*1000+int(ms)
+
+def fmt(ms):
+    ms = max(0, int(round(ms)))
+    xms = ms % 1000
+    total = ms // 1000
+    sec = total % 60
+    total //= 60
+    minute = total % 60
+    hour = total // 60
+    return f"{hour:02d}:{minute:02d}:{sec:02d},{xms:03d}"
+
+start_ms = int(round(start * 1000))
+end_ms = int(round(end * 1000))
+raw = src.read_text(encoding="utf-8", errors="replace").strip()
+blocks = re.split(r"\n\s*\n", raw) if raw else []
+out = []
+idx = 1
+
+for block in blocks:
+    lines = block.splitlines()
+    ti = next((i for i, line in enumerate(lines) if "-->" in line), None)
+    if ti is None:
+        continue
+    a, b = [x.strip() for x in lines[ti].split("-->", 1)]
+    a_ms, b_ms = parse_time(a), parse_time(b)
+    if b_ms <= start_ms or a_ms >= end_ms:
+        continue
+    new_a = max(a_ms, start_ms) - start_ms
+    new_b = min(b_ms, end_ms) - start_ms
+    body = lines[ti+1:]
+    if not body:
+        continue
+    out.append("\n".join([str(idx), f"{fmt(new_a)} --> {fmt(new_b)}"] + body))
+    idx += 1
+
+if not out:
+    raise SystemExit(13)
+
+dst.parent.mkdir(parents=True, exist_ok=True)
+dst.write_text("\n\n".join(out) + "\n", encoding="utf-8")
+print(f"SRT ГОТОВ ИЗ РАСШИФРОВКИ ИСХОДНИКА: {dst}")
+raise SystemExit(0)
+PYCLIP
+
+    if (( derived_status == 0 )); then
+      if (( burn == 0 )); then
+        return 0
+      fi
+
+      base="$(basename "$input")"
+      stem="${base%.*}"
+
+      if [[ -z "$output" ]]; then
+        output="$(dirname "$input")/${stem}_subtitles.srt"
+      fi
+
+      local burn_ffmpeg=""
+      if [[ -x "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg" ]]; then
+        burn_ffmpeg="/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"
+      elif command -v ffmpeg >/dev/null 2>&1; then
+        burn_ffmpeg="$(command -v ffmpeg)"
+      fi
+
+      [[ -n "$burn_ffmpeg" ]] || {
+        echo "Ошибка: FFmpeg не найден." >&2
+        return 1
+      }
+
+      echo "FFmpeg для вшивания: $burn_ffmpeg"
+      "$burn_ffmpeg" -version | head -1
+
+      if ! "$burn_ffmpeg" -hide_banner -filters 2>/dev/null | grep -E '(^|[[:space:]])subtitles[[:space:]]' >/dev/null; then
+        echo "Ошибка: доступный FFmpeg собран без фильтра subtitles/libass." >&2
+        echo "SRT создан, но режим --burn недоступен." >&2
+        return 3
+      fi
+
+      target="$(dirname "$input")/${stem}_subtitled.mp4"
+      if [[ -e "$target" && "$FORCE" -eq 0 ]]; then
+        echo "Готовое видео с субтитрами уже существует, используется повторно: $target"
+        return 0
+      fi
+
+      subtitle_tmp="$(mktemp -d "${TMPDIR:-/tmp}/seminartext-subtitles.XXXXXX")"
+      normalize_srt_for_ffmpeg "$output" "$subtitle_tmp/subtitles.srt"
+      "$burn_ffmpeg" -hide_banner -y -i "$input" \
+        -vf "subtitles=$subtitle_tmp/subtitles.srt" \
+        -c:v libx264 -preset medium -crf 18 -c:a copy "$target"
+      rm -rf "$subtitle_tmp"
+
+      [[ -s "$target" ]] || {
+        echo "Ошибка: видео с субтитрами не создано." >&2
+        return 1
+      }
+
+      echo "ВИДЕО С СУБТИТРАМИ ГОТОВО: $target"
+      return 0
+
+    elif (( derived_status == 10 || derived_status == 11 )); then
+      echo "Для исходного видео готовый SRT не найден." >&2
+      echo "Можно расшифровать только этот фрагмент:" >&2
+      echo "  seminartext transcribe \"$input\"" >&2
+      return 2
+    elif (( derived_status == 13 )); then
+      echo "В SRT исходника нет реплик в диапазоне этого фрагмента." >&2
+      return 2
+    else
+      return "$derived_status"
+    fi
+  fi
+
+  source_dir="$(
+    python3 - "$TRANSCRIPTS_ROOT" "$input" <<'PYFIND'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+target = str(Path(sys.argv[2]).resolve())
+if not root.is_dir():
+    raise SystemExit(1)
+for p in root.rglob(".source_path"):
+    try:
+        value = p.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        continue
+    if value == target:
+        print(p.parent)
+        raise SystemExit(0)
+raise SystemExit(1)
+PYFIND
+  )" || {
+    echo "Ошибка: для этого видео не найдена готовая расшифровка SeminarText." >&2
+    echo "Сначала выполните: seminartext transcribe файл.mp4" >&2
+    return 2
+  }
+
+  srt="$(
+    python3 - "$source_dir" "$russian" <<'PYSRT'
+import re, sys
+from pathlib import Path
+d = Path(sys.argv[1])
+russian = int(sys.argv[2])
+items = []
+plain = d / ("transcript_ru.srt" if russian else "transcript.srt")
+if plain.is_file():
+    items.append((0, plain))
+for p in d.glob("transcript*.srt"):
+    if russian and p.name == "transcript_ru.srt":
+        items.append((10**9, p))
+        continue
+    m = re.fullmatch(r"transcript(\d+)\.srt", p.name)
+    if m:
+        items.append((int(m.group(1)), p))
+if not items:
+    raise SystemExit(1)
+items.sort(key=lambda x: x[0])
+print(items[-1][1])
+PYSRT
+  )" || {
+    echo "Ошибка: в папке расшифровки не найден transcriptN.srt." >&2
+    return 2
+  }
+
+  base="$(basename "$input")"
+  stem="${base%.*}"
+  if [[ -z "$output" ]]; then
+    output="$(dirname "$input")/${stem}_subtitles.srt"
+  fi
+
+  if [[ -e "$output" && "$FORCE" -eq 0 ]]; then
+    echo "Готовый SRT уже существует, используется повторно: $output"
+  else
+    cp "$srt" "$output"
+    [[ -s "$output" ]] || { echo "Ошибка: не удалось создать SRT." >&2; return 1; }
+    echo "SRT ГОТОВ: $output"
+  fi
+
+  if (( burn == 1 )); then
+    local burn_ffmpeg=""
+
+    if [[ -x "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg" ]]; then
+      burn_ffmpeg="/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"
+    elif command -v ffmpeg >/dev/null 2>&1; then
+      burn_ffmpeg="$(command -v ffmpeg)"
+    fi
+
+    [[ -n "$burn_ffmpeg" ]] || {
+      echo "Ошибка: FFmpeg не найден." >&2
+      return 1
+    }
+
+    echo "FFmpeg для вшивания: $burn_ffmpeg"
+    "$burn_ffmpeg" -version | head -1
+
+    if ! "$burn_ffmpeg" -hide_banner -filters 2>/dev/null | grep -E '(^|[[:space:]])subtitles[[:space:]]' >/dev/null; then
+      echo "Ошибка: доступный FFmpeg собран без фильтра subtitles/libass." >&2
+      echo "SRT создан, но режим --burn недоступен." >&2
+      return 3
+    fi
+
+    target="$(dirname "$input")/${stem}_subtitled.mp4"
+    if [[ -e "$target" && "$FORCE" -eq 0 ]]; then
+      echo "Готовое видео с субтитрами уже существует, используется повторно: $target"
+      return 0
+    fi
+
+    subtitle_tmp="$(mktemp -d "${TMPDIR:-/tmp}/seminartext-subtitles.XXXXXX")"
+    normalize_srt_for_ffmpeg "$output" "$subtitle_tmp/subtitles.srt"
+    "$burn_ffmpeg" -hide_banner -y -i "$input" \
+      -vf "subtitles=$subtitle_tmp/subtitles.srt" \
+      -c:v libx264 -preset medium -crf 18 -c:a copy "$target"
+    rm -rf "$subtitle_tmp"
+
+    [[ -s "$target" ]] || { echo "Ошибка: видео с субтитрами не создано." >&2; return 1; }
+    echo "ВИДЕО С СУБТИТРАМИ ГОТОВО: $target"
+  fi
+}
+
+cut_command() {
+  local input="" start="" end="" output="" mode="exact"
+  local duration start_sec end_sec out_dir base stem ext
+
+  if [[ $# -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'CUTHELP'
+Использование:
+  seminartext cut файл.mp4 START END
+  seminartext cut файл.mp4 START END --fast
+  seminartext cut файл.mp4 START END --output результат.mp4
+
+Примеры:
+  seminartext cut video.mp4 00:15:29 00:17:36
+  seminartext cut video.mp4 15:29 17:36
+  seminartext cut video.mp4 75 105
+  seminartext cut video.mp4 00:15:29 00:17:36 --fast
+
+Форматы времени:
+  HH:MM:SS
+  MM:SS
+  секунды
+
+Режимы:
+  по умолчанию  точная резка с перекодированием H.264 + AAC
+  --fast        быстрая резка без перекодирования; граница может сместиться
+                к ближайшему ключевому кадру
+
+Параметры:
+  --output FILE   явно задать имя выходного файла
+  --force         разрешить перезапись существующего выходного файла
+  -h, --help      справка
+CUTHELP
+    return 0
+  fi
+
+  input="$1"
+  shift
+
+  [[ -f "$input" ]] || {
+    echo "Ошибка: видеофайл не найден: $input" >&2
+    return 2
+  }
+
+  if [[ $# -lt 2 ]]; then
+    echo "Ошибка: укажите начало и конец фрагмента." >&2
+    echo "Пример: seminartext cut video.mp4 00:15:29 00:17:36" >&2
+    return 2
+  fi
+
+  start="$1"
+  end="$2"
+  shift 2
+
+  while (($#)); do
+    case "$1" in
+      --fast)
+        mode="fast"
+        ;;
+      --output)
+        shift
+        [[ $# -gt 0 ]] || {
+          echo "Ошибка: после --output требуется имя файла." >&2
+          return 2
+        }
+        output="$1"
+        ;;
+      --force)
+        FORCE=1
+        ;;
+      -h|--help)
+        cut_command --help
+        return 0
+        ;;
+      *)
+        echo "Ошибка: неизвестный параметр cut: $1" >&2
+        return 2
+        ;;
+    esac
+    shift
+  done
+
+  command -v ffmpeg >/dev/null 2>&1 || { echo "Ошибка: ffmpeg не найден." >&2; return 1; }
+  command -v ffprobe >/dev/null 2>&1 || { echo "Ошибка: ffprobe не найден." >&2; return 1; }
+
+  read -r start_sec end_sec < <(
+    python3 - "$start" "$end" <<'PYTIME'
+import sys
+
+def parse(value: str) -> float:
+    value = value.strip()
+    if not value:
+        raise ValueError("пустое значение")
+    if ":" not in value:
+        x = float(value.replace(",", "."))
+        if x < 0:
+            raise ValueError("отрицательное время")
+        return x
+    parts = value.split(":")
+    if len(parts) not in (2, 3):
+        raise ValueError("ожидался формат MM:SS или HH:MM:SS")
+    nums = [float(x.replace(",", ".")) for x in parts]
+    if any(x < 0 for x in nums):
+        raise ValueError("отрицательное время")
+    if len(nums) == 2:
+        m, s = nums
+        if s >= 60:
+            raise ValueError("секунды должны быть меньше 60")
+        return m * 60 + s
+    h, m, s = nums
+    if m >= 60 or s >= 60:
+        raise ValueError("минуты и секунды должны быть меньше 60")
+    return h * 3600 + m * 60 + s
+
+try:
+    a = parse(sys.argv[1])
+    b = parse(sys.argv[2])
+except Exception as exc:
+    print(f"ОШИБКА ВРЕМЕНИ: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+print(f"{a:.3f} {b:.3f}")
+PYTIME
+  ) || return 2
+
+  python3 - "$start_sec" "$end_sec" <<'PYORDER'
+import sys
+a = float(sys.argv[1])
+b = float(sys.argv[2])
+if b <= a:
+    print("Ошибка: конец фрагмента должен быть позже начала.", file=sys.stderr)
+    raise SystemExit(2)
+PYORDER
+
+  duration="$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input")" || {
+    echo "Ошибка: ffprobe не смог определить длительность файла." >&2
+    return 1
+  }
+
+  python3 - "$start_sec" "$end_sec" "$duration" <<'PYDUR'
+import sys
+a = float(sys.argv[1])
+b = float(sys.argv[2])
+d = float(sys.argv[3])
+if a >= d:
+    print(f"Ошибка: начало фрагмента ({a:.3f} с) находится за пределами видео ({d:.3f} с).", file=sys.stderr)
+    raise SystemExit(2)
+if b > d + 0.05:
+    print(f"Ошибка: конец фрагмента ({b:.3f} с) превышает длительность видео ({d:.3f} с).", file=sys.stderr)
+    raise SystemExit(2)
+PYDUR
+
+  if [[ -z "$output" ]]; then
+    out_dir="$(dirname "$input")"
+    base="$(basename "$input")"
+    if [[ "$base" == *.* ]]; then
+      stem="${base%.*}"
+      ext=".${base##*.}"
+    else
+      stem="$base"
+      ext=".mp4"
+    fi
+    output="$out_dir/${stem}_cut_${start//:/-}_${end//:/-}${ext}"
+  fi
+
+  if [[ -e "$output" && "$FORCE" -eq 0 ]]; then
+    if [[ -s "$output" && -s "$output.seminartext.json" ]]; then
+      echo "Готовый фрагмент уже существует, используется повторно: $output"
+      return 0
+    fi
+    echo "Ошибка: выходной файл уже существует, но у него нет корректных метаданных:" >&2
+    echo "  $output" >&2
+    echo "Используйте --force для пересоздания фрагмента." >&2
+    return 2
+  fi
+
+  mkdir -p "$(dirname "$output")"
+
+  echo "Режу видео..."
+  echo "Источник: $input"
+  echo "Начало:   $start"
+  echo "Конец:    $end"
+  echo "Режим:    $mode"
+  echo "Результат: $output"
+
+  if [[ "$mode" == "fast" ]]; then
+    ffmpeg -hide_banner -y -ss "$start_sec" -to "$end_sec" -i "$input" -map 0 -c copy "$output"
+  else
+    ffmpeg -hide_banner -y -ss "$start_sec" -to "$end_sec" -i "$input" \
+      -map 0:v:0 -map 0:a? \
+      -c:v libx264 -preset medium -crf 18 \
+      -c:a aac -b:a 192k -movflags +faststart "$output"
+  fi
+
+  [[ -s "$output" ]] || {
+    echo "Ошибка: выходной файл не создан или пуст." >&2
+    return 1
+  }
+
+  python3 - "$output.seminartext.json" "$input" "$start_sec" "$end_sec" "$mode" <<'PYMETA'
+import json, sys
+from pathlib import Path
+meta = {
+    "type": "seminartext_clip",
+    "source": str(Path(sys.argv[2]).resolve()),
+    "start_seconds": float(sys.argv[3]),
+    "end_seconds": float(sys.argv[4]),
+    "mode": sys.argv[5],
+}
+Path(sys.argv[1]).write_text(
+    json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8",
+)
+PYMETA
+
+  echo "Метаданные: $output.seminartext.json"
+  echo "ГОТОВО: $output"
+}
+
+
+init_project() {
+  local title="${1:-}"
+
+  if [[ -z "$title" ]]; then
+    echo 'Ошибка: укажите название семинара.' >&2
+    echo 'Пример: seminartext init "Название семинара"' >&2
+    return 2
+  fi
+
+  local projects_root="${SEMINARTEXT_PROJECTS:-$HOME/Documents/seminartext_projects}"
+  local safe_title project_dir
+
+  safe_title="$(sanitize_name "$title")"
+  project_dir="$projects_root/$safe_title"
+
+  if [[ -e "$project_dir" ]]; then
+    echo "Ошибка: проект уже существует:"
+    echo "$project_dir"
+    return 1
+  fi
+
+  mkdir -p "$project_dir"/source/{video,presentations,handouts,other}
+  mkdir -p "$project_dir"/{transcript,topics,presentation,analysis,marketing,clips}
+
+  python3 - "$project_dir/seminar.yaml" "$title" <<'PYMETA'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+title = sys.argv[2]
+
+def yaml_quote(value: str) -> str:
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+content = f"""title: {yaml_quote(title)}
+language: ru
+
+videos: []
+
+documents: []
+
+product_type:
+series:
+price:
+audience_notes:
+restrictions:
+"""
+
+path.write_text(content, encoding="utf-8")
+PYMETA
+
+  echo "Создан проект семинара:"
+  echo "$project_dir"
+  echo
+  echo "Структура:"
+  echo "  source/"
+  echo "    video/"
+  echo "    presentations/"
+  echo "    handouts/"
+  echo "    other/"
+  echo "  transcript/"
+  echo "  topics/"
+  echo "  presentation/"
+  echo "  analysis/"
+  echo "  marketing/"
+  echo "  clips/"
+  echo "  seminar.yaml"
+}
+
+
+
+project_add() {
+  local project_dir="${1:-}"
+
+  if [[ -z "$project_dir" ]]; then
+    echo 'Ошибка: укажите папку проекта.' >&2
+    echo 'Пример:' >&2
+    echo '  seminartext project-add "/путь/к/проекту" --youtube URL --presentation файл.pptx' >&2
+    return 2
+  fi
+
+  shift || true
+
+  project_dir="${project_dir/#\~/$HOME}"
+
+  if [[ ! -d "$project_dir" ]]; then
+    echo "Ошибка: папка проекта не найдена:"
+    echo "$project_dir"
+    return 1
+  fi
+
+  if [[ ! -f "$project_dir/seminar.yaml" ]]; then
+    echo "Ошибка: seminar.yaml не найден:"
+    echo "$project_dir/seminar.yaml"
+    return 1
+  fi
+
+  mkdir -p "$project_dir"/source/{video,presentations,handouts,other}
+
+  local -a add_args=()
+
+  while (($#)); do
+    case "$1" in
+      --youtube)
+        [[ $# -ge 2 ]] || { echo "Ошибка: после --youtube нужна ссылка" >&2; return 2; }
+        add_args+=("youtube::$2")
+        shift 2
+        ;;
+      --video)
+        [[ $# -ge 2 ]] || { echo "Ошибка: после --video нужен путь к файлу" >&2; return 2; }
+        add_args+=("video::$2")
+        shift 2
+        ;;
+      --video-link)
+        [[ $# -ge 2 ]] || { echo "Ошибка: после --video-link нужен путь к файлу" >&2; return 2; }
+        add_args+=("video_link::$2")
+        shift 2
+        ;;
+      --presentation)
+        [[ $# -ge 2 ]] || { echo "Ошибка: после --presentation нужен путь к файлу" >&2; return 2; }
+        add_args+=("presentation::$2")
+        shift 2
+        ;;
+      --handout)
+        [[ $# -ge 2 ]] || { echo "Ошибка: после --handout нужен путь к файлу" >&2; return 2; }
+        add_args+=("handout::$2")
+        shift 2
+        ;;
+      --document)
+        [[ $# -ge 2 ]] || { echo "Ошибка: после --document нужен путь к файлу" >&2; return 2; }
+        add_args+=("document::$2")
+        shift 2
+        ;;
+      -h|--help)
+        cat <<'HELP'
+Использование:
+
+  seminartext project-add PROJECT \
+    --youtube URL \
+    --youtube URL \
+    --video файл.mp4 \
+    --video-link "/путь/к/большому видео.mp4" \
+    --presentation файл.pptx \
+    --handout файл.pdf \
+    --document файл.docx
+
+Параметры можно повторять любое количество раз.
+HELP
+        return 0
+        ;;
+      *)
+        echo "Ошибка: неизвестный параметр project-add: $1" >&2
+        return 2
+        ;;
+    esac
+  done
+
+  if ((${#add_args[@]} == 0)); then
+    echo "Ошибка: не указано ни одного источника." >&2
+    return 2
+  fi
+
+  python3 - "$project_dir" "${add_args[@]}" <<'PYADD'
+import json
+import shutil
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+
+project = Path(sys.argv[1]).expanduser().resolve()
+items = sys.argv[2:]
+
+registry_path = project / "sources.json"
+
+if registry_path.exists():
+    try:
+        data = json.loads(registry_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise SystemExit(f"Ошибка чтения sources.json: {exc}")
+else:
+    data = {
+        "schema_version": 1,
+        "videos": [],
+        "documents": []
+    }
+
+data.setdefault("schema_version", 1)
+data.setdefault("videos", [])
+data.setdefault("documents", [])
+
+def next_id(prefix, existing):
+    nums = []
+    for item in existing:
+        sid = str(item.get("source_id", ""))
+        if sid.startswith(prefix + "_"):
+            try:
+                nums.append(int(sid.split("_")[-1]))
+            except ValueError:
+                pass
+    return f"{prefix}_{max(nums, default=0)+1:03d}"
+
+def is_youtube(url):
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return (
+        host == "youtu.be"
+        or host == "youtube.com"
+        or host.endswith(".youtube.com")
+    )
+
+def unique_destination(folder: Path, source: Path) -> Path:
+    dest = folder / source.name
+    if not dest.exists():
+        return dest
+
+    stem = source.stem
+    suffix = source.suffix
+    n = 2
+    while True:
+        candidate = folder / f"{stem}_{n}{suffix}"
+        if not candidate.exists():
+            return candidate
+        n += 1
+
+def already_registered_url(url):
+    return any(
+        item.get("type") == "youtube" and item.get("url") == url
+        for item in data["videos"]
+    )
+
+def already_registered_file(relative_path):
+    for group in ("videos", "documents"):
+        for item in data[group]:
+            if item.get("file") == relative_path:
+                return True
+    return False
+
+added = []
+
+def save_registry():
+    registry_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+for raw in items:
+    if "::" not in raw:
+        print(f"[SKIP] Некорректная запись: {raw}")
+        continue
+
+    kind, value = raw.split("::", 1)
+    value = value.strip()
+
+    if kind == "youtube":
+        if not is_youtube(value):
+            print(f"[ОШИБКА] Не похоже на YouTube URL: {value}")
+            continue
+
+        if already_registered_url(value):
+            print(f"[SKIP] YouTube уже зарегистрирован: {value}")
+            continue
+
+        sid = next_id("video", data["videos"])
+        order = len(data["videos"]) + 1
+
+        record = {
+            "source_id": sid,
+            "order": order,
+            "type": "youtube",
+            "url": value,
+            "title": ""
+        }
+
+        data["videos"].append(record)
+        added.append(record)
+        save_registry()
+        print(f"[OK] {sid} YouTube #{order}")
+        print(f"     {value}")
+        continue
+
+    src = Path(value).expanduser()
+
+    if not src.is_file():
+        print(f"[ОШИБКА] Файл не найден: {src}")
+        continue
+
+    src = src.resolve()
+
+    if kind in ("video", "video_link"):
+        target_dir = project / "source" / "video"
+        prefix = "video"
+        collection = data["videos"]
+        record_type = "local"
+    elif kind == "presentation":
+        target_dir = project / "source" / "presentations"
+        prefix = "doc"
+        collection = data["documents"]
+        record_type = "presentation"
+    elif kind == "handout":
+        target_dir = project / "source" / "handouts"
+        prefix = "doc"
+        collection = data["documents"]
+        record_type = "handout"
+    elif kind == "document":
+        target_dir = project / "source" / "other"
+        prefix = "doc"
+        collection = data["documents"]
+        record_type = "other"
+    else:
+        print(f"[SKIP] Неизвестный тип: {kind}")
+        continue
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    if kind == "video_link":
+        dst = unique_destination(target_dir, src)
+
+        print(f"[LINK] {src}")
+        print(f"    -> {dst}")
+
+        try:
+            dst.symlink_to(src)
+        except OSError as exc:
+            print(f"[ОШИБКА LINK] {exc}")
+            continue
+
+        rel = str(dst.relative_to(project))
+
+    else:
+        # Если файл с тем же именем уже полностью скопирован,
+        # переиспользуем его вместо создания дубликата.
+        same_name = target_dir / src.name
+
+        try:
+            src_size = src.stat().st_size
+        except OSError as exc:
+            print(f"[ОШИБКА] Не удалось определить размер: {src}: {exc}")
+            continue
+
+        reuse_existing = False
+
+        if same_name.is_file():
+            try:
+                dst_size = same_name.stat().st_size
+            except OSError:
+                dst_size = -1
+
+            if src_size > 0 and dst_size == src_size:
+                dst = same_name
+                reuse_existing = True
+                print(f"[REUSE] Уже скопирован полный файл:")
+                print(f"        {dst}")
+
+        if not reuse_existing:
+            dst = unique_destination(target_dir, src)
+            partial = dst.with_name(dst.name + ".partial")
+
+            # Старый partial от аварийного завершения не используем.
+            try:
+                partial.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+            print(f"[COPY] {src}")
+            print(f"    -> {dst}")
+            print(f"    size: {src_size} bytes")
+
+            try:
+                shutil.copy2(src, partial)
+
+                copied_size = partial.stat().st_size
+
+                if copied_size != src_size:
+                    raise IOError(
+                        f"неполная копия: {copied_size} из {src_size} bytes"
+                    )
+
+                partial.replace(dst)
+
+            except BaseException:
+                try:
+                    partial.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
+
+        rel = str(dst.relative_to(project))
+
+    if already_registered_file(rel):
+        print(f"[SKIP] Уже зарегистрирован: {rel}")
+        continue
+
+    sid = next_id(prefix, collection)
+
+    if kind in ("video", "video_link"):
+        order = len(data["videos"]) + 1
+        record = {
+            "source_id": sid,
+            "order": order,
+            "type": record_type,
+            "file": rel,
+            "title": src.stem
+        }
+        data["videos"].append(record)
+        print(f"[OK] {sid} Local video #{order}")
+    else:
+        record = {
+            "source_id": sid,
+            "type": record_type,
+            "file": rel,
+            "title": src.stem
+        }
+        data["documents"].append(record)
+        print(f"[OK] {sid} {record_type}")
+
+    added.append(record)
+    save_registry()
+    print(f"     {rel}")
+
+registry_path.write_text(
+    json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8"
+)
+
+print()
+print(f"Добавлено источников: {len(added)}")
+print(f"Видеоисточников всего: {len(data['videos'])}")
+print(f"Документов всего: {len(data['documents'])}")
+print(f"Реестр: {registry_path}")
+PYADD
+}
+
+
+
+
+
+
+
+
+
+project_topic_benchmark_run() {
+  local project_arg="${1:-}"
+  local only_case=""
+  local tolerance=2
+  local detail="${SEMINARTEXT_TOPICS_DETAIL:-auto}"
+  local model="${SEMINARTEXT_TOPICS_MODEL:-gemma3:4b}"
+
+  if [[ "$project_arg" == "-h" || "$project_arg" == "--help" ]]; then
+    cat <<'HELP'
+Использование:
+
+  seminartext project-topic-benchmark-run PROJECT
+  seminartext project-topic-benchmark-run PROJECT --only video_001_window_04
+  seminartext project-topic-benchmark-run PROJECT --tolerance 0|1|2
+
+Запускает текущий production Topic Engine на Gold benchmark и сохраняет
+машиночитаемый результат в analysis/benchmark/results/.
+HELP
+    return 0
+  fi
+
+  if [[ -z "$project_arg" ]]; then
+    echo 'Ошибка: укажите проект.' >&2
+    echo 'Пример: seminartext project-topic-benchmark-run "Стресс код"' >&2
+    return 2
+  fi
+
+  shift || true
+
+  while (($#)); do
+    case "$1" in
+      --only)
+        [[ $# -ge 2 ]] || { echo "Ошибка: после --only нужен case_id" >&2; return 2; }
+        only_case="$2"
+        shift 2
+        ;;
+      --tolerance)
+        [[ $# -ge 2 ]] || { echo "Ошибка: после --tolerance нужно 0, 1 или 2" >&2; return 2; }
+        tolerance="$2"
+        shift 2
+        ;;
+      --detail)
+        [[ $# -ge 2 ]] || { echo "Ошибка: после --detail нужен low|auto|high" >&2; return 2; }
+        detail="$2"
+        shift 2
+        ;;
+      --model)
+        [[ $# -ge 2 ]] || { echo "Ошибка: после --model нужно имя модели" >&2; return 2; }
+        model="$2"
+        shift 2
+        ;;
+      -h|--help)
+        cat <<'HELP'
+Использование:
+
+  seminartext project-topic-benchmark-run PROJECT
+  seminartext project-topic-benchmark-run PROJECT --only video_001_window_04
+  seminartext project-topic-benchmark-run PROJECT --tolerance 0|1|2
+
+Запускает текущий production Topic Engine на Gold benchmark и сохраняет
+машиночитаемый результат в analysis/benchmark/results/.
+HELP
+        return 0
+        ;;
+      *)
+        echo "Ошибка: неизвестный параметр benchmark-run: $1" >&2
+        return 2
+        ;;
+    esac
+  done
+
+  case "$tolerance" in
+    0|1|2) ;;
+    *)
+      echo "Ошибка: --tolerance должен быть 0, 1 или 2" >&2
+      return 2
+      ;;
+  esac
+
+  case "$detail" in
+    low|auto|high) ;;
+    *)
+      echo "Ошибка: --detail должен быть low, auto или high" >&2
+      return 2
+      ;;
+  esac
+
+  local projects_root="${SEMINARTEXT_PROJECTS:-$HOME/Documents/seminartext_projects}"
+  local project_dir
+
+  project_arg="${project_arg/#\~/$HOME}"
+
+  if [[ -d "$project_arg" ]]; then
+    project_dir="$project_arg"
+  else
+    project_dir="$projects_root/$(sanitize_name "$project_arg")"
+  fi
+
+  [[ -d "$project_dir" ]] || {
+    echo "Ошибка: проект не найден: $project_dir" >&2
+    return 1
+  }
+
+  local benchmark="$project_dir/analysis/benchmark/topic_benchmark.json"
+  dataset_guard_benchmark "$project_dir" "$benchmark" benchmark_run || return $?
+  local topics_module
+  topics_module="$(resolve_runtime_module topics)" || return 1
+  local results_dir="$project_dir/analysis/benchmark/results"
+
+  [[ -f "$benchmark" ]] || {
+    echo "Ошибка: benchmark не найден:" >&2
+    echo "  $benchmark" >&2
+    return 1
+  }
+
+  [[ -f "$topics_module" ]] || {
+    echo "Ошибка: не найден Topic Engine:" >&2
+    echo "  $topics_module" >&2
+    return 1
+  }
+
+  mkdir -p "$results_dir"
+
+  "$SEMINARTEXT_PYTHON" - \
+    "$benchmark" \
+    "$topics_module" \
+    "$results_dir" \
+    "$tolerance" \
+    "$detail" \
+    "$model" \
+    "$only_case" \
+    "$DATASET_GUARD_ID" \
+    "$DATASET_GUARD_ROLE" \
+    "$DATASET_GUARD_REGISTRY" <<'PYRUN'
+import hashlib
+import importlib.util
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+benchmark_path = Path(sys.argv[1])
+module_path = Path(sys.argv[2])
+results_dir = Path(sys.argv[3])
+tolerance = int(sys.argv[4])
+detail = sys.argv[5]
+model = sys.argv[6]
+only_case = sys.argv[7].strip()
+dataset_id = sys.argv[8]
+dataset_role = sys.argv[9]
+dataset_registry = sys.argv[10]
+
+
+def load_json(path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Ошибка: benchmark JSON повреждён: {exc}")
+
+
+def import_topic_engine(path):
+    spec = importlib.util.spec_from_file_location(
+        "seminartext_topics",
+        path,
+    )
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"Ошибка: не удалось загрузить Topic Engine: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if not hasattr(module, "analyze_window_boundaries"):
+        raise SystemExit(
+            "Ошибка: Topic Engine не содержит analyze_window_boundaries"
+        )
+    return module
+
+
+def as_segment(item, case_id):
+    missing = [key for key in ("id", "start", "end", "text") if key not in item]
+    if missing:
+        raise SystemExit(
+            f"Ошибка: case {case_id}: segment без полей {missing}"
+        )
+    return {
+        "id": int(item["id"]),
+        "start": str(item["start"]),
+        "end": str(item["end"]),
+        "text": str(item["text"]),
+    }
+
+
+def validate_case(case):
+    case_id = case.get("case_id", "<unknown>")
+    segments = [as_segment(x, case_id) for x in case.get("segments", [])]
+    if not segments:
+        raise SystemExit(f"Ошибка: case {case_id}: нет transcript segments")
+
+    segment_ids = [x["id"] for x in segments]
+    if len(segment_ids) != len(set(segment_ids)):
+        raise SystemExit(f"Ошибка: case {case_id}: повторяющиеся segment id")
+
+    gold = case.get("gold", {})
+    boundaries = [int(x) for x in gold.get("boundaries", [])]
+    topics = gold.get("topics", [])
+
+    if not boundaries:
+        raise SystemExit(f"Ошибка: case {case_id}: нет gold.boundaries")
+    if not isinstance(topics, list) or not topics:
+        raise SystemExit(f"Ошибка: case {case_id}: нет gold.topics")
+    if len(boundaries) != len(topics):
+        raise SystemExit(
+            f"Ошибка: case {case_id}: gold boundaries/topics mismatch"
+        )
+    if boundaries != sorted(boundaries):
+        raise SystemExit(f"Ошибка: case {case_id}: gold.boundaries не отсортированы")
+    if len(boundaries) != len(set(boundaries)):
+        raise SystemExit(f"Ошибка: case {case_id}: повтор gold.boundaries")
+
+    valid_ids = set(segment_ids)
+    missing = [x for x in boundaries if x not in valid_ids]
+    if missing:
+        raise SystemExit(
+            f"Ошибка: case {case_id}: gold boundaries вне segments: {missing}"
+        )
+
+    return segments, boundaries, topics
+
+
+def match_boundaries(gold, predicted, tol):
+    remaining = set(range(len(predicted)))
+    matches = []
+
+    for g in gold:
+        candidates = [
+            (abs(predicted[i] - g), predicted[i], i)
+            for i in remaining
+            if abs(predicted[i] - g) <= tol
+        ]
+        if not candidates:
+            continue
+        distance, pred, idx = min(candidates)
+        remaining.remove(idx)
+        matches.append({
+            "gold": g,
+            "predicted": pred,
+            "distance": distance,
+        })
+
+    matched_gold = {x["gold"] for x in matches}
+    matched_pred = {x["predicted"] for x in matches}
+    false_negatives = [x for x in gold if x not in matched_gold]
+    false_positives = [x for x in predicted if x not in matched_pred]
+    return matches, false_positives, false_negatives
+
+
+def metrics_for(gold, predicted, tol):
+    matches, fp, fn = match_boundaries(gold, predicted, tol)
+    tp = len(matches)
+    precision = tp / len(predicted) if predicted else 0.0
+    recall = tp / len(gold) if gold else 0.0
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if precision + recall
+        else 0.0
+    )
+    distances = [x["distance"] for x in matches]
+    return {
+        "gold_boundaries": gold,
+        "predicted_boundaries": predicted,
+        "matched_boundaries": matches,
+        "false_positives": fp,
+        "false_negatives": fn,
+        "true_positives": tp,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "mean_boundary_distance": (
+            sum(distances) / len(distances)
+            if distances
+            else None
+        ),
+        "max_boundary_distance": max(distances) if distances else None,
+        "gold_topic_count": len(gold),
+        "predicted_topic_count": len(predicted),
+        "topic_count_error": len(predicted) - len(gold),
+        "absolute_topic_count_error": abs(len(predicted) - len(gold)),
+    }
+
+
+def fmt_float(value, digits=3):
+    if value is None:
+        return "n/a"
+    return f"{value:.{digits}f}"
+
+
+benchmark = load_json(benchmark_path)
+topic_engine = import_topic_engine(module_path)
+
+cases = benchmark.get("cases", [])
+selected = [
+    case
+    for case in cases
+    if case.get("review", {}).get("status") == "gold_complete"
+]
+
+if only_case:
+    selected = [case for case in selected if case.get("case_id") == only_case]
+    if not selected:
+        raise SystemExit(
+            f"Ошибка: gold_complete benchmark case не найден: {only_case}"
+        )
+
+if not selected:
+    raise SystemExit("Ошибка: нет ни одного gold_complete case")
+
+case_results = []
+
+for case in selected:
+    case_id = case.get("case_id", "<unknown>")
+    segments, gold_boundaries, gold_topics = validate_case(case)
+
+    try:
+        predicted = topic_engine.analyze_window_boundaries(
+            segments,
+            detail=detail,
+            model=model,
+        )
+    except Exception as exc:
+        raise SystemExit(
+            f"Ошибка: Topic Engine не смог выполнить prediction "
+            f"для {case_id}: {exc}"
+        )
+
+    if not isinstance(predicted, list) or not predicted:
+        raise SystemExit(
+            f"Ошибка: Topic Engine вернул пустой prediction для {case_id}"
+        )
+
+    valid_ids = {x["id"] for x in segments}
+    predicted = sorted(set(int(x) for x in predicted))
+    invalid = [x for x in predicted if x not in valid_ids]
+    if invalid:
+        raise SystemExit(
+            f"Ошибка: Topic Engine вернул ID вне окна для {case_id}: {invalid}"
+        )
+
+    case_metrics = metrics_for(gold_boundaries, predicted, tolerance)
+    case_metrics.update({
+        "case_id": case_id,
+        "source_id": case.get("source_id"),
+        "window_number": case.get("window_number"),
+        "start": case.get("start"),
+        "end": case.get("end"),
+        "status": case.get("review", {}).get("status"),
+    })
+    case_results.append(case_metrics)
+
+    print()
+    print(case_id)
+    print()
+    print(f"Gold topics:       {case_metrics['gold_topic_count']}")
+    print(f"Predicted topics:  {case_metrics['predicted_topic_count']}")
+    print()
+    print("Gold boundaries:")
+    print(" ".join(str(x) for x in case_metrics["gold_boundaries"]))
+    print()
+    print("Predicted:")
+    print(" ".join(str(x) for x in case_metrics["predicted_boundaries"]))
+    print()
+    print(f"Tolerance: +/-{tolerance}")
+    print()
+    print(f"TP: {case_metrics['true_positives']}")
+    print(f"FP: {len(case_metrics['false_positives'])}")
+    print(f"FN: {len(case_metrics['false_negatives'])}")
+    print()
+    print(f"Precision: {fmt_float(case_metrics['precision'])}")
+    print(f"Recall:    {fmt_float(case_metrics['recall'])}")
+    print(f"F1:        {fmt_float(case_metrics['f1'])}")
+    print()
+    print(
+        "Mean boundary distance: "
+        f"{fmt_float(case_metrics['mean_boundary_distance'], 2)} segments"
+    )
+    print(
+        "Max boundary distance:  "
+        f"{fmt_float(case_metrics['max_boundary_distance'], 2)} segments"
+    )
+    print(
+        "Topic count error: "
+        f"{case_metrics['topic_count_error']:+d}"
+    )
+
+total_gold = sum(x["gold_topic_count"] for x in case_results)
+total_predicted = sum(x["predicted_topic_count"] for x in case_results)
+total_tp = sum(x["true_positives"] for x in case_results)
+total_fp = sum(len(x["false_positives"]) for x in case_results)
+total_fn = sum(len(x["false_negatives"]) for x in case_results)
+
+aggregate_precision = (
+    total_tp / (total_tp + total_fp)
+    if total_tp + total_fp
+    else 0.0
+)
+aggregate_recall = (
+    total_tp / (total_tp + total_fn)
+    if total_tp + total_fn
+    else 0.0
+)
+aggregate_f1 = (
+    2 * aggregate_precision * aggregate_recall
+    / (aggregate_precision + aggregate_recall)
+    if aggregate_precision + aggregate_recall
+    else 0.0
+)
+
+all_distances = [
+    match["distance"]
+    for case in case_results
+    for match in case["matched_boundaries"]
+]
+mean_distance = (
+    sum(all_distances) / len(all_distances)
+    if all_distances
+    else None
+)
+mean_topic_count_error = (
+    sum(x["topic_count_error"] for x in case_results)
+    / len(case_results)
+)
+mean_absolute_topic_count_error = (
+    sum(x["absolute_topic_count_error"] for x in case_results)
+    / len(case_results)
+)
+
+aggregate = {
+    "case_count": len(case_results),
+    "total_cases": len(cases),
+    "gold_complete_cases": sum(
+        1
+        for case in cases
+        if case.get("review", {}).get("status") == "gold_complete"
+    ),
+    "gold_topic_count": total_gold,
+    "predicted_topic_count": total_predicted,
+    "true_positives": total_tp,
+    "false_positives": total_fp,
+    "false_negatives": total_fn,
+    "boundary_precision": aggregate_precision,
+    "boundary_recall": aggregate_recall,
+    "boundary_f1": aggregate_f1,
+    "mean_boundary_distance": mean_distance,
+    "mean_topic_count_error": mean_topic_count_error,
+    "mean_absolute_topic_count_error": mean_absolute_topic_count_error,
+}
+
+print()
+print("TOPIC BENCHMARK - DATASET A")
+print("===========================")
+print()
+print(
+    f"Cases: {aggregate['case_count']}/"
+    f"{aggregate['gold_complete_cases']}"
+)
+print()
+print(f"Gold topics:       {total_gold}")
+print(f"Predicted topics:  {total_predicted}")
+print()
+print(f"Boundary Precision: {fmt_float(aggregate_precision)}")
+print(f"Boundary Recall:    {fmt_float(aggregate_recall)}")
+print(f"Boundary F1:        {fmt_float(aggregate_f1)}")
+print()
+print(
+    "Mean boundary distance: "
+    f"{fmt_float(mean_distance, 2)} segments"
+)
+print(
+    "Mean topic count error: "
+    f"{fmt_float(mean_topic_count_error, 2)}"
+)
+print()
+print("Per-window:")
+for case in case_results:
+    print(
+        f"  {case['case_id']}: "
+        f"P={case['precision']:.3f} "
+        f"R={case['recall']:.3f} "
+        f"F1={case['f1']:.3f} "
+        f"topics {case['predicted_topic_count']}/"
+        f"{case['gold_topic_count']} "
+        f"err {case['topic_count_error']:+d}"
+    )
+
+engine_source = module_path.read_bytes()
+engine_version = {
+    "name": "seminartext_topics",
+    "entrypoint": "analyze_window_boundaries",
+    "source_path": str(module_path),
+    "source_sha256": hashlib.sha256(engine_source).hexdigest(),
+}
+
+parameters = {
+    "embedding_model": None,
+    "change_point_method": "ollama_structured_semantic_boundaries",
+    "threshold": None,
+    "smoothing": None,
+    "minimum_topic_size": topic_engine.DETAIL[detail]["hard_min_sec"],
+    "maximum_topic_size": {
+        "low": 10 * 60,
+        "auto": 5 * 60,
+        "high": 3 * 60,
+    }.get(detail),
+    "detail": detail,
+    "model": model,
+    "temperature": 0,
+    "boundary_tolerance_segments": tolerance,
+    "other_relevant_parameters": {
+        "window_seconds": getattr(topic_engine, "WINDOW_SEC", None),
+        "target_per_hour": topic_engine.DETAIL[detail]["target_per_hour"],
+        "min_sec": topic_engine.DETAIL[detail]["min_sec"],
+        "hard_min_sec": topic_engine.DETAIL[detail]["hard_min_sec"],
+        "refinement_max_depth": 2,
+    },
+}
+
+timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+result = {
+    "schema_version": 1,
+    "type": "seminartext_topic_benchmark_run",
+    "engine_version": engine_version,
+    "engine_identity": {
+        "engine_id": "legacy_ollama_gemma_runtime",
+        "role_id": "production_legacy",
+        "lifecycle_registry": "governance/topic_engine_lifecycle.json",
+        "production_runtime": True,
+        "production_promoted": False,
+    },
+    "dataset_identity": {
+        "dataset_id": dataset_id,
+        "dataset_role": dataset_role,
+        "registry_path": dataset_registry,
+    },
+    "benchmark_version": {
+        "schema_version": benchmark.get("schema_version"),
+        "type": benchmark.get("type"),
+        "source_id": benchmark.get("source_id"),
+        "source_path": str(benchmark_path),
+        "source_sha256": hashlib.sha256(
+            benchmark_path.read_bytes()
+        ).hexdigest(),
+    },
+    "timestamp": timestamp,
+    "parameters": parameters,
+    "tolerance": tolerance,
+    "aggregate_metrics": aggregate,
+    "cases": case_results,
+}
+
+result_path = results_dir / f"topic_benchmark_run_{timestamp}.json"
+result_path.write_text(
+    json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8",
+)
+
+latest_path = results_dir / "topic_benchmark_run.json"
+latest_path.write_text(
+    json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8",
+)
+
+print()
+print(f"JSON: {result_path}")
+print(f"LATEST: {latest_path}")
+print()
+print("BENCHMARK COMPLETE")
+PYRUN
+}
+
+
+
+
+
+project_topic_benchmark_show() {
+  local project_arg="${1:-}"
+  local case_id="${2:-}"
+
+  if [[ -z "$project_arg" || -z "$case_id" ]]; then
+    echo 'Использование:' >&2
+    echo '  seminartext project-topic-benchmark-show PROJECT CASE_ID' >&2
+    return 2
+  fi
+
+  local projects_root="${SEMINARTEXT_PROJECTS:-$HOME/Documents/seminartext_projects}"
+  local project_dir
+
+  project_arg="${project_arg/#\~/$HOME}"
+
+  if [[ -d "$project_arg" ]]; then
+    project_dir="$project_arg"
+  else
+    project_dir="$projects_root/$(sanitize_name "$project_arg")"
+  fi
+
+  local benchmark="$project_dir/analysis/benchmark/topic_benchmark.json"
+  dataset_guard_benchmark "$project_dir" "$benchmark" gold_read || return $?
+
+  [[ -f "$benchmark" ]] || {
+    echo "Ошибка: benchmark не найден:" >&2
+    echo "$benchmark" >&2
+    return 1
+  }
+
+  "$SEMINARTEXT_PYTHON" - "$benchmark" "$case_id" <<'PYSHOW'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+case_id = sys.argv[2]
+
+data = json.loads(path.read_text(encoding="utf-8"))
+
+case = next(
+    (x for x in data.get("cases", []) if x.get("case_id") == case_id),
+    None,
+)
+
+if case is None:
+    raise SystemExit(f"Ошибка: benchmark case не найден: {case_id}")
+
+print("=" * 80)
+print(case["case_id"])
+print(f'{case["start"]}–{case["end"]}')
+print("=" * 80)
+
+gold = case.get("gold", {})
+
+print()
+print("ТЕКУЩИЙ ЭТАЛОН")
+print("Границы:", gold.get("boundaries") or "[не размечено]")
+
+topics = gold.get("topics") or []
+if topics:
+    for t in topics:
+        print(
+            f'  {t.get("start_id")} | '
+            f'{t.get("title", "")} | '
+            f'{t.get("summary", "")}'
+        )
+else:
+    print("Темы: [не размечено]")
+
+print()
+print("РАСШИФРОВКА")
+print()
+
+for seg in case.get("segments", []):
+    print(
+        f'[{seg["id"]}] '
+        f'{seg["start"]}–{seg["end"]} | '
+        f'{seg["text"]}'
+    )
+PYSHOW
+}
+
+
+
+project_topic_benchmark_check() {
+  local project_arg="${1:-}"
+
+  if [[ -z "$project_arg" ]]; then
+    echo 'Использование:' >&2
+    echo '  seminartext project-topic-benchmark-check PROJECT' >&2
+    return 2
+  fi
+
+  local projects_root="${SEMINARTEXT_PROJECTS:-$HOME/Documents/seminartext_projects}"
+  local project_dir
+
+  project_arg="${project_arg/#\~/$HOME}"
+
+  if [[ -d "$project_arg" ]]; then
+    project_dir="$project_arg"
+  else
+    project_dir="$projects_root/$(sanitize_name "$project_arg")"
+  fi
+
+  local benchmark="$project_dir/analysis/benchmark/topic_benchmark.json"
+  dataset_guard_benchmark "$project_dir" "$benchmark" gold_read || return $?
+
+  [[ -f "$benchmark" ]] || {
+    echo "Ошибка: benchmark не найден:" >&2
+    echo "  $benchmark" >&2
+    return 1
+  }
+
+  "$SEMINARTEXT_PYTHON" - "$benchmark" <<'PYCHECK'
+import json
+import sys
+from pathlib import Path
+
+benchmark_path = Path(sys.argv[1])
+
+data = json.loads(benchmark_path.read_text(encoding="utf-8"))
+cases = data.get("cases", [])
+
+ok = 0
+errors = []
+
+for case in cases:
+    cid = case.get("case_id", "<unknown>")
+    segments = case.get("segments", [])
+    gold = case.get("gold", {})
+    review = case.get("review", {})
+
+    boundaries = gold.get("boundaries", [])
+    topics = gold.get("topics", [])
+
+    segment_ids = {
+        int(s["id"])
+        for s in segments
+        if "id" in s
+    }
+
+    case_errors = []
+
+    if review.get("status") != "gold_complete":
+        case_errors.append(f'status={review.get("status")!r}')
+
+    if not boundaries:
+        case_errors.append("нет gold.boundaries")
+
+    if not topics:
+        case_errors.append("нет gold.topics")
+
+    if len(boundaries) != len(topics):
+        case_errors.append(
+            f"boundaries={len(boundaries)}, topics={len(topics)}"
+        )
+
+    if boundaries != sorted(boundaries):
+        case_errors.append("boundaries не отсортированы")
+
+    if len(boundaries) != len(set(boundaries)):
+        case_errors.append("есть повторяющиеся boundaries")
+
+    bad_boundaries = [x for x in boundaries if x not in segment_ids]
+    if bad_boundaries:
+        case_errors.append(
+            f"boundaries вне segments: {bad_boundaries}"
+        )
+
+    topic_start_ids = [t.get("start_id") for t in topics]
+
+    if topic_start_ids != boundaries:
+        case_errors.append(
+            "start_id тем не совпадают с boundaries"
+        )
+
+    for i, topic in enumerate(topics, 1):
+        if not str(topic.get("title", "")).strip():
+            case_errors.append(f"тема {i}: пустой title")
+
+    if case_errors:
+        errors.append((cid, case_errors))
+        print(f"[FAIL] {cid}")
+        for e in case_errors:
+            print(f"       - {e}")
+    else:
+        ok += 1
+        print(
+            f"[OK]   {cid}: "
+            f"{len(boundaries)} тем, "
+            f"{len(segments)} сегментов"
+        )
+
+print()
+print(f"GOLD COMPLETE: {ok}/{len(cases)}")
+
+integrity_ok = (
+    not errors
+    and len(cases) == 6
+    and ok == 6
+)
+
+print(
+    "BENCHMARK INTEGRITY: OK"
+    if integrity_ok
+    else "BENCHMARK INTEGRITY: FAIL"
+)
+print("READ-ONLY CHECK: benchmark and governance files were not modified")
+
+if not integrity_ok:
+    raise SystemExit(1)
+PYCHECK
+}
+
+project_topic_benchmark_label() {
+  local project_arg="${1:-}"
+  local case_id="${2:-}"
+
+  if [[ -z "$project_arg" || -z "$case_id" ]]; then
+    echo 'Использование:' >&2
+    echo '  seminartext project-topic-benchmark-label PROJECT CASE_ID --boundaries 1,57,80' >&2
+    return 2
+  fi
+
+  shift 2 || true
+
+  local boundaries=""
+  local topics_file=""
+  local notes=""
+
+  while (($#)); do
+    case "$1" in
+      --boundaries)
+        [[ $# -ge 2 ]] || { echo "Ошибка: нужен список boundaries" >&2; return 2; }
+        boundaries="$2"
+        shift 2
+        ;;
+      --topics-file)
+        [[ $# -ge 2 ]] || { echo "Ошибка: нужен JSON-файл тем" >&2; return 2; }
+        topics_file="$2"
+        shift 2
+        ;;
+      --notes)
+        [[ $# -ge 2 ]] || { echo "Ошибка: нужен текст примечания" >&2; return 2; }
+        notes="$2"
+        shift 2
+        ;;
+      -h|--help)
+        cat <<'HELP'
+Использование:
+
+  seminartext project-topic-benchmark-label PROJECT CASE_ID \
+    --boundaries 2044,2075,2098,2125,2130
+
+Дополнительно:
+  --topics-file FILE.json
+  --notes "Комментарий"
+
+Формат topics-file:
+
+[
+  {
+    "start_id": 2044,
+    "title": "Название темы",
+    "summary": "..."
+  }
+]
+HELP
+        return 0
+        ;;
+      *)
+        echo "Ошибка: неизвестный параметр benchmark-label: $1" >&2
+        return 2
+        ;;
+    esac
+  done
+
+  [[ -n "$boundaries" ]] || {
+    echo "Ошибка: обязательно укажите --boundaries" >&2
+    return 2
+  }
+
+  local projects_root="${SEMINARTEXT_PROJECTS:-$HOME/Documents/seminartext_projects}"
+  local project_dir
+
+  project_arg="${project_arg/#\~/$HOME}"
+
+  if [[ -d "$project_arg" ]]; then
+    project_dir="$project_arg"
+  else
+    project_dir="$projects_root/$(sanitize_name "$project_arg")"
+  fi
+
+  dataset_guard_project "$project_dir" gold_author || return $?
+
+  local benchmark="$project_dir/analysis/benchmark/topic_benchmark.json"
+
+  [[ -f "$benchmark" ]] || {
+    echo "Ошибка: benchmark не найден:" >&2
+    echo "$benchmark" >&2
+    return 1
+  }
+
+  if [[ -n "$topics_file" ]]; then
+    topics_file="${topics_file/#\~/$HOME}"
+    [[ -f "$topics_file" ]] || {
+      echo "Ошибка: topics-file не найден: $topics_file" >&2
+      return 1
+    }
+  fi
+
+  "$SEMINARTEXT_PYTHON" - \
+    "$benchmark" \
+    "$case_id" \
+    "$boundaries" \
+    "$topics_file" \
+    "$notes" <<'PYLABEL'
+
+import json
+import sys
+from pathlib import Path
+
+benchmark_path = Path(sys.argv[1])
+case_id = sys.argv[2]
+boundaries_raw = sys.argv[3]
+topics_file = sys.argv[4].strip()
+notes = sys.argv[5]
+
+data = json.loads(
+    benchmark_path.read_text(encoding="utf-8")
+)
+
+case = next(
+    (x for x in data.get("cases", []) if x.get("case_id") == case_id),
+    None,
+)
+
+if case is None:
+    raise SystemExit(
+        f"Ошибка: benchmark case не найден: {case_id}"
+    )
+
+valid_ids = {
+    int(x["id"])
+    for x in case.get("segments", [])
+}
+
+try:
+    boundaries = [
+        int(x.strip())
+        for x in boundaries_raw.split(",")
+        if x.strip()
+    ]
+except ValueError:
+    raise SystemExit(
+        "Ошибка: boundaries должны быть целыми ID через запятую"
+    )
+
+boundaries = sorted(set(boundaries))
+
+if not boundaries:
+    raise SystemExit("Ошибка: boundaries пусты")
+
+first_id = int(case["first_segment_id"])
+
+if boundaries[0] != first_id:
+    raise SystemExit(
+        f"Ошибка: первая граница должна быть {first_id}, "
+        f"получено {boundaries[0]}"
+    )
+
+invalid = [
+    x for x in boundaries
+    if x not in valid_ids
+]
+
+if invalid:
+    raise SystemExit(
+        f"Ошибка: ID отсутствуют в benchmark case: {invalid}"
+    )
+
+topics = []
+
+if topics_file:
+    p = Path(topics_file)
+    topics = json.loads(
+        p.read_text(encoding="utf-8")
+    )
+
+    if not isinstance(topics, list):
+        raise SystemExit(
+            "Ошибка: topics-file должен содержать JSON-массив"
+        )
+
+    topic_ids = []
+
+    for topic in topics:
+        if not isinstance(topic, dict):
+            raise SystemExit(
+                "Ошибка: каждый topic должен быть объектом"
+            )
+
+        sid = int(topic.get("start_id"))
+        topic_ids.append(sid)
+
+        if sid not in boundaries:
+            raise SystemExit(
+                f"Ошибка: topic start_id {sid} "
+                "не входит в gold boundaries"
+            )
+
+    if sorted(set(topic_ids)) != boundaries:
+        raise SystemExit(
+            "Ошибка: topics-file должен содержать ровно "
+            "по одной теме на каждую boundary"
+        )
+
+case["gold"]["boundaries"] = boundaries
+case["gold"]["topics"] = topics
+
+case["review"]["status"] = (
+    "gold_complete"
+    if topics
+    else "boundaries_complete"
+)
+
+case["review"]["notes"] = notes
+
+benchmark_path.write_text(
+    json.dumps(
+        data,
+        ensure_ascii=False,
+        indent=2,
+    ) + "\n",
+    encoding="utf-8",
+)
+
+print("[OK] Benchmark case обновлён")
+print("Case:", case_id)
+print("Boundaries:", boundaries)
+print("Topics:", len(topics))
+print("Status:", case["review"]["status"])
+PYLABEL
+}
+
+project_topic_benchmark_init() {
+  local project_arg="${1:-}"
+  local only_source="video_001"
+  local windows_arg="1,4,8,12,17,22"
+  local force=0
+
+  if [[ -z "$project_arg" ]]; then
+    echo 'Ошибка: укажите проект.' >&2
+    echo 'Пример: seminartext project-topic-benchmark-init "Стресс код"' >&2
+    return 2
+  fi
+
+  shift || true
+
+  while (($#)); do
+    case "$1" in
+      --only)
+        [[ $# -ge 2 ]] || { echo "Ошибка: после --only нужен source_id" >&2; return 2; }
+        only_source="$2"
+        shift 2
+        ;;
+      --windows)
+        [[ $# -ge 2 ]] || { echo "Ошибка: после --windows нужен список, например 1,4,8,12,17,22" >&2; return 2; }
+        windows_arg="$2"
+        shift 2
+        ;;
+      --force)
+        force=1
+        shift
+        ;;
+      -h|--help)
+        cat <<'HELP'
+Использование:
+
+  seminartext project-topic-benchmark-init PROJECT
+  seminartext project-topic-benchmark-init PROJECT --only video_001
+  seminartext project-topic-benchmark-init PROJECT --windows 1,4,8,12,17,22
+  seminartext project-topic-benchmark-init PROJECT --force
+
+Создаёт эталонный набор фрагментов для ручной разметки Topic Engine.
+HELP
+        return 0
+        ;;
+      *)
+        echo "Ошибка: неизвестный параметр benchmark-init: $1" >&2
+        return 2
+        ;;
+    esac
+  done
+
+  local projects_root="${SEMINARTEXT_PROJECTS:-$HOME/Documents/seminartext_projects}"
+  local project_dir
+
+  project_arg="${project_arg/#\~/$HOME}"
+
+  if [[ -d "$project_arg" ]]; then
+    project_dir="$project_arg"
+  else
+    project_dir="$projects_root/$(sanitize_name "$project_arg")"
+  fi
+
+  [[ -d "$project_dir" ]] || {
+    echo "Ошибка: проект не найден: $project_dir" >&2
+    return 1
+  }
+
+  dataset_guard_project "$project_dir" benchmark_init || return $?
+
+  local srt="$project_dir/transcript/$only_source/transcript.srt"
+  local topics_module
+  topics_module="$(resolve_runtime_module topics)" || return 1
+  local out_dir="$project_dir/analysis/benchmark"
+
+  [[ -f "$srt" ]] || {
+    echo "Ошибка: не найден SRT: $srt" >&2
+    return 1
+  }
+
+  [[ -f "$topics_module" ]] || {
+    echo "Ошибка: не найден $topics_module" >&2
+    return 1
+  }
+
+  mkdir -p "$out_dir"
+
+  local json_out="$out_dir/topic_benchmark.json"
+  local md_out="$out_dir/topic_benchmark_review.md"
+
+  if [[ -e "$json_out" && "$force" -eq 0 ]]; then
+    echo "Ошибка: benchmark уже существует:"
+    echo "$json_out"
+    echo "Используйте --force для пересоздания."
+    return 1
+  fi
+
+  "$SEMINARTEXT_PYTHON" - \
+    "$topics_module" \
+    "$srt" \
+    "$only_source" \
+    "$windows_arg" \
+    "$json_out" \
+    "$md_out" <<'PYBENCH'
+
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+module_path = Path(sys.argv[1])
+srt = Path(sys.argv[2])
+source_id = sys.argv[3]
+window_numbers = [
+    int(x.strip())
+    for x in sys.argv[4].split(",")
+    if x.strip()
+]
+json_out = Path(sys.argv[5])
+md_out = Path(sys.argv[6])
+
+spec = importlib.util.spec_from_file_location(
+    "seminartext_topics",
+    module_path,
+)
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+
+items = m.parse_srt(srt)
+windows = m.make_windows(items)
+
+cases = []
+
+for number in window_numbers:
+    if number < 1 or number > len(windows):
+        print(
+            f"[ПРЕДУПРЕЖДЕНИЕ] окно {number} отсутствует; "
+            f"всего окон: {len(windows)}",
+            file=sys.stderr,
+        )
+        continue
+
+    window = windows[number - 1]
+
+    segments = []
+    for x in window:
+        segments.append({
+            "id": x["id"],
+            "start": x["start"],
+            "end": x["end"],
+            "text": x["text"],
+        })
+
+    cases.append({
+        "case_id": f"{source_id}_window_{number:02d}",
+        "source_id": source_id,
+        "window_number": number,
+        "start": window[0]["start"],
+        "end": window[-1]["end"],
+        "first_segment_id": window[0]["id"],
+        "last_segment_id": window[-1]["id"],
+        "segments": segments,
+
+        "gold": {
+            "boundaries": [],
+            "topics": []
+        },
+
+        "review": {
+            "status": "needs_manual_label",
+            "notes": ""
+        }
+    })
+
+benchmark = {
+    "schema_version": 1,
+    "type": "seminartext_topic_benchmark",
+    "source_id": source_id,
+    "window_count": len(cases),
+    "cases": cases,
+}
+
+json_out.write_text(
+    json.dumps(
+        benchmark,
+        ensure_ascii=False,
+        indent=2,
+    ) + "\n",
+    encoding="utf-8",
+)
+
+md = [
+    "# SeminarText Topic Benchmark",
+    "",
+    f"Источник: `{source_id}`",
+    "",
+    "Для каждого кейса вручную определите:",
+    "",
+    "1. реальные смысловые границы;",
+    "2. название каждой темы;",
+    "3. при необходимости краткое примечание.",
+    "",
+]
+
+for case in cases:
+    md += [
+        "---",
+        "",
+        f"## {case['case_id']}",
+        "",
+        f"Время: {case['start']}–{case['end']}",
+        "",
+        "### Эталон",
+        "",
+        "Границы:",
+        "",
+        "```text",
+        "",
+        "```",
+        "",
+        "Темы:",
+        "",
+        "```text",
+        "",
+        "```",
+        "",
+        "### Расшифровка",
+        "",
+    ]
+
+    for seg in case["segments"]:
+        md.append(
+            f'[{seg["id"]}] {seg["start"]}–{seg["end"]} | {seg["text"]}'
+        )
+
+    md.append("")
+
+md_out.write_text(
+    "\n".join(md).rstrip() + "\n",
+    encoding="utf-8",
+)
+
+print("TOPIC BENCHMARK СОЗДАН")
+print()
+print(f"Кейсов: {len(cases)}")
+for case in cases:
+    print(
+        f'  {case["case_id"]}: '
+        f'{case["start"]}–{case["end"]}'
+    )
+print()
+print(f"JSON: {json_out}")
+print(f"REVIEW: {md_out}")
+PYBENCH
+}
+
+project_topics() {
+  local project_arg="${1:-}"
+  local only_source=""
+  local detail="auto"
+  local model="${SEMINARTEXT_TOPICS_MODEL:-gemma3:4b}"
+  local force=0
+  local dry_run=0
+
+  if [[ -z "$project_arg" ]]; then
+    echo 'Ошибка: укажите проект.' >&2
+    echo 'Пример: seminartext project-topics "Стресс код"' >&2
+    return 2
+  fi
+
+  shift || true
+
+  while (($#)); do
+    case "$1" in
+      --only)
+        [[ $# -ge 2 ]] || { echo "Ошибка: после --only нужен source_id" >&2; return 2; }
+        only_source="$2"
+        shift 2
+        ;;
+      --detail)
+        [[ $# -ge 2 ]] || { echo "Ошибка: после --detail нужен low|auto|high" >&2; return 2; }
+        detail="$2"
+        shift 2
+        ;;
+      --model)
+        [[ $# -ge 2 ]] || { echo "Ошибка: после --model нужно имя модели" >&2; return 2; }
+        model="$2"
+        shift 2
+        ;;
+      --force)
+        force=1
+        shift
+        ;;
+      --dry-run)
+        dry_run=1
+        shift
+        ;;
+      -h|--help)
+        cat <<'HELP'
+Использование:
+
+  seminartext project-topics PROJECT
+  seminartext project-topics PROJECT --only video_001
+  seminartext project-topics PROJECT --detail low|auto|high
+  seminartext project-topics PROJECT --model gemma3:4b
+  seminartext project-topics PROJECT --force
+  seminartext project-topics PROJECT --dry-run
+
+Результаты:
+  topics/video_001_topics.json
+  topics/video_002_topics.json
+  ...
+  topics/seminar_topics.json
+HELP
+        return 0
+        ;;
+      *)
+        echo "Ошибка: неизвестный параметр project-topics: $1" >&2
+        return 2
+        ;;
+    esac
+  done
+
+  case "$detail" in
+    low|auto|high) ;;
+    *)
+      echo "Ошибка: --detail должен быть low, auto или high" >&2
+      return 2
+      ;;
+  esac
+
+  local projects_root="${SEMINARTEXT_PROJECTS:-$HOME/Documents/seminartext_projects}"
+  local project_dir
+
+  project_arg="${project_arg/#\~/$HOME}"
+
+  if [[ -d "$project_arg" ]]; then
+    project_dir="$project_arg"
+  else
+    project_dir="$projects_root/$(sanitize_name "$project_arg")"
+  fi
+
+  if [[ ! -d "$project_dir" ]]; then
+    echo "Ошибка: проект не найден: $project_dir" >&2
+    return 1
+  fi
+
+  local registry="$project_dir/sources.json"
+  local corpus="$project_dir/analysis/corpus.json"
+  local topics_module
+  topics_module="$(resolve_runtime_module topics)" || return 1
+
+  [[ -f "$registry" ]] || { echo "Ошибка: sources.json не найден." >&2; return 1; }
+  [[ -f "$corpus" ]] || { echo "Ошибка: corpus.json не найден. Сначала выполните project-corpus." >&2; return 1; }
+  [[ -x "$topics_module" ]] || { echo "Ошибка: не найден $topics_module" >&2; return 1; }
+
+  command -v ollama >/dev/null 2>&1 || {
+    echo "Ошибка: ollama не найден." >&2
+    return 1
+  }
+
+  mkdir -p "$project_dir/topics"
+
+  local queue
+  queue="$(mktemp -t seminartext_topics_project.XXXXXX)"
+
+  python3 - "$project_dir" "$registry" "$queue" "$only_source" <<'PYQUEUE'
+import json
+import sys
+from pathlib import Path
+
+project = Path(sys.argv[1]).resolve()
+registry = Path(sys.argv[2])
+queue = Path(sys.argv[3])
+only_source = sys.argv[4].strip()
+
+data = json.loads(registry.read_text(encoding="utf-8"))
+videos = sorted(data.get("videos", []), key=lambda x: x.get("order", 999999))
+
+with queue.open("w", encoding="utf-8") as out:
+    for item in videos:
+        sid = item.get("source_id")
+        if not sid:
+            continue
+        if only_source and sid != only_source:
+            continue
+
+        srt = project / "transcript" / sid / "transcript.srt"
+        if not srt.is_file():
+            print(f"[ОШИБКА] Нет SRT для {sid}: {srt}", file=sys.stderr)
+            continue
+
+        out.write(json.dumps({
+            "source_id": sid,
+            "order": item.get("order"),
+            "title": item.get("title", ""),
+            "srt": str(srt),
+        }, ensure_ascii=False) + "\n")
+PYQUEUE
+
+  if (( dry_run == 1 )); then
+    echo "Очередь project-topics:"
+    if [[ -s "$queue" ]]; then
+      python3 - "$queue" <<'PYDRY'
+import json, sys
+from pathlib import Path
+
+q = Path(sys.argv[1])
+for line in q.read_text(encoding="utf-8").splitlines():
+    if not line.strip():
+        continue
+    item = json.loads(line)
+    print(f'  {item["source_id"]} | часть {item["order"]} | {item["title"]}')
+PYDRY
+    else
+      echo "  [ПУСТО]"
+    fi
+    rm -f "$queue"
+    return 0
+  fi
+
+  local failed=0
+  local line sid order title srt workdir
+  local -a args
+
+  while IFS= read -r line <&3; do
+    [[ -n "$line" ]] || continue
+
+    sid="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["source_id"])' <<<"$line")"
+    order="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["order"])' <<<"$line")"
+    title="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["title"])' <<<"$line")"
+    srt="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["srt"])' <<<"$line")"
+
+    workdir="$project_dir/transcript/$sid"
+
+    echo
+    echo "=================================================="
+    echo "PROJECT TOPICS"
+    echo "$sid | часть $order"
+    echo "$title"
+    echo "=================================================="
+
+    args=(
+      "$topics_module"
+      "$srt"
+      --root "$project_dir/transcript"
+      --detail "$detail"
+      --model "$model"
+    )
+
+    (( force == 1 )) && args+=(--force)
+
+    if ! "${args[@]}"; then
+      failed=$((failed + 1))
+      continue
+    fi
+
+    if [[ ! -f "$workdir/topics.json" ]]; then
+      echo "Ошибка: topics.json не создан для $sid" >&2
+      failed=$((failed + 1))
+      continue
+    fi
+
+    cp -f "$workdir/topics.json" "$project_dir/topics/${sid}_topics.json"
+    [[ -f "$workdir/topics.txt" ]] && cp -f "$workdir/topics.txt" "$project_dir/topics/${sid}_topics.txt"
+    [[ -f "$workdir/topics.md" ]] && cp -f "$workdir/topics.md" "$project_dir/topics/${sid}_topics.md"
+
+  done 3< "$queue"
+
+  rm -f "$queue"
+
+  if (( failed > 0 )); then
+    echo "Ошибка: не удалось обработать источников: $failed" >&2
+    return 1
+  fi
+
+  echo
+  echo "Собираю seminar_topics.json..."
+
+  "$SEMINARTEXT_PYTHON" - "$project_dir" "$registry" "$corpus" "$detail" "$model" <<'PYMERGE'
+import json
+import sys
+from pathlib import Path
+
+project = Path(sys.argv[1]).resolve()
+registry = Path(sys.argv[2])
+corpus_path = Path(sys.argv[3])
+detail = sys.argv[4]
+model = sys.argv[5]
+
+sources = json.loads(registry.read_text(encoding="utf-8"))
+corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+
+video_items = {}
+for item in corpus.get("items", []):
+    if item.get("source_type") != "video":
+        continue
+    sid = item.get("source_id")
+    video_items.setdefault(sid, []).append(item)
+
+for sid in video_items:
+    video_items[sid].sort(
+        key=lambda x: (
+            x.get("locator", {}).get("start", 0),
+            x.get("locator", {}).get("segment", 0),
+        )
+    )
+
+videos = sorted(
+    sources.get("videos", []),
+    key=lambda x: x.get("order", 999999)
+)
+
+all_topics = []
+global_number = 1
+
+for video in videos:
+    sid = video.get("source_id")
+    p = project / "topics" / f"{sid}_topics.json"
+
+    if not p.is_file():
+        continue
+
+    data = json.loads(p.read_text(encoding="utf-8"))
+    topics = data.get("topics", [])
+    evidence = video_items.get(sid, [])
+
+    for local_index, topic in enumerate(topics, start=1):
+        start_sec = float(topic.get("start_seconds", 0))
+        end_sec = float(topic.get("end_seconds", 0))
+
+        matched = []
+        for ev in evidence:
+            loc = ev.get("locator", {})
+            ev_start = float(loc.get("start", 0))
+            ev_end = float(loc.get("end", 0))
+
+            if ev_end <= start_sec:
+                continue
+            if ev_start >= end_sec:
+                break
+
+            matched.append(ev["evidence_id"])
+
+        record = {
+            "topic_id": f"topic_{global_number:04d}",
+            "number": global_number,
+            "source_id": sid,
+            "source_order": video.get("order"),
+            "local_number": local_index,
+            "title": topic.get("title", ""),
+            "summary": topic.get("summary", ""),
+            "start": topic.get("start"),
+            "end": topic.get("end"),
+            "start_seconds": start_sec,
+            "end_seconds": end_sec,
+            "start_segment_id": topic.get("start_segment_id"),
+            "evidence": {
+                "first": matched[0] if matched else None,
+                "last": matched[-1] if matched else None,
+                "count": len(matched),
+            },
+        }
+
+        all_topics.append(record)
+        global_number += 1
+
+result = {
+    "schema_version": 1,
+    "project": project.name,
+    "detail": detail,
+    "model": model,
+    "topic_count": len(all_topics),
+    "topics": all_topics,
+}
+
+out = project / "topics" / "seminar_topics.json"
+out.write_text(
+    json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8"
+)
+
+print(f"Тем всего: {len(all_topics)}")
+print(f"SEMINAR TOPICS: {out}")
+PYMERGE
+
+  echo
+  echo "ГОТОВО: project-topics"
+}
+
+project_corpus() {
+  local project_arg="${1:-}"
+
+  if [[ -z "$project_arg" ]]; then
+    echo 'Ошибка: укажите проект.' >&2
+    echo 'Пример: seminartext project-corpus "Стресс код"' >&2
+    return 2
+  fi
+
+  local projects_root="${SEMINARTEXT_PROJECTS:-$HOME/Documents/seminartext_projects}"
+  local project_dir
+
+  project_arg="${project_arg/#\~/$HOME}"
+
+  if [[ -d "$project_arg" ]]; then
+    project_dir="$project_arg"
+  else
+    project_dir="$projects_root/$(sanitize_name "$project_arg")"
+  fi
+
+  if [[ ! -d "$project_dir" ]]; then
+    echo "Ошибка: проект не найден:" >&2
+    echo "$project_dir" >&2
+    return 1
+  fi
+
+  if [[ ! -f "$project_dir/sources.json" ]]; then
+    echo "Ошибка: sources.json не найден." >&2
+    return 1
+  fi
+
+  mkdir -p "$project_dir/analysis"
+
+  "$SEMINARTEXT_PYTHON" - "$project_dir" <<'PYCORPUS'
+import json
+import sys
+from pathlib import Path
+
+project = Path(sys.argv[1]).expanduser().resolve()
+
+sources = json.loads(
+    (project / "sources.json").read_text(encoding="utf-8")
+)
+
+items = []
+
+stats = {
+    "video_segments": 0,
+    "slides": 0,
+    "pdf_pages": 0,
+    "total_items": 0
+}
+
+# ------------------------------------------
+# VIDEO
+# ------------------------------------------
+
+videos = sorted(
+    sources.get("videos", []),
+    key=lambda x: x.get("order", 999999)
+)
+
+for video in videos:
+    sid = video.get("source_id")
+
+    if not sid:
+        continue
+
+    transcript_path = project / "transcript" / f"{sid}.json"
+
+    if not transcript_path.is_file():
+        print(f"[ПРЕДУПРЕЖДЕНИЕ] Нет transcript JSON: {sid}")
+        continue
+
+    data = json.loads(
+        transcript_path.read_text(encoding="utf-8")
+    )
+
+    for segment in data.get("segments", []):
+        seg_id = int(segment.get("id", 0))
+
+        start_tc = segment.get("start_tc", "")
+        end_tc = segment.get("end_tc", "")
+
+        items.append({
+            "evidence_id": f"{sid}:segment:{seg_id:06d}",
+            "source_id": sid,
+            "source_type": "video",
+            "order": video.get("order"),
+            "title": video.get("title", ""),
+            "locator": {
+                "segment": seg_id,
+                "start": segment.get("start"),
+                "end": segment.get("end"),
+                "start_tc": start_tc,
+                "end_tc": end_tc
+            },
+            "human_locator": f"{sid} {start_tc}–{end_tc}",
+            "text": segment.get("text", "").strip()
+        })
+
+        stats["video_segments"] += 1
+
+
+# ------------------------------------------
+# DOCUMENTS
+# ------------------------------------------
+
+for document in sources.get("documents", []):
+    sid = document.get("source_id")
+    typ = document.get("type")
+    title = document.get("title", "")
+
+    if not sid:
+        continue
+
+    # PPTX
+    if typ == "presentation":
+        p = project / "presentation" / sid / "slides.json"
+
+        if not p.is_file():
+            print(f"[ПРЕДУПРЕЖДЕНИЕ] Нет slides.json: {sid}")
+            continue
+
+        data = json.loads(
+            p.read_text(encoding="utf-8")
+        )
+
+        for slide in data.get("slides", []):
+            number = int(slide.get("slide", 0))
+
+            parts = []
+
+            if slide.get("text"):
+                parts.append(slide["text"])
+
+            if slide.get("notes"):
+                parts.append(slide["notes"])
+
+            content = "\n".join(parts).strip()
+
+            if not content:
+                continue
+
+            items.append({
+                "evidence_id": f"{sid}:slide:{number:04d}",
+                "source_id": sid,
+                "source_type": "presentation",
+                "title": title,
+                "locator": {
+                    "slide": number
+                },
+                "human_locator": f"{sid} slide {number}",
+                "text": content
+            })
+
+            stats["slides"] += 1
+
+    # PDF / handout
+    else:
+        p = project / "analysis" / "documents" / f"{sid}.json"
+
+        if not p.is_file():
+            print(f"[ПРЕДУПРЕЖДЕНИЕ] Нет document JSON: {sid}")
+            continue
+
+        data = json.loads(
+            p.read_text(encoding="utf-8")
+        )
+
+        for page in data.get("pages", []):
+            number = int(page.get("page", 0))
+            content = page.get("text", "").strip()
+
+            if not content:
+                continue
+
+            items.append({
+                "evidence_id": f"{sid}:page:{number:04d}",
+                "source_id": sid,
+                "source_type": typ or "document",
+                "title": title,
+                "locator": {
+                    "page": number
+                },
+                "human_locator": f"{sid} page {number}",
+                "text": content
+            })
+
+            stats["pdf_pages"] += 1
+
+
+stats["total_items"] = len(items)
+
+corpus = {
+    "schema_version": 1,
+    "project": project.name,
+    "stats": stats,
+    "items": items
+}
+
+analysis = project / "analysis"
+
+corpus_path = analysis / "corpus.json"
+jsonl_path = analysis / "corpus.jsonl"
+stats_path = analysis / "corpus_stats.json"
+
+corpus_path.write_text(
+    json.dumps(corpus, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8"
+)
+
+with jsonl_path.open("w", encoding="utf-8") as f:
+    for item in items:
+        f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+stats_path.write_text(
+    json.dumps(stats, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8"
+)
+
+print("CORPUS ГОТОВ")
+print()
+print(f"Видео-сегментов: {stats['video_segments']}")
+print(f"Слайдов с текстом: {stats['slides']}")
+print(f"PDF-страниц с текстом: {stats['pdf_pages']}")
+print(f"Всего evidence units: {stats['total_items']}")
+print()
+print(f"corpus.json: {corpus_path}")
+print(f"corpus.jsonl: {jsonl_path}")
+print(f"corpus_stats.json: {stats_path}")
+PYCORPUS
+}
+
+project_documents() {
+  local project_arg="${1:-}"
+
+  if [[ -z "$project_arg" ]]; then
+    echo 'Ошибка: укажите проект.' >&2
+    echo 'Пример: seminartext project-documents "Стресс код"' >&2
+    return 2
+  fi
+
+  local projects_root="${SEMINARTEXT_PROJECTS:-$HOME/Documents/seminartext_projects}"
+  local project_dir
+
+  project_arg="${project_arg/#\~/$HOME}"
+
+  if [[ -d "$project_arg" ]]; then
+    project_dir="$project_arg"
+  else
+    project_dir="$projects_root/$(sanitize_name "$project_arg")"
+  fi
+
+  if [[ ! -d "$project_dir" ]]; then
+    echo "Ошибка: проект не найден:" >&2
+    echo "$project_dir" >&2
+    return 1
+  fi
+
+  local registry="$project_dir/sources.json"
+
+  if [[ ! -f "$registry" ]]; then
+    echo "Ошибка: sources.json не найден:" >&2
+    echo "$registry" >&2
+    return 1
+  fi
+
+  if [[ ! -x "$SEMINARTEXT_PYTHON" ]]; then
+    echo "Ошибка: Python-окружение SeminarText не найдено:" >&2
+    echo "$SEMINARTEXT_PYTHON" >&2
+    return 1
+  fi
+
+  if ! "$SEMINARTEXT_PYTHON" -c 'import pptx, pymupdf' >/dev/null 2>&1; then
+    echo "Ошибка: нужны python-pptx и PyMuPDF." >&2
+    echo "Выполните: seminartext doctor" >&2
+    return 1
+  fi
+
+  mkdir -p "$project_dir/presentation"
+  mkdir -p "$project_dir/analysis/documents"
+
+  "$SEMINARTEXT_PYTHON" - "$project_dir" "$registry" <<'PYDOC'
+import json
+import sys
+from pathlib import Path
+
+import pymupdf
+from pptx import Presentation
+
+project = Path(sys.argv[1]).expanduser().resolve()
+registry = Path(sys.argv[2])
+
+data = json.loads(registry.read_text(encoding="utf-8"))
+documents = data.get("documents", [])
+
+combined = {
+    "schema_version": 1,
+    "project": project.name,
+    "documents": []
+}
+
+def clean_text(value: str) -> str:
+    lines = []
+    for line in value.replace("\r", "\n").split("\n"):
+        line = " ".join(line.split())
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
+
+def extract_pptx(item, source):
+    sid = item["source_id"]
+    out_dir = project / "presentation" / sid
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    prs = Presentation(str(source))
+    slides = []
+    text_parts = []
+
+    for number, slide in enumerate(prs.slides, start=1):
+        parts = []
+        image_count = 0
+
+        for shape in slide.shapes:
+            if getattr(shape, "shape_type", None) == 13:
+                image_count += 1
+
+            if hasattr(shape, "text"):
+                value = clean_text(shape.text)
+                if value:
+                    parts.append(value)
+
+            if getattr(shape, "has_table", False):
+                for row in shape.table.rows:
+                    cells = []
+                    for cell in row.cells:
+                        value = clean_text(cell.text)
+                        if value:
+                            cells.append(value)
+                    if cells:
+                        parts.append(" | ".join(cells))
+
+        notes = ""
+        try:
+            notes_slide = slide.notes_slide
+            chunks = []
+            for shape in notes_slide.shapes:
+                if hasattr(shape, "text"):
+                    value = clean_text(shape.text)
+                    if value and value not in chunks:
+                        chunks.append(value)
+            notes = "\n".join(chunks)
+        except Exception:
+            pass
+
+        slide_text = "\n".join(dict.fromkeys(parts))
+
+        record = {
+            "slide": number,
+            "text": slide_text,
+            "notes": notes,
+            "image_count": image_count,
+            "has_text": bool(slide_text or notes),
+        }
+
+        slides.append(record)
+
+        text_parts.append(f"=== СЛАЙД {number} ===")
+        if slide_text:
+            text_parts.append(slide_text)
+        if notes:
+            text_parts.append("[ЗАМЕТКИ]")
+            text_parts.append(notes)
+        if not slide_text and not notes:
+            text_parts.append("[ТЕКСТ НЕ ОБНАРУЖЕН]")
+        text_parts.append("")
+
+    result = {
+        "schema_version": 1,
+        "source_id": sid,
+        "type": "presentation",
+        "title": item.get("title", ""),
+        "source_file": item.get("file", ""),
+        "slide_count": len(slides),
+        "slides": slides
+    }
+
+    (out_dir / "slides.json").write_text(
+        json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8"
+    )
+
+    (out_dir / "text.txt").write_text(
+        "\n".join(text_parts),
+        encoding="utf-8"
+    )
+
+    print(f"[OK] {sid} PPTX — {len(slides)} слайдов")
+
+    return {
+        "source_id": sid,
+        "type": "presentation",
+        "title": item.get("title", ""),
+        "source_file": item.get("file", ""),
+        "unit": "slide",
+        "unit_count": len(slides),
+        "content": slides
+    }
+
+def extract_pdf(item, source):
+    sid = item["source_id"]
+    pdf = pymupdf.open(str(source))
+
+    pages = []
+    text_parts = []
+
+    for index, page in enumerate(pdf, start=1):
+        text = clean_text(page.get_text("text") or "")
+        images = page.get_images(full=True)
+
+        # Низкий объём текста + изображения = кандидат на OCR/визуальный анализ.
+        needs_ocr = len(text) < 40 and len(images) > 0
+
+        record = {
+            "page": index,
+            "text": text,
+            "image_count": len(images),
+            "has_text": bool(text),
+            "needs_ocr": needs_ocr
+        }
+
+        pages.append(record)
+
+        text_parts.append(f"=== СТРАНИЦА {index} ===")
+        if text:
+            text_parts.append(text)
+        else:
+            text_parts.append("[ТЕКСТ НЕ ОБНАРУЖЕН]")
+        if needs_ocr:
+            text_parts.append("[ВОЗМОЖНО НУЖЕН OCR]")
+        text_parts.append("")
+
+    pdf.close()
+
+    result = {
+        "schema_version": 1,
+        "source_id": sid,
+        "type": item.get("type", "handout"),
+        "title": item.get("title", ""),
+        "source_file": item.get("file", ""),
+        "page_count": len(pages),
+        "pages": pages
+    }
+
+    out_json = project / "analysis" / "documents" / f"{sid}.json"
+    out_txt = project / "analysis" / "documents" / f"{sid}.txt"
+
+    out_json.write_text(
+        json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8"
+    )
+
+    out_txt.write_text(
+        "\n".join(text_parts),
+        encoding="utf-8"
+    )
+
+    ocr_count = sum(1 for p in pages if p["needs_ocr"])
+    print(
+        f"[OK] {sid} PDF — {len(pages)} стр."
+        + (f" | OCR-кандидатов: {ocr_count}" if ocr_count else "")
+    )
+
+    return {
+        "source_id": sid,
+        "type": item.get("type", "handout"),
+        "title": item.get("title", ""),
+        "source_file": item.get("file", ""),
+        "unit": "page",
+        "unit_count": len(pages),
+        "content": pages
+    }
+
+processed = 0
+
+for item in documents:
+    sid = item.get("source_id")
+    rel = item.get("file", "")
+    typ = item.get("type", "")
+
+    if not sid or not rel:
+        continue
+
+    source = project / rel
+
+    if not source.is_file():
+        print(f"[ОШИБКА] {sid}: файл не найден: {source}")
+        continue
+
+    suffix = source.suffix.lower()
+
+    try:
+        if typ == "presentation" and suffix == ".pptx":
+            combined["documents"].append(extract_pptx(item, source))
+            processed += 1
+
+        elif suffix == ".pdf":
+            combined["documents"].append(extract_pdf(item, source))
+            processed += 1
+
+        else:
+            print(f"[ПРОПУСК] {sid}: пока не поддерживается {suffix or typ}")
+
+    except Exception as exc:
+        print(f"[ОШИБКА] {sid}: {exc}")
+
+combined_path = project / "analysis" / "documents" / "combined_documents.json"
+combined_path.write_text(
+    json.dumps(combined, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8"
+)
+
+print()
+print(f"Обработано документов: {processed}")
+print(f"combined_documents.json: {combined_path}")
+PYDOC
+
+  echo
+  echo "ГОТОВО: документы проекта обработаны"
+}
+
+project_transcribe() {
+  local project_dir="${1:-}"
+  local only_source=""
+  local dry_run=0
+  local combined_clear=0
+  local combined_with_sources=0
+
+  if [[ "$project_dir" == "-h" || "$project_dir" == "--help" ]]; then
+    cat <<'HELP'
+Использование:
+
+  seminartext project-transcribe PROJECT [--careful] [--structured-timing] [--combined-clear] [--combined-with-sources]
+  seminartext project-transcribe PROJECT --only video_001 [--careful] [--structured-timing]
+
+--combined-clear создаёт чистый chronological derived artifact из сохранённых
+individual transcript_clean.txt локальных частей: embedded creation date,
+macOS birth time, затем mtime. --combined-with-sources дополнительно создаёт
+вариант с filename и датами; provenance находится в combined_clear_manifest.json.
+
+--careful использует существующие тщательные параметры распознавания для
+каждого фрагмента проекта. Защитная повторная попытка остаётся одинаковой
+для обоих режимов.
+
+--structured-timing сохраняет JSON-full только выбранных Whisper-попыток и
+manifest с абсолютными временными смещениями частей.
+HELP
+    return 0
+  fi
+
+  if [[ -z "$project_dir" ]]; then
+    echo 'Ошибка: укажите папку проекта.' >&2
+    echo 'Пример: seminartext project-transcribe "/путь/к/проекту"' >&2
+    return 2
+  fi
+
+  shift || true
+
+  while (($#)); do
+    case "$1" in
+      --only)
+        [[ $# -ge 2 ]] || {
+          echo "Ошибка: после --only нужен source_id" >&2
+          return 2
+        }
+        only_source="$2"
+        shift 2
+        ;;
+      --dry-run)
+        dry_run=1
+        shift
+        ;;
+      --careful)
+        MODE="careful"
+        shift
+        ;;
+      --structured-timing)
+        STRUCTURED_TIMING=1
+        shift
+        ;;
+      --no-open)
+        OPEN_RESULTS=0
+        shift
+        ;;
+      --combined-clear)
+        combined_clear=1
+        shift
+        ;;
+      --combined-with-sources)
+        combined_clear=1
+        combined_with_sources=1
+        shift
+        ;;
+      -h|--help)
+        cat <<'HELP'
+Использование:
+
+  seminartext project-transcribe PROJECT [--careful] [--structured-timing] [--combined-clear] [--combined-with-sources]
+  seminartext project-transcribe PROJECT --only video_001 [--careful] [--structured-timing]
+  seminartext project-transcribe PROJECT --only video_001 --dry-run
+
+--only SOURCE_ID
+    Обработать только указанный видеоисточник.
+
+--dry-run
+    Только показать очередь обработки. Whisper не запускается.
+
+--careful
+    Использовать существующие тщательные параметры распознавания: более
+    широкий beam search и VAD, рассчитанный на менее агрессивное отсечение
+    речи. Защитная повторная попытка при ошибке или подозрительном фрагменте
+    одинакова для обоих режимов.
+
+--structured-timing
+    Сохранить JSON-full выбранных Whisper-попыток и manifest с абсолютными
+    временными смещениями частей без дополнительного запуска Whisper.
+
+--no-open
+    Не открывать GUI/папку результатов. В CI, pytest и Codex headless mode
+    это поведение включается автоматически; также можно задать
+    SEMINARTEXT_HEADLESS=1.
+
+--combined-clear
+    После успешной обработки дополнительно создать
+    transcript/combined_clear.txt из сохранённых transcript_clean.txt
+    локальных источников. Части сортируются по дате создания: embedded
+    media date, затем macOS birth time, затем mtime. Равные даты
+    разрешаются детерминированно по filename и source_id. Это derived
+    artifact: individual transcripts не заменяются; lineage сохраняется в
+    transcript/combined_clear_manifest.json.
+
+--combined-with-sources
+    Также создать transcript/combined_clear_with_sources.txt с читаемыми
+    границами filename и разрешённой датой. Включает --combined-clear.
+
+Если даты неверны или потеряны, проверьте metadata исходных файлов: mtime
+используется только как fallback. Для пользовательского ручного порядка
+предусмотрены будущие ordering_method filename, selection_order и manual;
+сейчас реализован creation_date.
+HELP
+        return 0
+        ;;
+      *)
+        echo "Ошибка: неизвестный параметр project-transcribe: $1" >&2
+        return 2
+        ;;
+    esac
+  done
+
+  project_dir="${project_dir/#\~/$HOME}"
+
+  if [[ ! -d "$project_dir" ]]; then
+    echo "Ошибка: проект не найден: $project_dir" >&2
+    return 1
+  fi
+
+  local registry="$project_dir/sources.json"
+
+  if [[ ! -f "$registry" ]]; then
+    echo "Ошибка: sources.json не найден." >&2
+    return 1
+  fi
+
+  resolve_models
+
+  for p in python3 ffmpeg ffprobe whisper-cli; do
+    command -v "$p" >/dev/null 2>&1 || {
+      echo "Не установлена программа: $p" >&2
+      return 1
+    }
+  done
+
+  [[ -n "$MODEL" && -f "$MODEL" ]] || {
+    echo "Не найдена Whisper model." >&2
+    return 1
+  }
+
+  [[ -n "$VAD_MODEL" && -f "$VAD_MODEL" ]] || {
+    echo "Не найдена VAD model." >&2
+    return 1
+  }
+
+  mkdir -p "$project_dir/transcript"
+
+  local queue
+  queue="$(mktemp -t seminartext_project.XXXXXX)"
+
+  python3 - "$project_dir" "$registry" "$queue" "$only_source" <<'PYQUEUE'
+import json
+import sys
+from pathlib import Path
+
+project = Path(sys.argv[1]).resolve()
+registry = Path(sys.argv[2])
+queue = Path(sys.argv[3])
+only_source = sys.argv[4].strip()
+
+data = json.loads(registry.read_text(encoding="utf-8"))
+videos = sorted(data.get("videos", []), key=lambda x: x.get("order", 999999))
+
+with queue.open("w", encoding="utf-8") as out:
+    for item in videos:
+        sid = item.get("source_id")
+        if not sid:
+            continue
+        if only_source and sid != only_source:
+            continue
+
+        typ = item.get("type")
+        title = item.get("title") or sid
+        order = item.get("order", 0)
+
+        if typ == "local":
+            rel = item.get("file", "")
+            source = project / rel
+            if not source.is_file():
+                print(f"[ОШИБКА] Не найден файл {sid}: {source}", file=sys.stderr)
+                continue
+            value = str(source)
+
+        elif typ == "youtube":
+            value = item.get("url", "")
+            if not value:
+                continue
+
+        else:
+            print(f"[SKIP] Неизвестный тип {sid}: {typ}", file=sys.stderr)
+            continue
+
+        record = {
+            "source_id": sid,
+            "order": order,
+            "type": typ,
+            "title": title,
+            "source": value,
+        }
+
+        out.write(json.dumps(record, ensure_ascii=False) + "\n")
+PYQUEUE
+
+  if (( dry_run == 1 )); then
+    echo "Очередь project-transcribe:"
+    if [[ -s "$queue" ]]; then
+      python3 - "$queue" <<'PYDRY'
+import json
+import sys
+from pathlib import Path
+
+q = Path(sys.argv[1])
+
+for line in q.read_text(encoding="utf-8").splitlines():
+    if not line.strip():
+        continue
+    item = json.loads(line)
+    print(
+        f'  {item["source_id"]} | '
+        f'часть {item["order"]} | '
+        f'{item["title"]}'
+    )
+PYDRY
+    else
+      echo "  [ПУСТО]"
+    fi
+
+    rm -f "$queue"
+    return 0
+  fi
+
+  local failed=0
+  local line source_id order type title source outdir
+
+  while IFS= read -r line <&3; do
+    [[ -n "$line" ]] || continue
+
+    source_id="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["source_id"])' <<<"$line")"
+    order="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["order"])' <<<"$line")"
+    type="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["type"])' <<<"$line")"
+    title="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["title"])' <<<"$line")"
+    source="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["source"])' <<<"$line")"
+
+    outdir="$project_dir/transcript/$source_id"
+
+    echo
+    echo "=================================================="
+    echo "PROJECT TRANSCRIBE"
+    echo "$source_id | часть $order"
+    echo "$title"
+    echo "=================================================="
+
+    PROJECT_MODE=1
+    PROJECT_OUTPUT_DIR="$outdir"
+    PROJECT_SOURCE_ID="$source_id"
+
+    if [[ "$type" == "youtube" ]]; then
+      if ! process_record "$source" "$title" "YouTube"; then
+        failed=$((failed + 1))
+      fi
+    else
+      if ! process_record "$source" "$title" "project-local"; then
+        failed=$((failed + 1))
+      fi
+    fi
+
+    PROJECT_MODE=0
+    PROJECT_OUTPUT_DIR=""
+    PROJECT_SOURCE_ID=""
+
+  done 3< "$queue"
+
+  rm -f "$queue"
+
+  if (( failed > 0 )); then
+    echo
+    echo "Ошибка: не удалось обработать видеоисточников: $failed" >&2
+    return 1
+  fi
+
+  echo
+  echo "Создаю структурированные JSON..."
+
+  python3 - "$project_dir" "$registry" <<'PYJSON'
+import json
+import re
+import sys
+from pathlib import Path
+
+project = Path(sys.argv[1]).resolve()
+registry = Path(sys.argv[2])
+
+data = json.loads(registry.read_text(encoding="utf-8"))
+videos = sorted(data.get("videos", []), key=lambda x: x.get("order", 999999))
+
+def tc_to_seconds(tc):
+    tc = tc.replace(",", ".")
+    h, m, s = tc.split(":")
+    return int(h) * 3600 + int(m) * 60 + float(s)
+
+def seconds_to_tc(value):
+    ms = round(value * 1000)
+    h = ms // 3600000
+    ms %= 3600000
+    m = ms // 60000
+    ms %= 60000
+    s = ms // 1000
+    ms %= 1000
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+def parse_srt(path):
+    text = path.read_text(encoding="utf-8", errors="replace")
+    blocks = re.split(r"\n\s*\n", text.strip())
+    segments = []
+
+    for block in blocks:
+        lines = [x.strip() for x in block.splitlines() if x.strip()]
+        if not lines:
+            continue
+
+        time_index = next((i for i, line in enumerate(lines) if "-->" in line), None)
+        if time_index is None:
+            continue
+
+        left, right = [x.strip() for x in lines[time_index].split("-->", 1)]
+
+        start = tc_to_seconds(left)
+        end = tc_to_seconds(right)
+
+        content = " ".join(lines[time_index + 1:]).strip()
+
+        if not content:
+            continue
+
+        segments.append({
+            "id": len(segments) + 1,
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "start_tc": seconds_to_tc(start),
+            "end_tc": seconds_to_tc(end),
+            "text": content
+        })
+
+    return segments
+
+combined = {
+    "schema_version": 1,
+    "project": project.name,
+    "videos": []
+}
+
+for item in videos:
+    sid = item.get("source_id")
+    if not sid:
+        continue
+
+    folder = project / "transcript" / sid
+    srt = folder / "transcript.srt"
+
+    if not srt.is_file():
+        print(f"[ПРЕДУПРЕЖДЕНИЕ] Нет SRT для {sid}")
+        continue
+
+    segments = parse_srt(srt)
+
+    result = {
+        "schema_version": 1,
+        "source_id": sid,
+        "order": item.get("order"),
+        "title": item.get("title", ""),
+        "source_type": item.get("type"),
+        "source_file": item.get("file"),
+        "source_url": item.get("url"),
+        "mirrors": item.get("mirrors", []),
+        "segment_count": len(segments),
+        "segments": segments
+    }
+
+    target = project / "transcript" / f"{sid}.json"
+    target.write_text(
+        json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8"
+    )
+
+    combined["videos"].append({
+        "source_id": sid,
+        "order": item.get("order"),
+        "title": item.get("title", ""),
+        "segment_count": len(segments),
+        "segments": segments
+    })
+
+combined_path = project / "transcript" / "combined.json"
+combined_path.write_text(
+    json.dumps(combined, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8"
+)
+
+print()
+print("JSON готовы:")
+for video in combined["videos"]:
+    print(f"  {video['source_id']}.json — {video['segment_count']} сегментов")
+
+print(f"  combined.json — {len(combined['videos'])} видео")
+PYJSON
+
+  if (( combined_clear == 1 )); then
+    echo
+    echo "Собираю объединённую чистую расшифровку..."
+    python3 - "$project_dir" "$registry" "$only_source" "$combined_with_sources" <<'PYCLEAR'
+import datetime as dt
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+project = Path(sys.argv[1]).resolve()
+registry = Path(sys.argv[2])
+only_source = sys.argv[3].strip()
+with_sources = sys.argv[4] == "1"
+transcript_root = project / "transcript"
+
+data = json.loads(registry.read_text(encoding="utf-8"))
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+def parse_date(value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    try:
+        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+def embedded_creation_date(source):
+    # ffprobe is the portable metadata reader already required by this command.
+    command = [
+        "ffprobe", "-v", "error", "-show_entries",
+        "format_tags=creation_time:format_tags=com.apple.quicktime.creationdate",
+        "-of", "json", str(source),
+    ]
+    try:
+        result = subprocess.run(command, text=True, capture_output=True, check=False)
+        payload = json.loads(result.stdout) if result.returncode == 0 else {}
+    except (OSError, json.JSONDecodeError):
+        return None
+    tags = payload.get("format", {}).get("tags", {})
+    for key in ("creation_time", "com.apple.quicktime.creationdate"):
+        parsed = parse_date(tags.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+def macos_birthtime(source):
+    # macOS stat %B is birth time. Do not substitute POSIX inode ctime.
+    try:
+        result = subprocess.run(
+            ["stat", "-f", "%B", str(source)],
+            text=True, capture_output=True, check=False,
+        )
+        value = int(result.stdout.strip()) if result.returncode == 0 else 0
+    except (OSError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    return dt.datetime.fromtimestamp(value, tz=dt.timezone.utc)
+
+def resolved_ordering_date(source):
+    embedded = embedded_creation_date(source)
+    if embedded is not None:
+        return embedded, "embedded"
+    birthtime = macos_birthtime(source)
+    if birthtime is not None:
+        return birthtime, "birthtime"
+    return dt.datetime.fromtimestamp(source.stat().st_mtime, tz=dt.timezone.utc), "mtime"
+
+def iso_date(value):
+    return value.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+entries = []
+for item in data.get("videos", []):
+    if item.get("type") != "local":
+        continue
+    source_id = item.get("source_id")
+    if not source_id or (only_source and source_id != only_source):
+        continue
+    source_ref = item.get("file")
+    source = project / source_ref if source_ref else None
+    clean = transcript_root / source_id / "transcript_clean.txt"
+    marker = transcript_root / source_id / ".seminartext_complete"
+    if source is None or not source.is_file():
+        raise SystemExit(f"Ошибка combined-clear: локальный source отсутствует: {source_id}")
+    if not marker.is_file() or not clean.is_file():
+        raise SystemExit(
+            f"Ошибка combined-clear: {source_id} incomplete; "
+            "нужны .seminartext_complete и transcript_clean.txt"
+        )
+    text = clean.read_text(encoding="utf-8", errors="replace").strip()
+    if not text:
+        raise SystemExit(f"Ошибка combined-clear: пустой transcript_clean.txt для {source_id}")
+    ordering_date, ordering_date_source = resolved_ordering_date(source)
+    entries.append({
+        "source_id": source_id,
+        "filename": source.name,
+        "source_path": source_ref,
+        "ordering_date": iso_date(ordering_date),
+        "ordering_date_source": ordering_date_source,
+        "input_sha256": sha256_file(source),
+        "transcript_revision": {
+            "artifact": str(clean.relative_to(project)),
+            "sha256": sha256_file(clean),
+        },
+        "text": text,
+    })
+
+if not entries:
+    raise SystemExit("Ошибка combined-clear: не выбраны готовые локальные источники.")
+
+entries.sort(key=lambda entry: (entry["ordering_date"], entry["filename"], entry["source_id"]))
+
+combined_parts = []
+offset = 0
+line = 1
+for index, entry in enumerate(entries, start=1):
+    if combined_parts:
+        offset += 2
+        line += 2
+    text = entry.pop("text")
+    start = offset
+    end = start + len(text)
+    text_lines = text.count("\n") + 1
+    entry["sequence_index"] = index
+    entry["combined_clear_char_range"] = {"start": start, "end": end}
+    entry["combined_clear_line_range"] = {"start": line, "end": line + text_lines - 1}
+    combined_parts.append(text)
+    offset = end
+    line += text_lines
+
+combined_text = "\n\n".join(combined_parts) + "\n"
+combined_path = transcript_root / "combined_clear.txt"
+combined_path.write_text(combined_text, encoding="utf-8")
+
+with_sources_path = None
+if with_sources:
+    source_parts = []
+    for entry, text in zip(entries, combined_parts):
+        source_parts.append(
+            f"===== {entry['filename']} — {entry['ordering_date']} "
+            f"({entry['ordering_date_source']}) =====\n\n{text}"
+        )
+    with_sources_path = transcript_root / "combined_clear_with_sources.txt"
+    with_sources_path.write_text("\n\n".join(source_parts) + "\n", encoding="utf-8")
+
+manifest = {
+    "schema_version": 1,
+    "artifact_type": "combined_clear_transcript",
+    "ordering_method": "creation_date",
+    "supported_ordering_methods": ["creation_date", "filename", "selection_order", "manual"],
+    "ordering_policy": "embedded -> birthtime -> mtime; ties: filename -> source_id",
+    "derived_from": "fixed individual transcript_clean.txt artifacts",
+    "combined_clear": {
+        "artifact": str(combined_path.relative_to(project)),
+        "sha256": sha256_file(combined_path),
+    },
+    "combined_clear_with_sources": (
+        {"artifact": str(with_sources_path.relative_to(project)), "sha256": sha256_file(with_sources_path)}
+        if with_sources_path else None
+    ),
+    "sources": entries,
+}
+manifest_path = transcript_root / "combined_clear_manifest.json"
+manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+print(f"  combined_clear.txt — {len(entries)} частей")
+if with_sources_path:
+    print("  combined_clear_with_sources.txt — с границами источников")
+print("  combined_clear_manifest.json — provenance")
+PYCLEAR
+  fi
+
+  echo
+  echo "ГОТОВО: проектная расшифровка"
+  echo "$project_dir/transcript"
+}
+
+project_link_youtube() {
+  local project_dir="${1:-}"
+  local source_id="${2:-}"
+  local url="${3:-}"
+
+  if [[ -z "$project_dir" || -z "$source_id" || -z "$url" ]]; then
+    echo 'Использование:' >&2
+    echo '  seminartext project-link-youtube PROJECT video_001 URL' >&2
+    return 2
+  fi
+
+  project_dir="${project_dir/#\~/$HOME}"
+
+  if [[ ! -d "$project_dir" ]]; then
+    echo "Ошибка: папка проекта не найдена:" >&2
+    echo "$project_dir" >&2
+    return 1
+  fi
+
+  local registry="$project_dir/sources.json"
+
+  if [[ ! -f "$registry" ]]; then
+    echo "Ошибка: sources.json не найден:" >&2
+    echo "$registry" >&2
+    return 1
+  fi
+
+  python3 - "$registry" "$source_id" "$url" <<'PYLINK'
+import json
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+
+registry = Path(sys.argv[1])
+source_id = sys.argv[2]
+url = sys.argv[3].strip()
+
+try:
+    host = (urlparse(url).hostname or "").lower()
+except Exception:
+    host = ""
+
+valid = (
+    host == "youtu.be"
+    or host == "youtube.com"
+    or host.endswith(".youtube.com")
+)
+
+if not valid:
+    raise SystemExit(f"Ошибка: URL не похож на YouTube: {url}")
+
+data = json.loads(registry.read_text(encoding="utf-8"))
+
+videos = data.get("videos", [])
+
+target = None
+for item in videos:
+    if item.get("source_id") == source_id:
+        target = item
+        break
+
+if target is None:
+    raise SystemExit(f"Ошибка: source_id не найден: {source_id}")
+
+mirrors = target.setdefault("mirrors", [])
+
+for mirror in mirrors:
+    if mirror.get("type") == "youtube" and mirror.get("url") == url:
+        print(f"[SKIP] Ссылка уже привязана к {source_id}")
+        raise SystemExit(0)
+
+mirrors.append({
+    "type": "youtube",
+    "url": url
+})
+
+registry.write_text(
+    json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8"
+)
+
+print(f"[OK] YouTube привязан к {source_id}")
+print(f"     {url}")
+PYLINK
+}
+
+project_check() {
+  local project_dir="${1:-}"
+
+  if [[ -z "$project_dir" ]]; then
+    echo 'Ошибка: укажите папку проекта.' >&2
+    echo 'Пример: seminartext project-check "/путь/к/семинару"' >&2
+    return 2
+  fi
+
+  project_dir="${project_dir/#\~/$HOME}"
+
+  if [[ ! -d "$project_dir" ]]; then
+    echo "Ошибка: папка проекта не найдена:"
+    echo "$project_dir"
+    return 1
+  fi
+
+  local yaml="$project_dir/seminar.yaml"
+  local registry="$project_dir/sources.json"
+
+  python3 - "$project_dir" "$yaml" "$registry" <<'PYSCAN'
+import json
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+
+project = Path(sys.argv[1]).expanduser().resolve()
+yaml_path = Path(sys.argv[2])
+registry_path = Path(sys.argv[3])
+
+print("Проверка проекта:")
+print(project)
+print()
+
+bad = False
+
+# Базовая структура
+required_dirs = [
+    "source",
+    "source/video",
+    "source/presentations",
+    "source/handouts",
+    "source/other",
+    "transcript",
+    "topics",
+    "presentation",
+    "analysis",
+    "marketing",
+    "clips",
+]
+
+if yaml_path.is_file():
+    print("[OK] seminar.yaml")
+else:
+    print("[НЕТ] seminar.yaml")
+    bad = True
+
+for rel in required_dirs:
+    p = project / rel
+    if p.is_dir():
+        print(f"[OK] {rel}/")
+    else:
+        print(f"[НЕТ] {rel}/")
+        bad = True
+
+print()
+
+# Реестр источников
+if registry_path.is_file():
+    print("[OK] sources.json")
+    try:
+        data = json.loads(registry_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[ОШИБКА] sources.json повреждён: {exc}")
+        raise SystemExit(1)
+else:
+    print("[ПРЕДУПРЕЖДЕНИЕ] sources.json пока не создан")
+    data = {
+        "schema_version": 1,
+        "videos": [],
+        "documents": [],
+    }
+
+videos = data.get("videos", [])
+documents = data.get("documents", [])
+
+print()
+print("VIDEO SOURCES")
+
+if not videos:
+    print("  [НЕТ] Видеоисточники не зарегистрированы")
+else:
+    for item in sorted(videos, key=lambda x: x.get("order", 999999)):
+        sid = item.get("source_id", "?")
+        order = item.get("order", "?")
+        typ = item.get("type", "?")
+        title = item.get("title") or ""
+
+        if typ == "youtube":
+            url = item.get("url", "")
+            try:
+                host = (urlparse(url).hostname or "").lower()
+                valid = (
+                    host == "youtu.be"
+                    or host == "youtube.com"
+                    or host.endswith(".youtube.com")
+                )
+            except Exception:
+                valid = False
+
+            status = "[OK]" if valid else "[ОШИБКА]"
+            print(f"  {status} {sid} | #{order} | YouTube")
+            if title:
+                print(f"       {title}")
+            print(f"       {url}")
+            if not valid:
+                bad = True
+
+        elif typ == "local":
+            rel = item.get("file", "")
+            p = project / rel
+            status = "[OK]" if p.is_file() else "[НЕТ]"
+            print(f"  {status} {sid} | #{order} | Local video")
+            if title:
+                print(f"       {title}")
+            print(f"       {rel}")
+            if not p.is_file():
+                bad = True
+
+        else:
+            print(f"  [ПРЕДУПРЕЖДЕНИЕ] {sid} | неизвестный тип видео: {typ}")
+
+print()
+print("DOCUMENTS")
+
+if not documents:
+    print("  [НЕТ] Документы не зарегистрированы")
+else:
+    type_names = {
+        "presentation": "Presentation",
+        "handout": "Handout",
+        "other": "Other document",
+    }
+
+    for item in documents:
+        sid = item.get("source_id", "?")
+        typ = item.get("type", "?")
+        rel = item.get("file", "")
+        title = item.get("title") or ""
+        p = project / rel
+
+        status = "[OK]" if p.is_file() else "[НЕТ]"
+        label = type_names.get(typ, typ)
+
+        print(f"  {status} {sid} | {label}")
+        if title:
+            print(f"       {title}")
+        print(f"       {rel}")
+
+        if not p.is_file():
+            bad = True
+
+print()
+print("ИТОГО")
+print(f"  Видеоисточников: {len(videos)}")
+print(f"  Документов: {len(documents)}")
+
+presentations = sum(1 for x in documents if x.get("type") == "presentation")
+handouts = sum(1 for x in documents if x.get("type") == "handout")
+others = sum(1 for x in documents if x.get("type") == "other")
+youtube = sum(1 for x in videos if x.get("type") == "youtube")
+local_video = sum(1 for x in videos if x.get("type") == "local")
+
+print(f"    YouTube: {youtube}")
+print(f"    Локальное видео: {local_video}")
+print(f"    Презентации: {presentations}")
+print(f"    Раздаточные материалы: {handouts}")
+print(f"    Прочие документы: {others}")
+
+print()
+
+if not videos:
+    print("[ПРЕДУПРЕЖДЕНИЕ] Семинар пока не содержит видеоисточников")
+
+if not presentations:
+    print("[ПРЕДУПРЕЖДЕНИЕ] Презентации не зарегистрированы")
+
+if bad:
+    print()
+    print("РЕЗУЛЬТАТ: обнаружены ошибки проекта")
+    raise SystemExit(1)
+
+print("РЕЗУЛЬТАТ: структура проекта корректна")
+PYSCAN
+
+  if [[ -f "$project_dir/evidence/canonical_bundle.json" ]]; then
+    echo
+    echo "EVIDENCE FOUNDATION"
+    evidence_foundation_command evidence-check "$project_dir" --cross-record-only || return $?
+  else
+    echo
+    echo "[INFO] Evidence Foundation bundle пока не создан"
+  fi
+}
+
+evidence_foundation_command() {
+  "$SEMINARTEXT_PYTHON" "$SEMINARTEXT_ENTRYPOINT_DIR/seminartext_modules/evidence_foundation.py" "$@"
+}
+
+project_knowledge_bridge_command() {
+  "$SEMINARTEXT_PYTHON" "$SEMINARTEXT_ENTRYPOINT_DIR/seminartext_modules/project_knowledge_bridge.py" "$@"
+}
+
+human_review_workflow_command() {
+  "$SEMINARTEXT_PYTHON" "$SEMINARTEXT_ENTRYPOINT_DIR/seminartext_modules/human_review_workflow.py" "$@"
+}
+
+dataset_governance_command() {
+  local module
+  module="$(resolve_runtime_module dataset_governance)" || return 1
+  "$SEMINARTEXT_PYTHON" "$module" "$@"
+}
+
+dataset_guard_project() {
+  local project_dir="$1"
+  local operation="$2"
+  dataset_governance_command check \
+    --project "$project_dir" \
+    --operation "$operation"
+}
+
+dataset_guard_benchmark() {
+  local project_dir="$1"
+  local benchmark="$2"
+  local operation="$3"
+  local decision rc
+  decision="$(dataset_governance_command check-benchmark \
+    --project "$project_dir" \
+    --benchmark "$benchmark" \
+    --operation "$operation" \
+    --json)" || {
+      rc=$?
+      echo "DATASET GOVERNANCE: DENY operation=$operation: $(
+        "$SEMINARTEXT_PYTHON" -c \
+          'import json,sys; print(json.loads(sys.argv[1]).get("reason", "policy check failed"))' \
+          "$decision"
+      )" >&2
+      return "$rc"
+    }
+  read -r DATASET_GUARD_ID DATASET_GUARD_ROLE DATASET_GUARD_REGISTRY < <(
+    "$SEMINARTEXT_PYTHON" -c \
+      'import json,sys; d=json.loads(sys.argv[1]); print(d["dataset_id"], d["role"], d["registry_path"])' \
+      "$decision"
+  )
+  export DATASET_GUARD_ID DATASET_GUARD_ROLE DATASET_GUARD_REGISTRY
+  echo "DATASET GOVERNANCE: ALLOW dataset=$DATASET_GUARD_ID operation=$operation role=$DATASET_GUARD_ROLE"
+}
+
+dataset_policy_check() {
+  local dataset_id="${1:-}"
+  local operation="${2:-}"
+  if [[ -z "$dataset_id" || -z "$operation" ]]; then
+    echo "Использование: seminartext dataset-policy-check DATASET_ID OPERATION [--json]" >&2
+    return 2
+  fi
+  shift 2
+  dataset_governance_command check \
+    --dataset-id "$dataset_id" \
+    --operation "$operation" \
+    "$@"
+}
+
+
+
+roadmap_status() {
+  resolve_governance_pair || return 1
+
+  local deploy_dir="${SEMINARTEXT_DEPLOY_DIR:-$HOME/bin}"
+  local deploy_state="$deploy_dir/SEMINARTEXT_4_STATE.json"
+  local deploy_roadmap="$deploy_dir/SEMINARTEXT_4_ROADMAP.md"
+
+  python3 - \
+    "$GOVERNANCE_STATE" \
+    "$GOVERNANCE_ROADMAP" \
+    "$GOVERNANCE_SOURCE_KIND" \
+    "$deploy_state" \
+    "$deploy_roadmap" \
+    "$VERSION" <<'PYROADMAP'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+state_path = Path(sys.argv[1]).resolve()
+roadmap_path = Path(sys.argv[2]).resolve()
+source_kind = sys.argv[3]
+deploy_state = Path(sys.argv[4]).expanduser().resolve()
+deploy_roadmap = Path(sys.argv[5]).expanduser().resolve()
+cli_version = sys.argv[6]
+
+data = json.loads(state_path.read_text(encoding="utf-8"))
+state_version = str(data.get("seminartext_version", "unknown"))
+if state_version != cli_version:
+    raise SystemExit(
+        f"Ошибка: version drift: CLI={cli_version}, State={state_version}"
+    )
+
+
+def value(value):
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value)
+
+
+def sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+print("SEMINARTEXT 4.x GOVERNED ROADMAP STATUS")
+print("=" * 52)
+print(f"CLI VERSION: {cli_version}")
+print(f"STATE SCHEMA: {data.get('schema_version', 'unknown')}")
+print(f"UPDATED: {data.get('updated', 'unknown')}")
+print(f"POLICY CHECKPOINT: {data.get('policy_checkpoint', 'unknown')}")
+print(f"STATE SOURCE CLASS: {source_kind}")
+print(f"STATE: {state_path}")
+print(f"ROADMAP: {roadmap_path}")
+print()
+
+print("CURRENT")
+print(f"  Stage: {data.get('current_stage', 'unknown')}")
+print(f"  Milestone: {data.get('current_milestone', 'unknown')}")
+print(f"  Project: {data.get('current_project', 'unknown')}")
+print()
+
+architecture = data.get("architecture", {})
+print("ARCHITECTURE")
+print(f"  Direction: {architecture.get('accepted_direction', 'unknown')}")
+print(
+    "  Decision status: "
+    f"{architecture.get('architecture_decision_status', 'unknown')}"
+)
+print()
+
+print("PARALLEL TRACKS")
+tracks = architecture.get("tracks", {})
+for name in sorted(tracks):
+    track = tracks[name]
+    print(f"  {name}:")
+    print(f"    status: {track.get('status', 'unknown')}")
+    print(f"    purpose: {track.get('purpose', 'unknown')}")
+    if "primary_next_action" in track:
+        print(f"    primary_next_action: {value(track['primary_next_action'])}")
+print()
+
+print("NEXT ACTIONS")
+for index, action in enumerate(data.get("next_actions", []), 1):
+    print(f"  {index}. {action}")
+print()
+
+print("HUMAN GATES")
+human_gates = []
+
+
+def collect_human_gates(node, prefix=""):
+    if isinstance(node, dict):
+        for key, item in node.items():
+            path = f"{prefix}.{key}" if prefix else key
+            if "human_gate" in key:
+                human_gates.append((path, item))
+            collect_human_gates(item, path)
+    elif isinstance(node, list):
+        for index, item in enumerate(node):
+            collect_human_gates(item, f"{prefix}[{index}]")
+
+
+collect_human_gates(data)
+for path, item in human_gates:
+    print(f"  {path}: {value(item)}")
+if not human_gates:
+    print("  none declared")
+print()
+
+print("MATURITY / INTEGRATION")
+maturity_fields = (
+    "technical_verdict",
+    "verdict",
+    "product_review_complete",
+    "production_integration_complete",
+    "production_population_complete",
+    "production_promotion",
+    "treeseg_production_status",
+)
+for stage_name in sorted(data.get("stages", {})):
+    stage = data["stages"][stage_name]
+    if not isinstance(stage, dict):
+        continue
+    details = [(key, stage[key]) for key in maturity_fields if key in stage]
+    if details:
+        print(f"  {stage_name}: status={stage.get('status', 'unknown')}")
+        for key, item in details:
+            print(f"    {key}: {value(item)}")
+print()
+
+semantics = data.get("status_semantics", {})
+print("STATUS SEMANTICS")
+for key in (
+    "technical_evidence",
+    "architecture_acceptance",
+    "product_integration",
+    "product_review",
+    "production_stability",
+    "complete_scope_rule",
+):
+    if key in semantics:
+        print(f"  {key}: {semantics[key]}")
+print()
+
+mvp = data.get("product_mvp", {})
+print("SEMINARTEXT 4.0 MVP")
+print(f"  Status: {mvp.get('status', 'unknown')}")
+print(f"  Definition: {mvp.get('definition', 'unknown')}")
+print()
+
+print("DEPLOYED SNAPSHOT")
+if source_kind == "deployed_snapshot":
+    print("  Repository freshness: UNVERIFIED")
+    print(
+        "  Action: set SEMINARTEXT_REPO to the governed checkout "
+        "or run scripts/seminartext-dev status there."
+    )
+else:
+    for label, source, deployed in (
+        ("State", state_path, deploy_state),
+        ("Roadmap", roadmap_path, deploy_roadmap),
+    ):
+        if not deployed.is_file():
+            status = "MISSING"
+        elif sha256(source) == sha256(deployed):
+            status = "SYNC"
+        else:
+            status = "STALE"
+        print(f"  {label}: {status}")
+        print(f"    snapshot: {deployed}")
+PYROADMAP
+}
+main() {
+  case "${1:-}" in
+    dataset-policy-check)
+      shift
+      dataset_policy_check "$@"
+      exit $?
+      ;;
+    roadmap-status)
+      shift
+      roadmap_status "$@"
+      exit $?
+      ;;
+    project-topic-benchmark-check)
+      shift
+      project_topic_benchmark_check "$@"
+      exit $?
+      ;;
+    project-topic-benchmark-run)
+      shift
+      project_topic_benchmark_run "$@"
+      exit $?
+      ;;
+    project-topic-benchmark-show)
+      shift
+      project_topic_benchmark_show "$@"
+      exit $?
+      ;;
+    project-topic-benchmark-label)
+      shift
+      project_topic_benchmark_label "$@"
+      exit $?
+      ;;
+    project-topic-benchmark-init)
+      shift
+      project_topic_benchmark_init "$@"
+      exit $?
+      ;;
+    project-topics)
+      shift
+      project_topics "$@"
+      exit $?
+      ;;
+    project-corpus)
+      shift
+      project_corpus "$@"
+      exit $?
+      ;;
+    project-documents)
+      shift
+      project_documents "$@"
+      exit $?
+      ;;
+    project-transcribe)
+      shift
+      project_transcribe "$@"
+      exit $?
+      ;;
+    project-link-youtube)
+      shift
+      project_link_youtube "$@"
+      exit $?
+      ;;
+    project-add)
+      shift
+      project_add "$@"
+      exit $?
+      ;;
+    project-check)
+      shift
+      project_check "$@"
+      exit $?
+      ;;
+    project-promote-transcript)
+      shift
+      evidence_foundation_command promote-transcript "$@"
+      exit $?
+      ;;
+    project-align)
+      shift
+      evidence_foundation_command align "$@"
+      exit $?
+      ;;
+    project-evidence-check)
+      shift
+      evidence_foundation_command evidence-check "$@"
+      exit $?
+      ;;
+    project-review-prepare)
+      shift
+      human_review_workflow_command prepare "$@"
+      exit $?
+      ;;
+    project-review-status)
+      shift
+      human_review_workflow_command status "$@"
+      exit $?
+      ;;
+    project-review-apply)
+      shift
+      human_review_workflow_command apply "$@"
+      exit $?
+      ;;
+    project-review-v2-status)
+      shift
+      human_review_workflow_command status-v2 "$@"
+      exit $?
+      ;;
+    project-review-v2-apply)
+      shift
+      human_review_workflow_command apply-v2 "$@"
+      exit $?
+      ;;
+    project-review-boundary-prepare)
+      shift
+      human_review_workflow_command prepare-boundaries "$@"
+      exit $?
+      ;;
+    project-review-boundary-resolve)
+      shift
+      human_review_workflow_command resolve-boundaries "$@"
+      exit $?
+      ;;
+    project-review-boundary-status)
+      shift
+      human_review_workflow_command boundary-status "$@"
+      exit $?
+      ;;
+    project-obsidian-export)
+      shift
+      project_knowledge_bridge_command "$@"
+      exit $?
+      ;;
+    init)
+      shift
+      init_project "$@"
+      exit $?
+      ;;
+    doctor)
+      doctor
+      exit $?
+      ;;
+    runtime-identity)
+      runtime_identity
+      exit $?
+      ;;
+    clean)
+      [[ $# -ge 2 ]] || { echo "Укажите TXT-файл: seminartext clean файл.txt" >&2; exit 2; }
+      clean_existing "$2"
+      exit $?
+      ;;
+    transcribe)
+      shift
+      ;;
+    topics)
+      shift
+      topics_command "$@"
+      exit $?
+      ;;
+    translate)
+      shift
+      translate_command "$@"
+      exit $?
+      ;;
+    subtitles)
+      shift
+      subtitles_command "$@"
+      exit $?
+      ;;
+    cut)
+      shift
+      cut_command "$@"
+      exit $?
+      ;;
+    help)
+      show_help
+      exit 0
+      ;;
+    "")
+      show_help
+      exit 1
+      ;;
+    *)
+      ;;
+  esac
+
+  parse_args "$@"
+  if ((${#INPUTS[@]} == 0)); then
+    show_help
+    exit 1
+  fi
+
+  resolve_models
+  for p in python3 ffmpeg ffprobe whisper-cli; do
+    command -v "$p" >/dev/null 2>&1 || { echo "Не установлена программа: $p" >&2; exit 1; }
+  done
+  [[ -n "$MODEL" && -f "$MODEL" ]] || { echo "Не найдена модель ggml-large-v3.bin. Выполните: seminartext doctor" >&2; exit 1; }
+  [[ -n "$VAD_MODEL" && -f "$VAD_MODEL" ]] || { echo "Не найдена модель ggml-silero-v5.1.2.bin. Выполните: seminartext doctor" >&2; exit 1; }
+  mkdir -p "$TRANSCRIPTS_ROOT"
+
+  local q count=0 failed=0 record path title source
+  q="$(build_queue)"
+  [[ -s "$q" ]] || { rm -f "$q"; echo "Не найдено записей для обработки."; exit 1; }
+
+  while IFS= read -r record; do ((count+=1)); done < "$q"
+  echo "Найдено записей: $count"
+
+  if (( LIST_ONLY == 1 )); then
+    local i=0
+    while IFS= read -r record; do
+      ((i+=1))
+      path="$(python3 -c 'import json,sys; r=json.loads(sys.argv[1]); print(r["path"])' "$record")"
+      title="$(python3 -c 'import json,sys; r=json.loads(sys.argv[1]); print(r["title"])' "$record")"
+      source="$(python3 -c 'import json,sys; r=json.loads(sys.argv[1]); print(r["source"])' "$record")"
+      printf '%3d. %s [%s]\n     %s\n' "$i" "$title" "$source" "$path"
+    done < "$q"
+    rm -f "$q"
+    exit 0
+  fi
+
+  while IFS= read -r record; do
+    path="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["path"])' "$record")"
+    title="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["title"])' "$record")"
+    source="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["source"])' "$record")"
+    if ! process_record "$path" "$title" "$source"; then
+      ((failed+=1))
+      echo "ОШИБКА: $path" >&2
+    fi
+  done < "$q"
+
+  rm -f "$q"
+  echo
+  echo "Завершено. Успешно: $((count - failed)); ошибок: $failed"
+  if (( OPEN_RESULTS == 1 )); then
+    open "$TRANSCRIPTS_ROOT" 2>/dev/null || true
+  fi
+  ((failed == 0))
+}
+
+main "$@"

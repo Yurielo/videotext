@@ -207,7 +207,10 @@ struct TopicFileService {
         granularity: TopicGranularity?
     ) throws -> TopicsFile {
         let cues = try meaningfulCues(projectURL, language: language)
-        let duration = (try? ProjectStore().load(from: projectURL))?.durationSeconds
+        let duration = SelectedTimingTimeline.permittedEnd(
+            projectURL: projectURL,
+            measuredDuration: (try? ProjectStore().load(from: projectURL))?.durationSeconds
+        )
         let issues = validator.validate(file, expectedCues: cues, mediaDuration: duration)
         guard issues.isEmpty else { throw WorkflowError.invalidTopics(issues.joined(separator: " ")) }
         if let language, let granularity {

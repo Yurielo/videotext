@@ -25,6 +25,47 @@ struct FillerWordService {
             cues: cues,
             transcriptRevisionID: transcriptRevisionID
         )
+        return report(words: words, language: language, transcriptRevisionID: transcriptRevisionID)
+    }
+
+    /// Uses the selected Whisper attempt's token evidence for native
+    /// SeminarText transcription. This keeps filler detection on the same ASR
+    /// attempt and avoids creating a parallel VideoText Whisper JSON.
+    func analyze(
+        selectedTiming: TimedSourceDocument,
+        cues: [SubtitleCue],
+        language: ArtifactLanguage,
+        transcriptRevisionID: String
+    ) throws -> FillerAnalysisReport {
+        try selectedTiming.validateCoverage()
+        let words = selectedTiming.tokenTimeline.compactMap { token -> WordTimelineEntry? in
+            let normalized = normalize(token.text)
+            guard !normalized.isEmpty, normalized.rangeOfCharacter(from: .letters) != nil else { return nil }
+            let cueID = cues.max { lhs, rhs in
+                overlap(lhs, (start: token.start, end: token.end)) < overlap(rhs, (start: token.start, end: token.end))
+            }?.id ?? 0
+            return WordTimelineEntry(
+                id: "selected-token-\(Int((token.start * 1000).rounded()))-\(SelectedTimingHash.string(token.text).prefix(12))",
+                text: token.text.trimmingCharacters(in: .whitespacesAndNewlines),
+                normalized: normalized,
+                start: token.start,
+                end: token.end,
+                cueID: cueID,
+                transcriptRevisionID: transcriptRevisionID,
+                confidence: nil
+            )
+        }
+        guard !words.isEmpty else {
+            throw WorkflowError.processFailed("Selected timing не содержит слов с временными границами для анализа слов-паразитов.")
+        }
+        return report(words: words, language: language, transcriptRevisionID: transcriptRevisionID)
+    }
+
+    private func report(
+        words: [WordTimelineEntry],
+        language: ArtifactLanguage,
+        transcriptRevisionID: String
+    ) -> FillerAnalysisReport {
         let definitions = (phrases[language] ?? []).sorted { $0.count > $1.count }
         var matches: [(range: Range<Int>, phrase: [String])] = []
         var occupied = Set<Int>()

@@ -117,6 +117,30 @@ struct TranscriptionQualityProbe {
         try require(assessment.report.warnings.contains { $0.contains("Pipeline продолжен") }, "нет неблокирующего предупреждения")
         try require(assessment.html.contains("class=\"needs-review\""), "нет красной review-разметки")
         try require(assessment.html.contains("Low confidence phrase."), "текст потерян в HTML")
+        let selectedAttemptAssessment = service.assess(
+            cues: [
+                SubtitleCue(id: 1, start: 0, end: 2, text: "Selected attempt evidence."),
+                SubtitleCue(id: 2, start: 2, end: 4, text: "Selected no speech evidence.")
+            ],
+            skippedZeroDurationCount: 0,
+            whisperJSONURL: nil,
+            selectedTimingEvidence: [
+                TimedSourceQualityEvidence(sourceUnitID: 1, averageTokenConfidence: 0.2, averageNoSpeechProbability: 0.1),
+                TimedSourceQualityEvidence(sourceUnitID: 2, averageTokenConfidence: 0.9, averageNoSpeechProbability: 0.8)
+            ],
+            language: .en,
+            transcriptRevisionID: "selected-attempt-quality"
+        )
+        try require(
+            selectedAttemptAssessment.tasks.contains { $0.cueIDs == [1] && $0.reasonCodes.contains("low-confidence") }
+                && selectedAttemptAssessment.tasks.contains { $0.cueIDs == [2] && $0.reasonCodes.contains("high-no-speech-probability") },
+            "quality review did not consume selected Whisper attempt evidence"
+        )
+        try require(
+            selectedAttemptAssessment.report.metrics["averageTokenConfidence"] == 0.55
+                && selectedAttemptAssessment.report.metrics["highNoSpeechSegmentCount"] == 1,
+            "selected attempt quality metrics are not truthful"
+        )
         var catastrophicCues: [SubtitleCue] = []
         for index in 0..<110 {
             let text = index < 10 ? "Содержательная реплика номер \(index)." : "Нередианная почка."

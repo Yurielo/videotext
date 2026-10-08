@@ -327,8 +327,39 @@ final class OwnedTemporaryWorkspace {
             try FileManager.default.removeItem(at: child)
         }
     }
+    private static func reclaimCompletedCurrentProcessWorkspaces() throws {
+        let base = namespace
+        let children = try FileManager.default.contentsOfDirectory(at: base, includingPropertiesForKeys: nil)
+        var records: [(URL, Receipt, (UInt64, UInt64))] = []
+        for child in children {
+            guard let bytes = try? Data(contentsOf: child.appendingPathComponent("owner.json")),
+                  let record = try? JSONDecoder().decode(Receipt.self, from: bytes),
+                  record.schema == 2, record.path == child.path, record.id == child.lastPathComponent,
+                  let actual = try? identity(child), actual.0 == record.device, actual.1 == record.inode,
+                  record.pid == getpid() else {
+                continue
+            }
+            records.append((child, record, actual))
+        }
+        // An active sibling can still rely on an adapter workspace from the same
+        // process. Retain the complete cohort until its last child has stopped.
+        guard !records.contains(where: { _, record, _ in
+            record.launchPending || groupAlive(record.childGroup)
+        }) else { return }
+        for (child, record, actual) in records {
+            let fd = open(child.appendingPathComponent("lease").path, O_RDWR | O_NOFOLLOW)
+            guard fd >= 0 else { continue }
+            defer { Darwin.close(fd) }
+            guard flock(fd, LOCK_EX | LOCK_NB) == 0, !hasForeignOpenFiles(child),
+                  let latest = try? identity(child), latest == actual,
+                  let latestBytes = try? Data(contentsOf: child.appendingPathComponent("owner.json")),
+                  let latestRecord = try? JSONDecoder().decode(Receipt.self, from: latestBytes), latestRecord == record else { continue }
+            try FileManager.default.removeItem(at: child)
+        }
+    }
     init() throws {
         try Self.recover()
+        try Self.reclaimCompletedCurrentProcessWorkspaces()
         // Refuse growth when interrupted owned runs cannot be safely recovered.
         let children = try fm.contentsOfDirectory(at: Self.namespace, includingPropertiesForKeys: nil)
         guard children.count < 32 else { throw NSError(domain: "VideoTextOwnedTMP.capacity", code: 1) }

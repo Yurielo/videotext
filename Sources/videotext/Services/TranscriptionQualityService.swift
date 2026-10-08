@@ -141,12 +141,26 @@ struct TranscriptionQualityService {
         cues: [SubtitleCue],
         skippedZeroDurationCount: Int,
         whisperJSONURL: URL?,
+        selectedTimingEvidence: [TimedSourceQualityEvidence] = [],
         language: ArtifactLanguage,
         transcriptRevisionID: String,
         mediaDuration: TimeInterval? = nil
     ) -> TranscriptionQualityAssessment {
-        let confidences = whisperJSONURL.map(inspector.segmentConfidences) ?? []
-        let noSpeechProbabilities = whisperJSONURL.map(inspector.segmentNoSpeechProbabilities) ?? []
+        let legacyConfidences = whisperJSONURL.map(inspector.segmentConfidences) ?? []
+        let legacyNoSpeech = whisperJSONURL.map(inspector.segmentNoSpeechProbabilities) ?? []
+        let evidenceByCueID = Dictionary(
+            uniqueKeysWithValues: selectedTimingEvidence.map { ($0.sourceUnitID, $0) }
+        )
+        let confidences: [Double?] = cues.enumerated().map { index, cue in
+            selectedTimingEvidence.isEmpty
+                ? (legacyConfidences.indices.contains(index) ? legacyConfidences[index] : nil)
+                : evidenceByCueID[cue.id]?.averageTokenConfidence
+        }
+        let noSpeechProbabilities: [Double?] = cues.enumerated().map { index, cue in
+            selectedTimingEvidence.isEmpty
+                ? (legacyNoSpeech.indices.contains(index) ? legacyNoSpeech[index] : nil)
+                : evidenceByCueID[cue.id]?.averageNoSpeechProbability
+        }
         let normalized = cues.map { normalize($0.text) }
         let catastrophicIssue = catastrophicIssue(cues: cues, normalized: normalized)
         let recoveryIssue = recoveryIssue(
