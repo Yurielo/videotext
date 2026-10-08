@@ -1326,6 +1326,7 @@ struct OllamaSimpleTextTranslateGemma: SimpleTextTranslationProvider {
         return """
         Translate the following \(sourceName) spoken-text passage into \(targetName).
         Return only the translated passage. Preserve meaning, negation, numbers, names, terminology and natural repetitions. Do not add context or complete unstated meaning.
+        The output must be in \(targetName). Do not return \(sourceName) text.
 
         \(text)
         """

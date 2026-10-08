@@ -14,12 +14,50 @@ struct RUENTranslationSliceProbe {
         try require(ArtifactLanguage.ru.translationTarget == .en && ArtifactLanguage.en.translationTarget == .ru,
                     "translation directions are not limited to the accepted RU↔EN pair")
 
+        try await verifyTargetLanguagePromptContract()
         try await verifyApprovedSourceFlow(root: root.appendingPathComponent("success"))
         try await verifyRejectedResponseRetriesAndPersistsEvidence(root: root.appendingPathComponent("retry-success"))
         try await verifySourceFallbackFailsClosed(root: root.appendingPathComponent("source-fallback"))
         try await verifyWrongLanguageFailsClosed(root: root.appendingPathComponent("wrong-language"))
         try await verifyFailureIsolation(root: root.appendingPathComponent("failure-isolation"))
         print("RU_EN_TRANSLATION_SLICE_PROBE_PASS")
+    }
+
+    private static func verifyTargetLanguagePromptContract() async throws {
+        let recorder = PromptRequestRecorder()
+        let translator = OllamaSimpleTextTranslateGemma(transport: { request in
+            await recorder.record(request)
+            return try JSONSerialization.data(withJSONObject: [
+                "done": true,
+                "message": ["content": "Translated output."]
+            ])
+        })
+
+        _ = try await translator.translate(
+            text: " А, что еще важно хотел добавить",
+            source: .ru,
+            target: .en
+        )
+        _ = try await translator.translate(
+            text: " And I also wanted to add",
+            source: .en,
+            target: .ru
+        )
+
+        let prompts = await recorder.prompts()
+        try require(prompts.count == 2, "prompt contract probe did not capture both translation directions")
+        let ruToEn = prompts[0]
+        let enToRu = prompts[1]
+        let semanticInstruction = "Return only the translated passage. Preserve meaning, negation, numbers, names, terminology and natural repetitions. Do not add context or complete unstated meaning."
+
+        try require(ruToEn.contains(semanticInstruction)
+                    && ruToEn.contains("The output must be in English. Do not return Russian text.")
+                    && ruToEn.hasSuffix("\n\n А, что еще важно хотел добавить"),
+                    "RU→EN prompt lost its semantic contract, target-language contract, or leading whitespace")
+        try require(enToRu.contains(semanticInstruction)
+                    && enToRu.contains("The output must be in Russian. Do not return English text.")
+                    && enToRu.hasSuffix("\n\n And I also wanted to add"),
+                    "EN→RU prompt lost its semantic contract, target-language contract, or source text")
     }
 
     private static func verifyApprovedSourceFlow(root: URL) async throws {
@@ -363,6 +401,26 @@ struct RUENTranslationSliceProbe {
 }
 
 private protocol RUENTranslator: SimpleTextTranslationProvider {}
+
+private actor PromptRequestRecorder {
+    private var captured: [URLRequest] = []
+
+    func record(_ request: URLRequest) {
+        captured.append(request)
+    }
+
+    func prompts() -> [String] {
+        captured.compactMap { request in
+            guard let body = request.httpBody,
+                  let root = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+                  let messages = root["messages"] as? [[String: Any]],
+                  let content = messages.first?["content"] as? String else {
+                return nil
+            }
+            return content
+        }
+    }
+}
 
 private final class RecordingRUENTranslator: RUENTranslator {
     struct Request { let source: ArtifactLanguage; let target: ArtifactLanguage }
