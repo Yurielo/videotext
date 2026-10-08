@@ -211,41 +211,54 @@ final class WorkflowViewModel: ObservableObject {
         startRun(operations: selectedOperations)
     }
 
-    var canTranslateToRussian: Bool {
+    var translationDirection: (source: ArtifactLanguage, target: ArtifactLanguage)? {
+        guard let projectURL,
+              let manifest = try? store.load(from: projectURL),
+              let source = manifest.languageProfile?.effective else { return nil }
+        return (source, source.translationTarget)
+    }
+
+    var canTranslate: Bool {
         guard !isRunning, topicReviewCheckpoint == nil,
               humanReviewCheckpoint == nil,
               let projectURL,
               let manifest = try? store.load(from: projectURL),
-              manifest.languageProfile?.effective == .en,
-              let source = manifest.activeTranscriptRevision(for: .en),
+              let direction = translationDirection,
+              let source = manifest.activeTranscriptRevision(for: direction.source),
               source.reviewStatus == .approved else { return false }
-        return manifest.activeTranscriptRevision(for: .ru)?.reviewStatus != .approved
+        return manifest.activeTranscriptRevision(for: direction.target)?.reviewStatus != .approved
     }
 
-    var translationToRussianStatus: String {
+    var translationStatus: String {
         guard let projectURL, let manifest = try? store.load(from: projectURL) else {
-            return "Откройте существующий проект с английской расшифровкой."
+            return "Откройте существующий проект с утверждённой расшифровкой."
         }
-        guard manifest.languageProfile?.effective == .en else {
-            return "В этом этапе поддерживается только перевод утверждённой английской расшифровки на русский."
+        guard let sourceLanguage = manifest.languageProfile?.effective else {
+            return "Не определён язык исходной расшифровки."
         }
+        let targetLanguage = sourceLanguage.translationTarget
         if let checkpoint = manifest.humanReviewState?.pendingCheckpoint {
             return checkpoint.kind == .translatedTranscript
                 ? "Перевод ожидает Human Review."
                 : "Сначала завершите Human Review исходной расшифровки."
         }
-        guard manifest.activeTranscriptRevision(for: .en)?.reviewStatus == .approved else {
-            return "Сначала утвердите английскую расшифровку в Human Review."
+        guard manifest.activeTranscriptRevision(for: sourceLanguage)?.reviewStatus == .approved else {
+            return "Сначала утвердите \(sourceLanguage.russianTitle.lowercased()) расшифровку в Human Review."
         }
-        if manifest.activeTranscriptRevision(for: .ru)?.reviewStatus == .approved {
-            return "Русский перевод уже утверждён."
+        if manifest.activeTranscriptRevision(for: targetLanguage)?.reviewStatus == .approved {
+            return "\(targetLanguage.russianTitle) перевод уже утверждён."
         }
         return "TranslateGemma создаст перевод; перед публикацией потребуется Human Review."
     }
 
-    func translateToRussian() {
-        guard canTranslateToRussian else {
-            reportPreparationError(WorkflowError.processFailed(translationToRussianStatus))
+    var translationActionTitle: String {
+        guard let direction = translationDirection else { return "Перевести расшифровку" }
+        return "Перевести на \(direction.target.russianTitle.lowercased())"
+    }
+
+    func translateApprovedTranscript() {
+        guard canTranslate else {
+            reportPreparationError(WorkflowError.processFailed(translationStatus))
             return
         }
         translationHumanReviewEnabled = true
@@ -1231,7 +1244,7 @@ final class WorkflowEngine: @unchecked Sendable {
             throw WorkflowError.processFailed("Операции временно недоступны в текущей сборке VideoText: \(titles).")
         }
         if settings.selectedOperations.contains(.translateTranscript), !settings.translationHumanReviewEnabled {
-            throw WorkflowError.processFailed("Перевод EN→RU требует обязательного Translation Human Review.")
+            throw WorkflowError.processFailed("Перевод требует обязательного Translation Human Review.")
         }
         let projectURL = try settings.projectURL ?? store.createAutomaticProject(for: mediaURL)
         let layout = ProjectLayout(root: projectURL)
@@ -1268,11 +1281,11 @@ final class WorkflowEngine: @unchecked Sendable {
             : nil
         if settings.selectedOperations.contains(.translateTranscript) {
             guard settings.mode != .newProject,
-                  manifest.languageProfile?.effective == .en,
-                  let approvedSource = manifest.activeTranscriptRevision(for: .en),
+                  let sourceLanguage = manifest.languageProfile?.effective,
+                  let approvedSource = manifest.activeTranscriptRevision(for: sourceLanguage),
                   approvedSource.reviewStatus == .approved else {
                 throw WorkflowError.processFailed(
-                    "Перевод EN→RU запускается только из существующего проекта с утверждённой английской расшифровкой."
+                    "Перевод запускается только из существующего проекта с утверждённой исходной расшифровкой."
                 )
             }
         }
@@ -1567,22 +1580,21 @@ final class WorkflowEngine: @unchecked Sendable {
 
                 case .translateTranscript:
                     let current = try store.load(from: projectURL)
-                    guard current.languageProfile?.effective == .en else {
-                        throw WorkflowError.processFailed("Этот этап поддерживает только перевод утверждённой английской расшифровки на русский.")
+                    guard let sourceLanguage = current.languageProfile?.effective else {
+                        throw WorkflowError.processFailed("Не определён язык утверждённой исходной расшифровки.")
                     }
-                    let sourceLanguage = ArtifactLanguage.en
-                    let targetLanguage = ArtifactLanguage.ru
-                    let activeSourceCues = try srt.load(from: layout.fullSRTURL)
+                    let targetLanguage = sourceLanguage.translationTarget
+                    let activeSourceCues = try srt.load(from: manifestSourceSubtitleURL(language: sourceLanguage, layout: layout))
                     guard let sourceRevision = current.activeTranscriptRevision(for: sourceLanguage),
                           sourceRevision.reviewStatus == .approved else {
-                        throw WorkflowError.processFailed("Сначала утвердите английскую расшифровку в Human Review.")
+                        throw WorkflowError.processFailed("Сначала утвердите \(sourceLanguage.russianTitle.lowercased()) расшифровку в Human Review.")
                     }
                     guard workingSubtitleMatchesRevision(
                         sourceRevision,
                         language: sourceLanguage,
                         projectURL: projectURL
                     ) else {
-                        throw WorkflowError.processFailed("Текущий full.srt не совпадает с утверждённой английской ревизией.")
+                        throw WorkflowError.processFailed("Текущий SRT не совпадает с утверждённой исходной ревизией.")
                     }
                     if current.activeTranscriptRevision(for: targetLanguage)?.origin == .userEdited {
                         throw WorkflowError.processFailed("Перевод содержит ручные правки. Новый профиль перевода не будет автоматически заменять принятую пользователем ревизию.")
@@ -1601,7 +1613,7 @@ final class WorkflowEngine: @unchecked Sendable {
                         selectedSource,
                         reconciledWith: activeSourceCues
                     )
-                    log("Перевод EN→RU использует canonical selected timing; TranslateGemma получает только текст unit.")
+                    log("Перевод \(sourceLanguage.rawValue.uppercased())→\(targetLanguage.rawValue.uppercased()) использует canonical selected timing; TranslateGemma получает только текст unit.")
                     let translated = try await selectedTimingTranslation.translate(
                         sourceDocument: sourceDocument,
                         source: sourceLanguage,
@@ -1611,7 +1623,7 @@ final class WorkflowEngine: @unchecked Sendable {
                     )
                     try selectedTimingTranslation.persist(translated, to: projectURL)
                     try store.registerOutput(
-                        kind: "selected-timing-translation-en-ru",
+                        kind: "selected-timing-translation-\(sourceLanguage.rawValue)-\(targetLanguage.rawValue)",
                         url: layout.selectedTimingTranslationsURL(source: sourceLanguage, target: targetLanguage),
                         in: projectURL
                     )
@@ -2335,7 +2347,7 @@ final class WorkflowEngine: @unchecked Sendable {
             guard let sourceLanguage = manifest.languageProfile?.effective else {
                 throw WorkflowError.processFailed("Не определён исходный язык Human Review перевода.")
             }
-            let targetLanguage: ArtifactLanguage = sourceLanguage == .ru ? .en : .ru
+            let targetLanguage = sourceLanguage.translationTarget
             if let activeTarget = manifest.activeTranscriptRevision(for: targetLanguage),
                activeTarget.reviewStatus == .approved,
                activeTarget.origin == .translated || activeTarget.origin == .userEdited {
@@ -2853,7 +2865,7 @@ final class WorkflowEngine: @unchecked Sendable {
                   let sourceRevision = manifest.activeTranscriptRevision(for: sourceLanguage) else {
                 return false
             }
-            let targetLanguage: ArtifactLanguage = sourceLanguage == .ru ? .en : .ru
+            let targetLanguage = sourceLanguage.translationTarget
             let reportURL = layout.translationReportURL(source: sourceLanguage, target: targetLanguage)
             guard nonemptyFile(reportURL),
                   nonemptyFile(layout.transcriptURL(language: targetLanguage)),
@@ -3023,7 +3035,7 @@ final class WorkflowEngine: @unchecked Sendable {
                 .map(\.path)
         case .translateTranscript:
             guard let source = manifest?.languageProfile?.effective else { return [] }
-            let target: ArtifactLanguage = source == .ru ? .en : .ru
+            let target = source.translationTarget
             return [
                 layout.transcriptURL(language: target),
                 layout.subtitlesURL(language: target),

@@ -10,6 +10,23 @@ enum ArtifactLanguage: String, CaseIterable, Codable, Identifiable, Equatable {
     case en
 
     var id: String { rawValue }
+
+    /// VideoText currently supports exactly the two product-approved
+    /// TranslateGemma directions. Keeping the pairing here prevents a
+    /// source-language branch from accidentally exposing an arbitrary target.
+    var translationTarget: ArtifactLanguage {
+        switch self {
+        case .ru: return .en
+        case .en: return .ru
+        }
+    }
+
+    var russianTitle: String {
+        switch self {
+        case .ru: return "Русский"
+        case .en: return "Английский"
+        }
+    }
 }
 
 /// An explicit subtitle choice for rendering. This is an in-memory workflow
@@ -225,11 +242,15 @@ extension ProjectManifest {
 
 enum SubtitleSourceResolver {
     static func availableSelections(manifest: ProjectManifest, projectURL: URL) -> [SubtitleSourceSelection] {
-        guard manifest.languageProfile?.effective == .en,
-              (try? resolve(.approvedTranslation(.ru), manifest: manifest, projectURL: projectURL)) != nil else {
+        guard let sourceLanguage = manifest.languageProfile?.effective,
+              (try? resolve(
+                .approvedTranslation(sourceLanguage.translationTarget),
+                manifest: manifest,
+                projectURL: projectURL
+              )) != nil else {
             return [.source]
         }
-        return [.source, .approvedTranslation(.ru)]
+        return [.source, .approvedTranslation(sourceLanguage.translationTarget)]
     }
 
     static func resolve(
@@ -249,8 +270,8 @@ enum SubtitleSourceResolver {
             return ResolvedSubtitleSource(language: sourceLanguage, srtURL: srtURL, isTranslation: false)
 
         case .approvedTranslation(let language):
-            guard sourceLanguage == .en, language == .ru else {
-                throw WorkflowError.processFailed("Для этого среза доступны только утверждённые субтитры EN→RU.")
+            guard language == sourceLanguage.translationTarget else {
+                throw WorkflowError.processFailed("Для этого среза доступны только утверждённые субтитры EN→RU или RU→EN.")
             }
             guard let revision = manifest.activeTranscriptRevision(for: language),
                   revision.reviewStatus == .approved,
@@ -270,9 +291,9 @@ enum SubtitleSourceResolver {
     }
 
     static func unavailableTranslationMessage(manifest: ProjectManifest?, projectURL: URL?) -> String? {
-        guard let manifest, let projectURL, manifest.languageProfile?.effective == .en else { return nil }
+        guard let manifest, let projectURL, let sourceLanguage = manifest.languageProfile?.effective else { return nil }
         do {
-            _ = try resolve(.approvedTranslation(.ru), manifest: manifest, projectURL: projectURL)
+            _ = try resolve(.approvedTranslation(sourceLanguage.translationTarget), manifest: manifest, projectURL: projectURL)
             return nil
         } catch {
             return error.localizedDescription

@@ -153,6 +153,12 @@ struct SelectedTimingVerticalSlice {
                 throw WorkflowError.processFailed("TranslateGemma вернула текст преимущественно не на русском языке.")
             }
         }
+        if source == .ru, target == .en {
+            let letters = translationLetterCounts(translated)
+            guard letters.latin > 0, letters.latin >= letters.cyrillic else {
+                throw WorkflowError.processFailed("TranslateGemma вернула текст преимущественно не на английском языке.")
+            }
+        }
         return translated
     }
 
