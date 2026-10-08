@@ -16,7 +16,7 @@ struct ResultsDetector {
                 guard (try? itemURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
                 guard !itemURL.lastPathComponent.contains(".partial.") else { continue }
                 guard !isUnapprovedTranslationArtifact(itemURL, manifest: manifest, layout: layout) else { continue }
-                outputs.append(makeOutput(kind: kindForFile(itemURL), url: itemURL))
+                outputs.append(makeOutput(kind: kindForFile(itemURL, manifest: manifest), url: itemURL))
             }
         }
         return outputs.sorted { $0.path < $1.path }
@@ -64,15 +64,23 @@ struct ResultsDetector {
         return ProjectOutput(id: url.path, kind: kind, path: url.path, createdAt: date)
     }
 
-    private func kindForFile(_ url: URL) -> String {
+    private func kindForFile(_ url: URL, manifest: ProjectManifest?) -> String {
         switch url.lastPathComponent {
         case "fragment.mp4": return "fragment-video"
-        case "fragment_subtitled.mp4": return "fragment-subtitled-video"
+        case "fragment_subtitled.mp4":
+            let language = manifest?.fragments?.first {
+                $0.subtitledVideoPath.map {
+                    URL(fileURLWithPath: $0).standardizedFileURL.path == url.standardizedFileURL.path
+                } ?? false
+            }?.language
+            return language.map { "fragment-subtitled-video-\($0.rawValue)" } ?? "fragment-subtitled-video"
         case "fragment_processed.mp4": return "processed-fragment-video"
         case "fragment.srt": return "fragment-srt"
         case "fragment_processed.srt": return "processed-fragment-srt"
         case "processing_recipe.json": return "processed-fragment-recipe"
-        case "subtitled.mp4", "subtitled.ru.mp4", "subtitled.en.mp4": return "subtitled-video"
+        case "subtitled.mp4": return "subtitled-video"
+        case "subtitled.ru.mp4": return "subtitled-video-ru"
+        case "subtitled.en.mp4": return "subtitled-video-en"
         case "full.srt": return "full-srt"
         case "transcript.txt": return "transcript"
         case "topics.json": return "topics"

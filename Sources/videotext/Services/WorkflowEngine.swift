@@ -20,6 +20,7 @@ final class WorkflowViewModel: ObservableObject {
     @Published var transcriptionContext = ""
     @Published var topicGranularity = TopicGranularity.normal
     @Published var artifactLanguage = ArtifactLanguage.ru
+    @Published var subtitleSource: SubtitleSourceSelection = .source
     @Published var selectedTopicID = ""
     @Published var quoteStartText = ""
     @Published var quoteEndText = ""
@@ -142,6 +143,7 @@ final class WorkflowViewModel: ObservableObject {
             humanReviewCheckpoint = nil
             topicHumanReviewEnabled = true
             topicReviewCheckpoint = nil
+            subtitleSource = .source
             progress = .idle
             log.append("Создан новый проект: \(automaticProject.path)")
             status = "Готово"
@@ -184,6 +186,7 @@ final class WorkflowViewModel: ObservableObject {
             humanReviewCheckpoint = manifest.humanReviewState?.pendingCheckpoint
             topicHumanReviewEnabled = manifest.topicReviewState?.enabled ?? true
             topicReviewCheckpoint = manifest.topicReviewState?.pendingCheckpoint
+            subtitleSource = .source
             progress = .idle
             status = manifest.workflow?.status.title ?? "Готово"
             selectedHistoryID = projectRoot.path
@@ -527,6 +530,29 @@ final class WorkflowViewModel: ObservableObject {
             )
         }
         return available.isEmpty ? [sourceLanguage ?? .ru] : available
+    }
+
+    var availableSubtitleSources: [SubtitleSourceSelection] {
+        guard let projectURL, let manifest = try? store.load(from: projectURL) else { return [.source] }
+        return SubtitleSourceResolver.availableSelections(manifest: manifest, projectURL: projectURL)
+    }
+
+    var subtitleSourceUnavailableMessage: String? {
+        guard let projectURL else { return nil }
+        return SubtitleSourceResolver.unavailableTranslationMessage(
+            manifest: try? store.load(from: projectURL),
+            projectURL: projectURL
+        )
+    }
+
+    func subtitleSourceTitle(_ selection: SubtitleSourceSelection) -> String {
+        switch selection {
+        case .source:
+            let language = projectURL.flatMap { try? store.load(from: $0).languageProfile?.effective } ?? nil
+            return "Оригинал\(language.map { " (\($0.rawValue.uppercased()))" } ?? "")"
+        case .approvedTranslation(let language):
+            return "Перевод (\(language.rawValue.uppercased()))"
+        }
     }
 
     func selectTopicVariant(language: ArtifactLanguage, granularity: TopicGranularity) {
@@ -966,6 +992,7 @@ final class WorkflowViewModel: ObservableObject {
             transcriptionContext: WhisperTranscriptionContext.normalized(transcriptionContext),
             topicGranularity: topicGranularity,
             artifactLanguage: artifactLanguage,
+            subtitleSource: subtitleSource,
             quoteStart: quoteProvenance ? quoteStartText : nil,
             quoteEnd: quoteProvenance ? quoteEndText : nil,
             speedFactor: speedFactor,
@@ -1698,9 +1725,7 @@ final class WorkflowEngine: @unchecked Sendable {
                     log("Найдено файлов результатов проекта: \(discovered.count).")
 
                 case .cutRange:
-                    let subtitleLanguage = settings.artifactLanguage
-                        ?? manifest.languageProfile?.effective
-                        ?? .ru
+                    let subtitleSource = try resolvedSubtitleSource(settings: settings, manifest: manifest, projectURL: projectURL)
                     activeFragment = try await createFragment(
                         mediaURL: mediaURL,
                         projectURL: projectURL,
@@ -1708,7 +1733,7 @@ final class WorkflowEngine: @unchecked Sendable {
                         end: settings.rangeEnd,
                         name: settings.fragmentName,
                         style: settings.subtitleStyle,
-                        subtitleLanguage: subtitleLanguage,
+                        subtitleSource: subtitleSource,
                         topicGranularity: nil,
                         topicID: nil,
                         quoteStart: settings.quoteStart,
@@ -1739,6 +1764,7 @@ final class WorkflowEngine: @unchecked Sendable {
                         language: topicLanguage,
                         granularity: settings.topicGranularity
                     )
+                    let subtitleSource = try resolvedSubtitleSource(settings: settings, manifest: manifest, projectURL: projectURL)
                     activeFragment = try await createFragment(
                         mediaURL: mediaURL,
                         projectURL: projectURL,
@@ -1746,7 +1772,7 @@ final class WorkflowEngine: @unchecked Sendable {
                         end: topic.end,
                         name: topic.title,
                         style: settings.subtitleStyle,
-                        subtitleLanguage: topicLanguage,
+                        subtitleSource: subtitleSource,
                         topicGranularity: settings.topicGranularity,
                         topicID: topic.id,
                         quoteStart: nil,
@@ -1778,6 +1804,7 @@ final class WorkflowEngine: @unchecked Sendable {
                             granularity: settings.topicGranularity
                         )
                     }
+                    let subtitleSource = try resolvedSubtitleSource(settings: settings, manifest: manifest, projectURL: projectURL)
                     var fragment = try await createFragment(
                         mediaURL: mediaURL,
                         projectURL: projectURL,
@@ -1785,7 +1812,7 @@ final class WorkflowEngine: @unchecked Sendable {
                         end: settings.rangeEnd,
                         name: settings.fragmentName.isEmpty ? (topic?.title ?? "Фрагмент") : settings.fragmentName,
                         style: settings.subtitleStyle,
-                        subtitleLanguage: language,
+                        subtitleSource: subtitleSource,
                         topicGranularity: topic == nil ? nil : settings.topicGranularity,
                         topicID: topic?.id,
                         quoteStart: settings.quoteStart,
@@ -1804,25 +1831,22 @@ final class WorkflowEngine: @unchecked Sendable {
                     activeFragment = fragment
 
                 case .burnSubtitles:
-                    let subtitleLanguage = settings.artifactLanguage
-                        ?? manifest.languageProfile?.effective
-                        ?? .ru
-                    let selectedSRT = layout.subtitlesURL(language: subtitleLanguage)
-                    guard FileManager.default.fileExists(atPath: selectedSRT.path) else { throw WorkflowError.missingFullSRT }
-                    let sourceLanguage = manifest.languageProfile?.effective ?? subtitleLanguage
-                    let outputURL = subtitleLanguage == sourceLanguage
+                    let subtitleSource = try resolvedSubtitleSource(settings: settings, manifest: manifest, projectURL: projectURL)
+                    let sourceLanguage = manifest.languageProfile?.effective ?? subtitleSource.language
+                    let outputURL = subtitleSource.language == sourceLanguage
                         ? layout.subtitledVideoURL
-                        : layout.subtitledVideoURL(language: subtitleLanguage)
+                        : layout.subtitledVideoURL(language: subtitleSource.language)
                     let mediaDuration = try await requiredDuration(of: mediaURL, manifest: manifest)
                     let ffmpegPath = try await ffmpeg.burnSubtitles(
                         mediaURL: mediaURL,
-                        srtURL: selectedSRT,
+                        srtURL: subtitleSource.srtURL,
                         outputURL: outputURL,
                         mediaDuration: mediaDuration,
                         style: settings.subtitleStyle
                     ) { fraction in tracker.update(operation, fraction: fraction) }
-                    try store.registerOutput(kind: "subtitled-video", url: outputURL, in: projectURL)
-                    log("Создано полное видео с субтитрами через \(ffmpegPath).")
+                    let outputKind = subtitleSource.isTranslation ? "subtitled-video-\(subtitleSource.language.rawValue)" : "subtitled-video"
+                    try store.registerOutput(kind: outputKind, url: outputURL, in: projectURL)
+                    log("Создано полное видео с субтитрами \(subtitleSource.language.rawValue.uppercased()) через \(ffmpegPath).")
 
                 case .adjustSpeed:
                     try await createSpeedAdjustedVideo(
@@ -2407,6 +2431,14 @@ final class WorkflowEngine: @unchecked Sendable {
         language == .en ? layout.fullSRTURL : layout.subtitlesURL(language: language)
     }
 
+    private func resolvedSubtitleSource(
+        settings: WorkflowSettings,
+        manifest: ProjectManifest,
+        projectURL: URL
+    ) throws -> ResolvedSubtitleSource {
+        try SubtitleSourceResolver.resolve(settings.subtitleSource, manifest: manifest, projectURL: projectURL)
+    }
+
     private func createFragment(
         mediaURL: URL,
         projectURL: URL,
@@ -2414,7 +2446,7 @@ final class WorkflowEngine: @unchecked Sendable {
         end: TimeInterval,
         name: String,
         style: SubtitleStyleSettings,
-        subtitleLanguage: ArtifactLanguage,
+        subtitleSource: ResolvedSubtitleSource,
         topicGranularity: TopicGranularity?,
         topicID: String?,
         quoteStart: String?,
@@ -2427,9 +2459,7 @@ final class WorkflowEngine: @unchecked Sendable {
             throw WorkflowError.invalidRange
         }
         let layout = ProjectLayout(root: projectURL)
-        let selectedSRT = layout.subtitlesURL(language: subtitleLanguage)
-        guard FileManager.default.fileExists(atPath: selectedSRT.path) else { throw WorkflowError.missingFullSRT }
-        let cues = try srt.cues(in: srt.load(from: selectedSRT), start: start, end: end, rebased: true)
+        let cues = try srt.cues(in: srt.load(from: subtitleSource.srtURL), start: start, end: end, rebased: true)
         guard !cues.isEmpty else { throw WorkflowError.noSubtitlesInRange }
 
         let identifier = uniqueFragmentIdentifier(projectURL: projectURL, start: start, end: end, name: name)
@@ -2457,14 +2487,14 @@ final class WorkflowEngine: @unchecked Sendable {
             subtitledVideoPath: nil,
             ffprobeReportPath: reportURL.path,
             style: style,
-            language: subtitleLanguage,
+            language: subtitleSource.language,
             topicGranularity: topicGranularity,
             topicID: topicID,
             quoteStart: quoteStart,
             quoteEnd: quoteEnd
         )
         try store.registerFragment(record, in: projectURL)
-        log("Создан точный фрагмент \(identifier) и синхронизированный fragment.srt.")
+        log("Создан точный фрагмент \(identifier) и синхронизированный fragment.srt (\(subtitleSource.language.rawValue.uppercased())).")
         return record
     }
 
@@ -2493,7 +2523,8 @@ final class WorkflowEngine: @unchecked Sendable {
         try (existing + "\n## fragment_subtitled.mp4\n" + report).write(to: reportURL, atomically: true, encoding: .utf8)
         updated.subtitledVideoPath = outputURL.path
         updated.ffprobeReportPath = reportURL.path
-        try store.registerOutput(kind: "fragment-subtitled-video", url: outputURL, in: projectURL)
+        let outputKind = fragment.language.map { "fragment-subtitled-video-\($0.rawValue)" } ?? "fragment-subtitled-video"
+        try store.registerOutput(kind: outputKind, url: outputURL, in: projectURL)
         try store.registerFragment(updated, in: projectURL)
         log("Субтитры вшиты во фрагмент \(fragment.id).")
         return updated

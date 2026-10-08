@@ -328,6 +328,9 @@ struct ContentView: View {
                                 }
                             ))
                         }
+                        if model.selectedOperations.contains(.burnSubtitles) {
+                            subtitleSourcePicker
+                        }
                     }
                     .padding(6)
                 }
@@ -520,6 +523,9 @@ struct ContentView: View {
 
                         Toggle("Вшить субтитры во фрагмент", isOn: $model.burnFragmentSubtitles)
                             .help("Создать fragment.srt из полной расшифровки и вшить его в готовый фрагмент")
+                        if model.burnFragmentSubtitles {
+                            subtitleSourcePicker
+                        }
 
                         Divider()
                         Text("Обработка итогового файла")
@@ -899,6 +905,23 @@ struct ContentView: View {
             }
             .padding()
             .disabled(model.isRunning)
+        }
+    }
+
+    @ViewBuilder
+    private var subtitleSourcePicker: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Picker("Субтитры", selection: $model.subtitleSource) {
+                ForEach(model.availableSubtitleSources) { source in
+                    Text(model.subtitleSourceTitle(source)).tag(source)
+                }
+            }
+            .disabled(model.isRunning)
+            if let message = model.subtitleSourceUnavailableMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 

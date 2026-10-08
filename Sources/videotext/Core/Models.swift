@@ -356,8 +356,12 @@ struct ProjectOutput: Codable, Identifiable {
         [
             "fragment-video",
             "fragment-subtitled-video",
+            "fragment-subtitled-video-ru",
+            "fragment-subtitled-video-en",
             "processed-fragment-video",
             "subtitled-video",
+            "subtitled-video-ru",
+            "subtitled-video-en",
             "speed-adjusted-video",
             "blurred-video",
             "watermarked-video",
@@ -394,10 +398,14 @@ struct ProjectOutput: Codable, Identifiable {
         case "fragment-video": return "Видеофрагмент"
         case "fragment-srt": return "Субтитры фрагмента"
         case "fragment-subtitled-video": return "Фрагмент с субтитрами"
+        case "fragment-subtitled-video-ru": return "Фрагмент с русскими субтитрами"
+        case "fragment-subtitled-video-en": return "Фрагмент с английскими субтитрами"
         case "processed-fragment-video": return "Обработанный фрагмент"
         case "processed-fragment-srt": return "Субтитры обработанного фрагмента"
         case "processed-fragment-recipe": return "Рецепт обработанного фрагмента"
         case "subtitled-video": return "Полное видео с субтитрами"
+        case "subtitled-video-ru": return "Полное видео с русскими субтитрами"
+        case "subtitled-video-en": return "Полное видео с английскими субтитрами"
         case "speed-adjusted-video": return "Видео с изменённой скоростью"
         case "speed-adjusted-subtitles": return "Субтитры для изменённой скорости"
         case "speed-adjusted-topics": return "Темы для изменённой скорости"
@@ -662,6 +670,7 @@ struct WorkflowSettings {
     var transcriptionContext: String? = nil
     var topicGranularity: TopicGranularity = .normal
     var artifactLanguage: ArtifactLanguage? = nil
+    var subtitleSource: SubtitleSourceSelection = .source
     var quoteStart: String? = nil
     var quoteEnd: String? = nil
     var speedFactor: Double = 1
