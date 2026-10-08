@@ -1232,6 +1232,17 @@ struct EndToEndTest {
             let selected = try JSONDecoder().decode(TimedSourceDocument.self, from: Data(contentsOf: layout.selectedTimingSourceUnitsURL))
             try selected.validateCoverage()
             try require(selected.selectedTimingEnd != nil, "Selected timing source не содержит published timing envelope")
+        } else if nonemptyFile(at: layout.seminarTextCoreEvidenceURL) {
+            let evidence = try JSONDecoder().decode(
+                SeminarTextCoreTranscriptionEvidence.self,
+                from: Data(contentsOf: layout.seminarTextCoreEvidenceURL)
+            )
+            try require(
+                evidence.selectedTimingManifestSHA256 != nil
+                    && evidence.selectedWhisperJSONSHA256 == SelectedTimingHash.file(layout.whisperJSONURL),
+                "Core SeminarText provenance не связан с выбранной Whisper-попыткой"
+            )
+            requiredFiles.append(layout.seminarTextCoreEvidenceURL)
         } else {
             requiredFiles.append(layout.sourceAudioURL)
         }
