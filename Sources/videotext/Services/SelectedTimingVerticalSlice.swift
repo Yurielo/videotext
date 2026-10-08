@@ -1025,7 +1025,6 @@ struct SelectedTimingImporter {
         }
 
         var atoms: [SelectedTimingAtom] = []
-        var previousPartEnd: TimeInterval?
         for part in ordered {
             guard part.selectedAttempt == "initial" || part.selectedAttempt == "retry" else {
                 throw WorkflowError.processFailed("Selected timing manifest содержит неизвестную выбранную попытку.")
@@ -1034,11 +1033,13 @@ struct SelectedTimingImporter {
                   part.absoluteRange.endSeconds >= part.absoluteRange.startSeconds,
                   let selectedRange = part.selectedTimingAbsoluteRange,
                   selectedRange.startSeconds >= 0,
-                  selectedRange.endSeconds > selectedRange.startSeconds,
-                  previousPartEnd.map({ part.absoluteRange.startSeconds >= $0 }) ?? true else {
+                  selectedRange.endSeconds > selectedRange.startSeconds else {
                 throw WorkflowError.processFailed("Selected timing manifest содержит недопустимый absolute range.")
             }
-            previousPartEnd = part.absoluteRange.endSeconds
+            // `absolute_range` describes prepared media, not selected Whisper
+            // evidence. Canonical SeminarText may publish adjacent prepared
+            // chunks with a small overlap; selected_timing_absolute_range and
+            // the selected JSON remain the timing authority below.
             _ = try verify(part.artifacts.txt, in: packageRoot, expectedPart: part.id, fileExtension: "txt")
             _ = try verify(part.artifacts.srt, in: packageRoot, expectedPart: part.id, fileExtension: "srt")
             let jsonURL = try verify(part.artifacts.jsonFull, in: packageRoot, expectedPart: part.id, fileExtension: "json")
@@ -1051,7 +1052,7 @@ struct SelectedTimingImporter {
                       let lastToken = spokenTokens.last else { continue }
                 guard segment.offsets.from >= 0,
                       segment.offsets.to >= segment.offsets.from,
-                      lastToken.offsets.to > firstToken.offsets.from else {
+                      lastToken.offsets.to >= firstToken.offsets.from else {
                     throw WorkflowError.processFailed("Selected timing JSON содержит недопустимый segment interval.")
                 }
                 for token in spokenTokens {
