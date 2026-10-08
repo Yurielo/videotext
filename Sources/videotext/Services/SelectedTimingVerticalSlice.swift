@@ -1055,6 +1055,20 @@ struct SelectedTimingImporter {
                       lastToken.offsets.to >= firstToken.offsets.from else {
                     throw WorkflowError.processFailed("Selected timing JSON содержит недопустимый segment interval.")
                 }
+                let collapsedTokenEnvelope = lastToken.offsets.to == firstToken.offsets.from
+                let segmentEnvelope: (start: TimeInterval, end: TimeInterval)?
+                if collapsedTokenEnvelope {
+                    let start = part.absoluteOffsetSeconds + Double(segment.offsets.from) / 1000
+                    let end = part.absoluteOffsetSeconds + Double(segment.offsets.to) / 1000
+                    guard end > start,
+                          start >= selectedRange.startSeconds - 0.000_001,
+                          end <= selectedRange.endSeconds + 0.000_001 else {
+                        throw WorkflowError.processFailed("Selected timing JSON содержит collapsed token timing без валидного native segment interval.")
+                    }
+                    segmentEnvelope = (start, end)
+                } else {
+                    segmentEnvelope = nil
+                }
                 for token in spokenTokens {
                     guard token.offsets.from >= 0,
                           token.offsets.to >= token.offsets.from,
@@ -1090,6 +1104,8 @@ struct SelectedTimingImporter {
                         text: token.text,
                         start: start,
                         end: end,
+                        sourceUnitEnvelopeStart: segmentEnvelope?.start ?? start,
+                        sourceUnitEnvelopeEnd: segmentEnvelope?.end ?? end,
                         maximumEnd: selectedRange.endSeconds,
                         partID: part.id,
                         confidence: token.confidence,
@@ -1133,12 +1149,12 @@ struct SelectedTimingImporter {
                 id: units.count + 1,
                 text: text,
                 textSHA256: SelectedTimingHash.string(text),
-                start: current.first!.start,
+                start: current.map(\.sourceUnitEnvelopeStart).min()!,
                 // JSON-full is native Whisper evidence and may include decoder
                 // padding past a media/chunk end. The manifest's signed range is
                 // the truthful upper bound for this source-unit envelope; this
                 // does not alter text or manufacture word-level alignment.
-                end: min(current.last!.end, current.last!.maximumEnd),
+                end: min(current.map(\.sourceUnitEnvelopeEnd).max()!, current.last!.maximumEnd),
                 sourcePartIDs: partIDs
             ))
             current.removeAll(keepingCapacity: true)
@@ -1377,6 +1393,8 @@ private struct SelectedTimingAtom {
     var text: String
     var start: TimeInterval
     var end: TimeInterval
+    var sourceUnitEnvelopeStart: TimeInterval
+    var sourceUnitEnvelopeEnd: TimeInterval
     var maximumEnd: TimeInterval
     var partID: String
     var confidence: Double?
