@@ -363,8 +363,6 @@ struct ContentView: View {
                             .disabled(model.isRunning || model.humanReviewCheckpoint != nil)
                         Toggle("Анализировать слова-паразиты до Human Review", isOn: $model.fillerAnalysisBeforeReview)
                             .disabled(model.isRunning || model.humanReviewCheckpoint != nil)
-                        Toggle("Human Review перевода", isOn: $model.translationHumanReviewEnabled)
-                            .disabled(model.isRunning || model.humanReviewCheckpoint != nil)
                         if model.humanReviewCheckpoint == nil {
                             Button {
                                 model.beginHumanReview()
@@ -375,6 +373,28 @@ struct ContentView: View {
                         }
                     }
                     .textFieldStyle(.roundedBorder)
+                    .padding(6)
+                }
+
+                GroupBox("Перевод") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(model.translationToRussianStatus)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Button {
+                                model.translateToRussian()
+                            } label: {
+                                Label("Перевести на русский", systemImage: "character.book.closed")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!model.canTranslateToRussian)
+                            Spacer()
+                            Label("Human Review обязателен", systemImage: "checkmark.seal")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     .padding(6)
                 }
 

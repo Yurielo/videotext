@@ -3,6 +3,7 @@ import Foundation
 struct ResultsDetector {
     func discover(in projectURL: URL) -> [ProjectOutput] {
         let layout = ProjectLayout(root: projectURL)
+        let manifest = try? ProjectStore().load(from: projectURL)
         var outputs: [ProjectOutput] = []
 
         for url in [layout.videoDirectory, layout.audioDirectory, layout.textsDirectory, layout.supportDirectory] {
@@ -14,10 +15,48 @@ struct ResultsDetector {
             for case let itemURL as URL in enumerator {
                 guard (try? itemURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
                 guard !itemURL.lastPathComponent.contains(".partial.") else { continue }
+                guard !isUnapprovedTranslationArtifact(itemURL, manifest: manifest, layout: layout) else { continue }
                 outputs.append(makeOutput(kind: kindForFile(itemURL), url: itemURL))
             }
         }
         return outputs.sorted { $0.path < $1.path }
+    }
+
+    private func isUnapprovedTranslationArtifact(
+        _ url: URL,
+        manifest: ProjectManifest?,
+        layout: ProjectLayout
+    ) -> Bool {
+        guard let manifest, let sourceLanguage = manifest.languageProfile?.effective else { return false }
+        let standardizedPath = url.standardizedFileURL.path
+        for target in ArtifactLanguage.allCases where target != sourceLanguage {
+            let active = manifest.activeTranscriptRevision(for: target)
+            let approved = active?.reviewStatus == .approved
+                && (active?.origin == .translated || active?.origin == .userEdited)
+            let targetWorkingPaths: Set<String> = [
+                layout.transcriptURL(language: target).standardizedFileURL.path,
+                layout.subtitlesURL(language: target).standardizedFileURL.path
+            ]
+            let activeRevisionPaths = Set(active.map { revision in
+                [
+                    layout.transcriptRevisionURL(id: revision.id, language: target).standardizedFileURL.path,
+                    layout.subtitleRevisionURL(id: revision.id, language: target).standardizedFileURL.path
+                ]
+            } ?? [])
+            let isTargetText = standardizedPath.hasSuffix(".\(target.rawValue).txt")
+                || standardizedPath.hasSuffix(".\(target.rawValue).srt")
+            if isTargetText && (!approved || (!targetWorkingPaths.contains(standardizedPath)
+                                              && !activeRevisionPaths.contains(standardizedPath))) {
+                return true
+            }
+            if !approved && (
+                standardizedPath == layout.translationReportURL(source: sourceLanguage, target: target).standardizedFileURL.path
+                    || standardizedPath == layout.selectedTimingTranslationsURL(source: sourceLanguage, target: target).standardizedFileURL.path
+            ) {
+                return true
+            }
+        }
+        return false
     }
 
     private func makeOutput(kind: String, url: URL) -> ProjectOutput {

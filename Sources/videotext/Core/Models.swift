@@ -61,14 +61,17 @@ enum WorkflowOperation: String, CaseIterable, Identifiable, Codable {
         }
     }
 
-    /// Translation is retained in the project for a later release, but is not a
-    /// supported product operation in the current core-only release.
-    static let translationEnabledForCurrentRelease = false
+    /// Translation is exposed only through the explicit EN-to-RU action for an
+    /// approved source revision. Dubbing remains outside this product slice.
+    static let translationEnabledForCurrentRelease = true
+    static let dubbingEnabledForCurrentRelease = false
 
     var isEnabledForCurrentRelease: Bool {
         switch self {
-        case .translateTranscript, .createDubbing:
+        case .translateTranscript:
             return Self.translationEnabledForCurrentRelease
+        case .createDubbing:
+            return Self.dubbingEnabledForCurrentRelease
         default:
             return true
         }
@@ -87,7 +90,7 @@ enum WorkflowOperation: String, CaseIterable, Identifiable, Codable {
         case .detectLanguage: return [.createManifest]
         case .transcribe: return [.detectLanguage]
         case .assessTranscriptionQuality: return [.transcribe]
-        case .translateTranscript: return [.assessTranscriptionQuality]
+        case .translateTranscript: return []
         case .validateTimeline: return [.assessTranscriptionQuality]
         case .topicTimecoding: return [.validateTimeline]
         case .discoverResults: return [.createManifest]
