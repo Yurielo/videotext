@@ -6,6 +6,8 @@ import CryptoKit
 /// it never runs a second Whisper pass for timing.
 struct SelectedTimingVerticalSlice {
     static let contract = "videotext-selected-timing-sentence-units-v1"
+    // Keep the same bounded retry budget used by the established translation adapter.
+    static let maximumTranslationAttempts = 2
 
     let runner: SeminarTextSelectedTimingRunner
     let importer: SelectedTimingImporter
@@ -77,6 +79,7 @@ struct SelectedTimingVerticalSlice {
         source: ArtifactLanguage,
         target: ArtifactLanguage,
         cacheDirectory: URL? = nil,
+        rejectedResponseEvidenceURL: URL? = nil,
         onLog: @escaping (String) -> Void = { _ in }
     ) async throws -> TimedTranslationDocument {
         guard source != target else {
@@ -91,6 +94,8 @@ struct SelectedTimingVerticalSlice {
             source: source,
             target: target
         )
+        let rejectedResponses = SelectedTimingRejectedResponseStore(url: rejectedResponseEvidenceURL)
+        try rejectedResponses.beginRun()
         var translations: [TimedTranslationUnit] = []
         for unit in sourceDocument.units {
             try Task.checkCancellation()
@@ -102,12 +107,45 @@ struct SelectedTimingVerticalSlice {
             } else {
                 // This provider boundary receives only the owned text. IDs,
                 // timestamps and provenance never cross into TranslateGemma.
-                translated = try validatedTranslation(
-                    await translator.translate(text: unit.text, source: source, target: target),
-                    sourceText: unit.text,
-                    source: source,
-                    target: target
-                )
+                let requestSHA256 = translator.requestSHA256(text: unit.text, source: source, target: target)
+                var accepted: String?
+                for attempt in 1...Self.maximumTranslationAttempts {
+                    let response = try await translator.translate(text: unit.text, source: source, target: target)
+                    do {
+                        accepted = try validatedTranslation(
+                            response,
+                            sourceText: unit.text,
+                            source: source,
+                            target: target
+                        )
+                        break
+                    } catch let rejection as SelectedTimingTranslationValidationFailure {
+                        try rejectedResponses.append(SelectedTimingRejectedResponseEvidence(
+                            unitID: unit.id,
+                            sourceLanguage: source,
+                            targetLanguage: target,
+                            sourceTextSHA256: unit.textSHA256,
+                            requestSHA256: requestSHA256,
+                            model: identity.model,
+                            modelDigest: identity.digest,
+                            protocolVersion: identity.protocolVersion,
+                            attempt: attempt,
+                            rawResponse: response,
+                            latinLetterCount: rejection.latinLetterCount,
+                            cyrillicLetterCount: rejection.cyrillicLetterCount,
+                            validationFailureReason: rejection.message,
+                            createdAt: Date()
+                        ))
+                        onLog("Selected timing: TranslateGemma отклонила unit \(unit.id), попытка \(attempt)/\(Self.maximumTranslationAttempts): \(rejection.message)")
+                        if attempt == Self.maximumTranslationAttempts {
+                            throw WorkflowError.processFailed(rejection.message)
+                        }
+                    }
+                }
+                guard let accepted else {
+                    throw WorkflowError.processFailed("TranslateGemma не вернула проверенный text-only перевод.")
+                }
+                translated = accepted
                 try cache.save(translated, for: unit)
             }
             translations.append(TimedTranslationUnit(
@@ -139,24 +177,38 @@ struct SelectedTimingVerticalSlice {
     ) throws -> String {
         let translated = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !translated.isEmpty else {
-            throw WorkflowError.processFailed("TranslateGemma вернула пустой text-only перевод.")
+            throw SelectedTimingTranslationValidationFailure(
+                message: "TranslateGemma вернула пустой text-only перевод.",
+                text: translated
+            )
         }
         let normalizedSource = normalizedTranslationText(sourceText).lowercased()
         let normalizedTarget = normalizedTranslationText(translated).lowercased()
         guard normalizedTarget != normalizedSource,
               normalizedSource.isEmpty || !normalizedTarget.contains(normalizedSource) else {
-            throw WorkflowError.processFailed("TranslateGemma вернула исходный текст без перевода.")
+            throw SelectedTimingTranslationValidationFailure(
+                message: "TranslateGemma вернула исходный текст без перевода.",
+                text: translated
+            )
         }
         if source == .en, target == .ru {
             let letters = translationLetterCounts(translated)
             guard letters.cyrillic > 0, letters.cyrillic >= letters.latin else {
-                throw WorkflowError.processFailed("TranslateGemma вернула текст преимущественно не на русском языке.")
+                throw SelectedTimingTranslationValidationFailure(
+                    message: "TranslateGemma вернула текст преимущественно не на русском языке.",
+                    latinLetterCount: letters.latin,
+                    cyrillicLetterCount: letters.cyrillic
+                )
             }
         }
         if source == .ru, target == .en {
             let letters = translationLetterCounts(translated)
             guard letters.latin > 0, letters.latin >= letters.cyrillic else {
-                throw WorkflowError.processFailed("TranslateGemma вернула текст преимущественно не на английском языке.")
+                throw SelectedTimingTranslationValidationFailure(
+                    message: "TranslateGemma вернула текст преимущественно не на английском языке.",
+                    latinLetterCount: letters.latin,
+                    cyrillicLetterCount: letters.cyrillic
+                )
             }
         }
         return translated
@@ -1210,6 +1262,13 @@ struct SelectedTimingImporter {
 protocol SimpleTextTranslationProvider {
     func identity() async throws -> TranslationModelIdentity
     func translate(text: String, source: ArtifactLanguage, target: ArtifactLanguage) async throws -> String
+    func requestSHA256(text: String, source: ArtifactLanguage, target: ArtifactLanguage) -> String
+}
+
+extension SimpleTextTranslationProvider {
+    func requestSHA256(text: String, source: ArtifactLanguage, target: ArtifactLanguage) -> String {
+        SelectedTimingHash.string("\(source.rawValue)|\(target.rawValue)|\(text)")
+    }
 }
 
 struct OllamaSimpleTextTranslateGemma: SimpleTextTranslationProvider {
@@ -1234,14 +1293,7 @@ struct OllamaSimpleTextTranslateGemma: SimpleTextTranslationProvider {
     }
 
     func translate(text: String, source: ArtifactLanguage, target: ArtifactLanguage) async throws -> String {
-        let sourceName = source == .en ? "English" : "Russian"
-        let targetName = target == .en ? "English" : "Russian"
-        let prompt = """
-        Translate the following \(sourceName) spoken-text passage into \(targetName).
-        Return only the translated passage. Preserve meaning, negation, numbers, names, terminology and natural repetitions. Do not add context or complete unstated meaning.
-
-        \(text)
-        """
+        let prompt = Self.prompt(text: text, source: source, target: target)
         let body: [String: Any] = [
             "model": Self.model,
             "stream": false,
@@ -1256,11 +1308,27 @@ struct OllamaSimpleTextTranslateGemma: SimpleTextTranslationProvider {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               root["done"] as? Bool != false,
               let message = root["message"] as? [String: Any],
-              let content = (message["content"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !content.isEmpty, !content.contains("```") else {
+              let content = message["content"] as? String,
+              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !content.contains("```") else {
             throw WorkflowError.processFailed("TranslateGemma вернула неполный text-only перевод.")
         }
         return content
+    }
+
+    func requestSHA256(text: String, source: ArtifactLanguage, target: ArtifactLanguage) -> String {
+        SelectedTimingHash.string(Self.prompt(text: text, source: source, target: target))
+    }
+
+    private static func prompt(text: String, source: ArtifactLanguage, target: ArtifactLanguage) -> String {
+        let sourceName = source == .en ? "English" : "Russian"
+        let targetName = target == .en ? "English" : "Russian"
+        return """
+        Translate the following \(sourceName) spoken-text passage into \(targetName).
+        Return only the translated passage. Preserve meaning, negation, numbers, names, terminology and natural repetitions. Do not add context or complete unstated meaning.
+
+        \(text)
+        """
     }
 
     private func request(_ request: URLRequest) async throws -> Data {
@@ -1270,6 +1338,89 @@ struct OllamaSimpleTextTranslateGemma: SimpleTextTranslationProvider {
             throw WorkflowError.topicServiceUnavailable("Ollama вернула ошибку HTTP для text-only перевода.")
         }
         return data
+    }
+}
+
+private struct SelectedTimingTranslationValidationFailure: Error {
+    let message: String
+    let latinLetterCount: Int
+    let cyrillicLetterCount: Int
+
+    init(message: String, text: String) {
+        let counts = SelectedTimingTranslationValidationFailure.letterCounts(text)
+        self.init(message: message, latinLetterCount: counts.latin, cyrillicLetterCount: counts.cyrillic)
+    }
+
+    init(message: String, latinLetterCount: Int, cyrillicLetterCount: Int) {
+        self.message = message
+        self.latinLetterCount = latinLetterCount
+        self.cyrillicLetterCount = cyrillicLetterCount
+    }
+
+    private static func letterCounts(_ text: String) -> (latin: Int, cyrillic: Int) {
+        text.unicodeScalars.reduce(into: (latin: 0, cyrillic: 0)) { counts, scalar in
+            switch scalar.value {
+            case 0x0041...0x005A, 0x0061...0x007A:
+                counts.latin += 1
+            case 0x0400...0x052F:
+                counts.cyrillic += 1
+            default:
+                break
+            }
+        }
+    }
+}
+
+struct SelectedTimingRejectedResponseEvidence: Codable, Equatable {
+    let unitID: Int
+    let sourceLanguage: ArtifactLanguage
+    let targetLanguage: ArtifactLanguage
+    let sourceTextSHA256: String
+    let requestSHA256: String
+    let model: String
+    let modelDigest: String?
+    let protocolVersion: String
+    let attempt: Int
+    let rawResponse: String
+    let latinLetterCount: Int
+    let cyrillicLetterCount: Int
+    let validationFailureReason: String
+    let createdAt: Date
+}
+
+struct SelectedTimingRejectedResponseEvidenceDocument: Codable {
+    let schemaVersion: Int
+    var responses: [SelectedTimingRejectedResponseEvidence]
+}
+
+private final class SelectedTimingRejectedResponseStore {
+    private let url: URL?
+
+    init(url: URL?) {
+        self.url = url
+    }
+
+    func beginRun() throws {
+        guard let url else { return }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+    }
+
+    func append(_ response: SelectedTimingRejectedResponseEvidence) throws {
+        guard let url else { return }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var document = (try? decoder.decode(
+            SelectedTimingRejectedResponseEvidenceDocument.self,
+            from: Data(contentsOf: url)
+        )) ?? SelectedTimingRejectedResponseEvidenceDocument(schemaVersion: 1, responses: [])
+        document.responses.append(response)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(document).write(to: url, options: .atomic)
     }
 }
 

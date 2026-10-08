@@ -1619,8 +1619,23 @@ final class WorkflowEngine: @unchecked Sendable {
                         source: sourceLanguage,
                         target: targetLanguage,
                         cacheDirectory: layout.selectedTimingTranslationCacheDirectory,
+                        rejectedResponseEvidenceURL: layout.selectedTimingTranslationRejectedResponsesURL(
+                            source: sourceLanguage,
+                            target: targetLanguage
+                        ),
                         onLog: log
                     )
+                    let rejectedResponsesURL = layout.selectedTimingTranslationRejectedResponsesURL(
+                        source: sourceLanguage,
+                        target: targetLanguage
+                    )
+                    if FileManager.default.fileExists(atPath: rejectedResponsesURL.path) {
+                        try store.registerOutput(
+                            kind: "selected-timing-translation-rejections-\(sourceLanguage.rawValue)-\(targetLanguage.rawValue)",
+                            url: rejectedResponsesURL,
+                            in: projectURL
+                        )
+                    }
                     try selectedTimingTranslation.persist(translated, to: projectURL)
                     try store.registerOutput(
                         kind: "selected-timing-translation-\(sourceLanguage.rawValue)-\(targetLanguage.rawValue)",

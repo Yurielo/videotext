@@ -15,6 +15,7 @@ struct RUENTranslationSliceProbe {
                     "translation directions are not limited to the accepted RU↔EN pair")
 
         try await verifyApprovedSourceFlow(root: root.appendingPathComponent("success"))
+        try await verifyRejectedResponseRetriesAndPersistsEvidence(root: root.appendingPathComponent("retry-success"))
         try await verifySourceFallbackFailsClosed(root: root.appendingPathComponent("source-fallback"))
         try await verifyWrongLanguageFailsClosed(root: root.appendingPathComponent("wrong-language"))
         try await verifyFailureIsolation(root: root.appendingPathComponent("failure-isolation"))
@@ -105,7 +106,47 @@ struct RUENTranslationSliceProbe {
                     "source fallback became an active EN revision")
         try require(!FileManager.default.fileExists(atPath: fixture.layout.subtitlesURL(language: .en).path),
                     "source fallback published EN subtitles")
+        let rejected = rejectedResponses(at: fixture.layout, source: .ru, target: .en)
+        try require(rejected.count == 2,
+                    "source fallback retained \(rejected.count) rejected attempts instead of two")
+        try require(cachedTexts(at: fixture.layout).isEmpty,
+                    "source fallback was cached as a valid translation")
         try require(manifest.workflow?.status == .completed, "source fallback invalidated the Core project")
+    }
+
+    private static func verifyRejectedResponseRetriesAndPersistsEvidence(root: URL) async throws {
+        let fixture = try makeFixture(root: root)
+        let translator = RejectThenTranslateRUENTranslator()
+        let result = try await WorkflowEngine(
+            store: fixture.store,
+            selectedTimingTranslation: SelectedTimingVerticalSlice(translator: translator)
+        ).run(settings: settings(fixture), onLog: { _ in })
+
+        try require(result.checkpoint?.kind == .translatedTranscript && result.checkpoint?.language == .en,
+                    "valid retry did not reach English Translation Human Review")
+        try require(translator.calls == 3,
+                    "translation did not make exactly one bounded retry before translating both units")
+        let rejected = rejectedResponses(at: fixture.layout, source: .ru, target: .en)
+        try require(rejected.count == 1, "valid retry retained the wrong number of rejected responses")
+        guard let evidence = rejected.first else { throw ProbeFailure(message: "missing rejected response evidence") }
+        try require(evidence.unitID == 1
+                    && evidence.sourceLanguage == .ru
+                    && evidence.targetLanguage == .en
+                    && evidence.sourceTextSHA256 == SelectedTimingHash.string(" Юрий не отменил встречу в 7 часов.")
+                    && evidence.model == "translategemma:4b"
+                    && evidence.modelDigest == "fixture-digest"
+                    && evidence.protocolVersion == "translategemma-simple-text-v1"
+                    && evidence.attempt == 1
+                    && evidence.rawResponse == "Русский ответ без перевода."
+                    && evidence.latinLetterCount == 0
+                    && evidence.cyrillicLetterCount > 0
+                    && evidence.validationFailureReason.contains("преимущественно не на английском языке")
+                    && !evidence.requestSHA256.isEmpty,
+                    "rejected response evidence is incomplete or altered")
+        let cache = cachedTexts(at: fixture.layout)
+        try require(cache.count == 2, "accepted retry did not populate the normal cache")
+        try require(!cache.contains("Русский ответ без перевода."),
+                    "rejected response was cached as a valid translation")
     }
 
     private static func verifyWrongLanguageFailsClosed(root: URL) async throws {
@@ -123,6 +164,17 @@ struct RUENTranslationSliceProbe {
         let manifest = try fixture.store.load(from: fixture.project)
         try require(manifest.activeTranscriptRevision(for: .en) == nil,
                     "wrong-language output became an active EN revision")
+        let rejected = rejectedResponses(at: fixture.layout, source: .ru, target: .en)
+        try require(rejected.count == SelectedTimingVerticalSlice.maximumTranslationAttempts,
+                    "retry exhaustion did not retain every rejected response")
+        try require(rejected.map(\.attempt) == [1, 2]
+                    && rejected.allSatisfy { $0.rawResponse == "Русский ответ без перевода." },
+                    "retry evidence did not retain the exact rejected responses")
+        try require(cachedTexts(at: fixture.layout).isEmpty,
+                    "retry exhaustion cached rejected text as a valid translation")
+        try Data("existing topics".utf8).write(to: fixture.layout.topicsURL)
+        try require(FileManager.default.fileExists(atPath: fixture.layout.topicsURL.path),
+                    "Core project is not usable after translation retry exhaustion")
     }
 
     private static func verifyFailureIsolation(root: URL) async throws {
@@ -271,6 +323,33 @@ struct RUENTranslationSliceProbe {
         ["text": text, "offsets": ["from": from, "to": to], "p": 0.95]
     }
 
+    private static func rejectedResponses(
+        at layout: ProjectLayout,
+        source: ArtifactLanguage,
+        target: ArtifactLanguage
+    ) -> [SelectedTimingRejectedResponseEvidence] {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let document = try? decoder.decode(
+            SelectedTimingRejectedResponseEvidenceDocument.self,
+            from: Data(contentsOf: layout.selectedTimingTranslationRejectedResponsesURL(source: source, target: target))
+        )
+        return document?.responses ?? []
+    }
+
+    private static func cachedTexts(at layout: ProjectLayout) -> [String] {
+        guard let runDirectories = try? FileManager.default.contentsOfDirectory(
+            at: layout.selectedTimingTranslationCacheDirectory,
+            includingPropertiesForKeys: nil
+        ) else { return [] }
+        return runDirectories.flatMap { directory in
+            (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        }.compactMap { url in
+            guard let root = try? JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] else { return nil }
+            return root["text"] as? String
+        }
+    }
+
     private static func require(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {
         guard try condition() else { throw ProbeFailure(message: message) }
     }
@@ -311,6 +390,20 @@ private struct RussianOutputTranslator: RUENTranslator {
         TranslationModelIdentity(model: "translategemma:4b", digest: "fixture-digest", protocolVersion: "translategemma-simple-text-v1")
     }
     func translate(text: String, source: ArtifactLanguage, target: ArtifactLanguage) async throws -> String { "Русский ответ без перевода." }
+}
+
+private final class RejectThenTranslateRUENTranslator: RUENTranslator {
+    private(set) var calls = 0
+
+    func identity() async throws -> TranslationModelIdentity {
+        TranslationModelIdentity(model: "translategemma:4b", digest: "fixture-digest", protocolVersion: "translategemma-simple-text-v1")
+    }
+
+    func translate(text: String, source: ArtifactLanguage, target: ArtifactLanguage) async throws -> String {
+        calls += 1
+        if calls == 1 { return "Русский ответ без перевода." }
+        return calls == 2 ? "Yuri did not cancel the meeting at 7 o'clock." : "The report lists 12 participants."
+    }
 }
 
 private struct FailingRUENTranslator: RUENTranslator {

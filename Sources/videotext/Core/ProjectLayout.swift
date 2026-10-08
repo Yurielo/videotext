@@ -71,6 +71,11 @@ struct ProjectLayout {
     func selectedTimingTranslationsURL(source: ArtifactLanguage, target: ArtifactLanguage) -> URL {
         selectedTimingDirectory.appendingPathComponent("translations.\(source.rawValue)-\(target.rawValue).json")
     }
+    func selectedTimingTranslationRejectedResponsesURL(source: ArtifactLanguage, target: ArtifactLanguage) -> URL {
+        selectedTimingDirectory
+            .appendingPathComponent("Translation diagnostics", isDirectory: true)
+            .appendingPathComponent("rejected-responses.\(source.rawValue)-\(target.rawValue).json")
+    }
     var selectedTimingTranslationCacheDirectory: URL {
         selectedTimingDirectory.appendingPathComponent("Translation cache", isDirectory: true)
     }

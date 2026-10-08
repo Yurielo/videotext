@@ -74,6 +74,12 @@ struct RUENTranslationRealProbe {
             print("RU_EN_TRANSLATED_UNIT_\(source.id)=\(translated.text)")
         }
 
+        if environment["VIDEOTEXT_RU_EN_STOP_AT_HUMAN_REVIEW"] == "1" {
+            print("RU_EN_TRANSLATION_REAL_REVIEW_BOUNDARY_PASS digest=\(document.model.digest ?? "missing")")
+            print("RU_EN_TRANSLATION_REAL_PROJECT=\(project.path)")
+            return
+        }
+
         _ = try HumanReviewService(store: store).approve(projectURL: project)
         let approved = try store.load(from: project)
         try require(approved.activeTranscriptRevision(for: .ru)?.reviewStatus == .approved,
