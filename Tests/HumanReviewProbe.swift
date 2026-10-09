@@ -141,6 +141,8 @@ struct HumanReviewProbe {
         let approvedManifest = try store.load(from: project)
         try require(approvedManifest.humanReviewState?.pendingCheckpoint == nil, "checkpoint не закрыт")
         try require(approvedManifest.activeTranscriptRevision(for: .ru)?.id == approval.revision.id, "approved revision не активирована")
+        let approvedSourceText = try String(contentsOf: layout.transcriptURL, encoding: .utf8)
+        try require(approvedSourceText.contains("Исправленный первый фрагмент."), "исправленный source TXT не записан")
         for id in ["artifact-baseline-srt", "artifact-topics", "artifact-video"] {
             try require(approvedManifest.artifacts?.first(where: { $0.id == id })?.validationStatus == .pending, "потомок \(id) не инвалидирован")
         }
@@ -230,6 +232,13 @@ struct HumanReviewProbe {
             sourceReviewEnabled: true,
             translationReviewEnabled: true
         )
+        let translatedDraft = try service.saveDraftCue(
+            projectURL: project,
+            language: .en,
+            cueID: 1,
+            replacementText: "Reviewed first fragment."
+        )
+        try require(translatedDraft[0].start == 0 && translatedDraft[0].end == 2, "translation review изменил таймкод")
         let finalApproval = try service.approve(projectURL: project)
         let completedManifest = try store.load(from: project)
         try require(finalApproval.pendingOperations.isEmpty, "пустая очередь изменилась")
@@ -237,6 +246,20 @@ struct HumanReviewProbe {
         try require(
             completedManifest.reviewTasks?.first(where: { $0.id == "unrelated-old-task" })?.status == .needsReview,
             "утверждение закрыло задание другой ревизии"
+        )
+        let approvedTranslationText = try String(contentsOf: layout.transcriptURL(language: .en), encoding: .utf8)
+        try require(approvedTranslationText.contains("Reviewed first fragment."), "исправленный translated TXT не записан")
+        let simpleState = SimpleProjectHomeStateService().make(
+            projectURL: project,
+            manifest: completedManifest,
+            topicsDetail: nil,
+            discoveredOutputs: []
+        )
+        try require(simpleState.artifact(.transcription).openOutputPath == layout.transcriptURL.path, "Simple source result не ведёт к transcript TXT")
+        try require(simpleState.artifact(.translation).openOutputPath == layout.transcriptURL(language: .en).path, "Simple translation result не ведёт к translated TXT")
+        try require(
+            !simpleState.recentResults.contains(where: { $0.path.hasSuffix(".srt") }),
+            "Simple recent results после Human Review не должны раскрывать SRT"
         )
         let activeRU = try requireValue(completedManifest.activeTranscriptRevision(for: .ru), "нет активной RU-ревизии")
         let reopened = try service.beginReview(projectURL: project, language: .ru)
