@@ -239,6 +239,11 @@ struct HumanReviewProbe {
             replacementText: "Reviewed first fragment."
         )
         try require(translatedDraft[0].start == 0 && translatedDraft[0].end == 2, "translation review изменил таймкод")
+        let afterTranslationDraft = try store.load(from: project)
+        try require(
+            afterTranslationDraft.reviewTasks?.first(where: { $0.id == "unrelated-old-task" })?.status == .needsReview,
+            "правка translation review закрыла задание другой ревизии"
+        )
         let finalApproval = try service.approve(projectURL: project)
         let completedManifest = try store.load(from: project)
         try require(finalApproval.pendingOperations.isEmpty, "пустая очередь изменилась")
