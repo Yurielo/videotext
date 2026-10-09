@@ -4,6 +4,33 @@ import AVKit
 import AVFoundation
 import UniformTypeIdentifiers
 
+private enum SimpleProjectHomeGoal: CaseIterable, Identifiable {
+    case textContent
+    case subtitledVideo
+    case fragment
+    case processVideo
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .textContent: return "Текст и содержание"
+        case .subtitledVideo: return "Видео с субтитрами"
+        case .fragment: return "Фрагмент видео"
+        case .processVideo: return "Обработать видео"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .textContent: return "Расшифровка · Темы · Перевод · Слова-паразиты"
+        case .subtitledVideo: return "Всё видео или фрагмент · Оригинал или перевод"
+        case .fragment: return "По теме · По времени · По тексту"
+        case .processVideo: return "Слова-паразиты · Скорость · Blur · Watermark · Звук"
+        }
+    }
+}
+
 struct ContentView: View {
     @ObservedObject var model: WorkflowViewModel
     @State private var fragmentSelectionMode = FragmentSelectionMode.timecode
@@ -17,21 +44,14 @@ struct ContentView: View {
     @State private var reviewIssuesOnly = false
     @State private var confirmTopicRemoval = false
     @State private var selectedResultsTab = 0
+    @State private var presentationMode: ProjectPresentationMode = .simple
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            progressPanel
-                .fixedSize(horizontal: false, vertical: true)
-            Divider()
-            HSplitView {
-                historyPanel
-                    .frame(minWidth: 180, idealWidth: 220, maxWidth: 260)
-                controls
-                    .frame(minWidth: 320, idealWidth: 380, maxWidth: 430)
-                results
-                    .frame(minWidth: 420, idealWidth: 620)
+        Group {
+            if presentationMode == .simple {
+                simpleRoot
+            } else {
+                advancedRoot
             }
         }
         .frame(minWidth: 980, minHeight: 680)
@@ -110,22 +130,58 @@ struct ContentView: View {
         }
     }
 
+    private var advancedRoot: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            progressPanel
+                .fixedSize(horizontal: false, vertical: true)
+            Divider()
+            HSplitView {
+                historyPanel
+                    .frame(minWidth: 180, idealWidth: 220, maxWidth: 260)
+                controls
+                    .frame(minWidth: 320, idealWidth: 380, maxWidth: 430)
+                results
+                    .frame(minWidth: 420, idealWidth: 620)
+            }
+        }
+    }
+
+    private var simpleRoot: some View {
+        VStack(spacing: 0) {
+            simpleHeader
+            Divider()
+            if model.isRunning {
+                simpleProgressPanel
+                Divider()
+            }
+            if model.projectURL == nil {
+                simpleEmptyState
+            } else {
+                simpleProjectHome
+            }
+        }
+    }
+
     private var header: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
                 appIdentity
                 Spacer(minLength: 12)
-                projectActions
+                presentationModePicker
+                projectActions()
                 workflowActions(includeStatus: true)
             }
             VStack(spacing: 10) {
                 HStack {
                     appIdentity
                     Spacer()
+                    presentationModePicker
                     statusLabel
                 }
                 HStack(spacing: 10) {
-                    projectActions
+                    projectActions()
                     Spacer(minLength: 8)
                     workflowActions(includeStatus: false)
                 }
@@ -152,7 +208,293 @@ struct ContentView: View {
         .fixedSize(horizontal: true, vertical: false)
     }
 
-    private var projectActions: some View {
+    private var simpleAppIdentity: some View {
+        HStack(spacing: 9) {
+            Image(nsImage: NSApplication.shared.applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 34, height: 34)
+                .accessibilityHidden(true)
+            Text("videotext")
+                .font(.title2.bold())
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var presentationModePicker: some View {
+        Picker("Режим", selection: $presentationMode) {
+            ForEach(ProjectPresentationMode.allCases) { mode in
+                Text(mode.title).tag(mode)
+            }
+        }
+        .pickerStyle(.segmented)
+        .frame(width: 220)
+        .accessibilityLabel("Режим интерфейса")
+    }
+
+    private var simpleHeader: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                simpleAppIdentity
+                Spacer(minLength: 12)
+                presentationModePicker
+                projectActions(includeDiagnostics: false)
+            }
+            VStack(spacing: 10) {
+                HStack {
+                    simpleAppIdentity
+                    Spacer()
+                    presentationModePicker
+                }
+                projectActions(includeDiagnostics: false)
+            }
+        }
+        .padding()
+    }
+
+    private var simpleProgressPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Обработка выполняется")
+                    .font(.subheadline.bold())
+                Spacer()
+                Text("Готово: \(percent(model.progress.overallFraction))")
+                    .monospacedDigit()
+                Button(role: .destructive) {
+                    model.stop()
+                } label: {
+                    Label(model.isStopping ? "Остановка..." : "Остановить обработку", systemImage: "stop.fill")
+                }
+                .disabled(model.isStopping)
+            }
+            ProgressView(value: model.progress.overallFraction, total: 1)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private var simpleEmptyState: some View {
+        ContentUnavailableView {
+            Label("Откройте существующий проект или выберите видео", systemImage: "folder")
+        } actions: {
+            HStack(spacing: 10) {
+                Button("Открыть проект") {
+                    if let url = openProjectDirectory() { model.openProject(url) }
+                }
+                .buttonStyle(.borderedProminent)
+                Button("Выбрать видео") {
+                    if let url = openMediaFile() { model.selectMedia(url) }
+                }
+            }
+        }
+    }
+
+    private var simpleProjectHome: some View {
+        let state = simpleHomeState
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(state.mediaName)
+                        .font(.title2.bold())
+                        .lineLimit(2)
+                    HStack(spacing: 10) {
+                        Text(state.projectName)
+                        if let duration = state.durationSeconds, duration > 0 {
+                            Text(TimeTextFormatter.string(duration))
+                                .monospacedDigit()
+                        }
+                        if let language = state.sourceLanguage {
+                            Text(language.russianTitle)
+                        }
+                    }
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    Label(state.currentState, systemImage: simpleStateIcon(state))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(simpleStateColor(state))
+                }
+
+                simpleSectionTitle("Готово")
+                VStack(spacing: 8) {
+                    ForEach(state.artifacts) { artifact in
+                        simpleArtifactRow(artifact)
+                    }
+                }
+
+                simpleSectionTitle("Что хотите получить?")
+                LazyVGrid(
+                    columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
+                    spacing: 12
+                ) {
+                    simpleGoalCard(.textContent, icon: "text.alignleft")
+                    simpleGoalCard(.subtitledVideo, icon: "captions.bubble")
+                    simpleGoalCard(.fragment, icon: "scissors")
+                    simpleGoalCard(.processVideo, icon: "slider.horizontal.3")
+                }
+
+                simpleSectionTitle("Последние результаты")
+                if state.recentResults.isEmpty {
+                    Text("Готовых результатов пока нет")
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(spacing: 8) {
+                        ForEach(state.recentResults) { output in
+                            simpleRecentResultRow(output)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: 920, alignment: .leading)
+            .padding(24)
+        }
+    }
+
+    private var simpleHomeState: SimpleProjectHomeState {
+        guard let projectURL = model.projectURL else {
+            return SimpleProjectHomeState(
+                projectName: "",
+                mediaName: "",
+                durationSeconds: nil,
+                sourceLanguage: nil,
+                currentState: "",
+                artifacts: [],
+                recentResults: []
+            )
+        }
+        let manifest = try? ProjectStore().load(from: projectURL)
+        return SimpleProjectHomeStateService().make(
+            projectURL: projectURL,
+            manifest: manifest,
+            topicsDetail: model.resultSummary.artifact(.topics)?.detail,
+            topicsAreViewable: model.resultSummary.artifact(.topics)?.availability == .ready,
+            discoveredOutputs: model.outputs
+        )
+    }
+
+    private func simpleSectionTitle(_ title: String) -> some View {
+        Text(title)
+            .font(.headline)
+    }
+
+    private func simpleArtifactRow(_ artifact: SimpleProjectHomeArtifact) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: simpleArtifactIcon(artifact.readiness))
+                .foregroundStyle(simpleArtifactColor(artifact.readiness))
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(artifact.kind.title)
+                    .fontWeight(.semibold)
+                Text(artifact.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text(artifact.readiness.title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(simpleArtifactColor(artifact.readiness))
+            if let target = artifact.reviewTarget {
+                Button(simpleReviewActionTitle(target)) {
+                    openSimpleReview(target)
+                }
+                .buttonStyle(.borderedProminent)
+            } else if let path = artifact.openOutputPath,
+                      let output = model.outputs.first(where: { $0.path == path }) {
+                Button("Открыть") {
+                    model.openResult(output)
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding(.vertical, 6)
+    }
+
+    private func simpleGoalCard(_ goal: SimpleProjectHomeGoal, icon: String) -> some View {
+        Button {
+            presentationMode = .advanced
+            selectedResultsTab = 0
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                Image(systemName: icon)
+                    .font(.title3)
+                Text(goal.title)
+                    .font(.headline)
+                Text(goal.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+            }
+            .frame(maxWidth: .infinity, minHeight: 116, alignment: .leading)
+            .padding(14)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(goal.title)
+    }
+
+    private func simpleRecentResultRow(_ output: ProjectOutput) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: output.isGeneratedMedia ? "film" : "doc")
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(output.title)
+                    .fontWeight(.semibold)
+                Text(URL(fileURLWithPath: output.path).lastPathComponent)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Button("Открыть") { model.openResult(output) }
+                .buttonStyle(.bordered)
+            Button {
+                model.revealResult(output)
+            } label: {
+                Image(systemName: "folder")
+            }
+            .help("Показать в Finder")
+        }
+        .padding(.vertical, 5)
+    }
+
+    private func openSimpleReview(_ target: SimpleProjectHomeReviewTarget) {
+        presentationMode = .advanced
+        selectedResultsTab = target == .topics ? 1 : 2
+    }
+
+    private func simpleReviewActionTitle(_ target: SimpleProjectHomeReviewTarget) -> String {
+        target == .topics ? "Проверить темы" : "Проверить"
+    }
+
+    private func simpleStateIcon(_ state: SimpleProjectHomeState) -> String {
+        state.artifacts.contains(where: { $0.readiness == .needsReview })
+            ? "exclamationmark.circle.fill"
+            : "checkmark.circle.fill"
+    }
+
+    private func simpleStateColor(_ state: SimpleProjectHomeState) -> Color {
+        state.artifacts.contains(where: { $0.readiness == .needsReview }) ? .orange : .green
+    }
+
+    private func simpleArtifactIcon(_ readiness: SimpleProjectHomeReadiness) -> String {
+        switch readiness {
+        case .ready: return "checkmark.circle.fill"
+        case .needsReview: return "exclamationmark.circle.fill"
+        case .missing: return "minus.circle"
+        }
+    }
+
+    private func simpleArtifactColor(_ readiness: SimpleProjectHomeReadiness) -> Color {
+        switch readiness {
+        case .ready: return .green
+        case .needsReview: return .orange
+        case .missing: return .secondary
+        }
+    }
+
+    private func projectActions(includeDiagnostics: Bool = true) -> some View {
         HStack(spacing: 10) {
             Button {
                 if let url = openMediaFile() { model.selectMedia(url) }
@@ -172,13 +514,15 @@ struct ContentView: View {
                 Label("Папка проекта", systemImage: "folder")
             }
             .disabled(model.projectURL == nil)
-            Button {
-                model.runDiagnostics()
-            } label: {
-                Image(systemName: "stethoscope")
+            if includeDiagnostics {
+                Button {
+                    model.runDiagnostics()
+                } label: {
+                    Image(systemName: "stethoscope")
+                }
+                .help("Запустить диагностику")
+                .disabled(model.projectURL == nil || model.isRunning)
             }
-            .help("Запустить диагностику")
-            .disabled(model.projectURL == nil || model.isRunning)
         }
     }
 
