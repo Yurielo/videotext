@@ -93,6 +93,7 @@ final class WorkflowViewModel: ObservableObject {
     private let topicReviewService = TopicReviewService()
     private var clockTask: Task<Void, Never>?
     private var runTask: Task<Void, Never>?
+    private var simpleRunNeedsPreferenceRestoration = false
     private var runStartedAt: Date?
     private var runMode: ProjectRunMode = .newProject
     private var notificationPermissionRequested = false
@@ -209,6 +210,47 @@ final class WorkflowViewModel: ObservableObject {
             return
         }
         startRun(operations: selectedOperations)
+    }
+
+    var simpleTranscriptionLanguage: String {
+        if let language = simpleTranscriptionLockedLanguage { return language.rawValue }
+        let language = whisperLanguage.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return language.isEmpty ? "auto" : language
+    }
+
+    var simpleTranscriptionLockedLanguage: ArtifactLanguage? {
+        // Transcript reuse is mode-independent, including a cancelled new-project run.
+        guard let projectURL, let manifest = try? store.load(from: projectURL) else { return nil }
+        return manifest.languageProfile?.effective
+    }
+
+    var canStartSimpleTranscription: Bool {
+        guard !isRunning, mediaURL != nil,
+              humanReviewCheckpoint == nil, topicReviewCheckpoint == nil,
+              let projectURL,
+              let manifest = try? store.load(from: projectURL),
+              manifest.humanReviewState?.pendingCheckpoint == nil,
+              manifest.topicReviewState?.pendingCheckpoint == nil else { return false }
+        let state = SimpleProjectHomeStateService().make(
+            projectURL: projectURL,
+            manifest: manifest,
+            topicsDetail: nil,
+            discoveredOutputs: []
+        )
+        switch state.artifact(.transcription).readiness {
+        case .missing, .failed: return true
+        case .ready, .needsReview: return false
+        }
+    }
+
+    @discardableResult
+    func startSimpleTranscription() -> Bool {
+        guard canStartSimpleTranscription else { return false }
+        return startRun(
+            operations: [.validateTimeline],
+            sourceHumanReviewOverride: true,
+            whisperLanguageOverride: simpleTranscriptionLanguage
+        )
     }
 
     var translationDirection: (source: ArtifactLanguage, target: ArtifactLanguage)? {
@@ -501,6 +543,9 @@ final class WorkflowViewModel: ObservableObject {
     func prepareForApplicationTermination() async {
         cancelForApplicationTermination()
         try? await Task.sleep(nanoseconds: 200_000_000)
+        while simpleRunNeedsPreferenceRestoration {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
         _ = await engine.shutdownServices()
     }
 
@@ -714,9 +759,10 @@ final class WorkflowViewModel: ObservableObject {
                     language: language
                 )
             }
-            if humanReviewCheckpoint?.kind == .sourceTranscript {
+            if humanReviewCheckpoint?.kind == .sourceTranscript,
+               manifest.humanReviewState?.pendingCheckpoint == nil {
                 sourceHumanReviewEnabled = true
-            } else {
+            } else if humanReviewCheckpoint?.kind == .translatedTranscript {
                 translationHumanReviewEnabled = true
             }
             status = "Ожидает проверки"
@@ -952,12 +998,17 @@ final class WorkflowViewModel: ObservableObject {
         }
     }
 
-    private func startRun(operations requestedOperations: Set<WorkflowOperation>) {
+    @discardableResult
+    private func startRun(
+        operations requestedOperations: Set<WorkflowOperation>,
+        sourceHumanReviewOverride: Bool? = nil,
+        whisperLanguageOverride: String? = nil
+    ) -> Bool {
         var operations = requestedOperations
         if operations.contains(.renderFragment), fragmentMuteFillerWords {
             operations.insert(.detectFillerWords)
         }
-        guard !isRunning else { return }
+        guard !isRunning else { return false }
         let humanReviewBlocksRun = humanReviewCheckpoint.map { checkpoint in
             checkpoint.kind == .sourceTranscript
                 || !operations.isDisjoint(with: [.translateTranscript, .createDubbing])
@@ -965,15 +1016,15 @@ final class WorkflowViewModel: ObservableObject {
         guard !humanReviewBlocksRun, topicReviewCheckpoint == nil else {
             status = "Ожидает проверки"
             alert = AppAlert(title: "Требуется Human Review", message: "Завершите текущую проверку перед созданием производных файлов.")
-            return
+            return false
         }
         guard let mediaURL else {
             reportPreparationError(WorkflowError.missingMedia)
-            return
+            return false
         }
         guard let projectURL else {
             reportPreparationError(WorkflowError.missingProjectFolder)
-            return
+            return false
         }
 
         var start: TimeInterval = 0
@@ -985,7 +1036,7 @@ final class WorkflowViewModel: ObservableObject {
                 guard end > start else { throw WorkflowError.invalidRange }
             } catch {
                 reportPreparationError(error)
-                return
+                return false
             }
         }
 
@@ -1011,7 +1062,7 @@ final class WorkflowViewModel: ObservableObject {
                 isRunning = false
                 clockTask?.cancel()
                 clockTask = nil
-                return
+                return false
             }
         } else {
             blurStart = nil
@@ -1029,7 +1080,7 @@ final class WorkflowViewModel: ObservableObject {
                 isRunning = false
                 clockTask?.cancel()
                 clockTask = nil
-                return
+                return false
             }
         } else {
             watermarkStart = nil
@@ -1047,7 +1098,7 @@ final class WorkflowViewModel: ObservableObject {
             subtitleStyle: subtitleStyle,
             selectedTopicID: selectedTopicID.isEmpty ? nil : selectedTopicID,
             whisperModelPath: whisperModelPath,
-            whisperLanguage: whisperLanguage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "auto" : whisperLanguage,
+            whisperLanguage: whisperLanguageOverride ?? (whisperLanguage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "auto" : whisperLanguage),
             transcriptionContext: WhisperTranscriptionContext.normalized(transcriptionContext),
             topicGranularity: topicGranularity,
             artifactLanguage: artifactLanguage,
@@ -1078,7 +1129,7 @@ final class WorkflowViewModel: ObservableObject {
             audioEnhancementProfile: audioEnhancementProfile,
             dubbingLanguage: dubbingLanguage,
             dubbingMixMode: dubbingMixMode,
-            sourceHumanReviewEnabled: sourceHumanReviewEnabled,
+            sourceHumanReviewEnabled: sourceHumanReviewOverride ?? sourceHumanReviewEnabled,
             translationHumanReviewEnabled: translationHumanReviewEnabled,
             fillerAnalysisBeforeReview: fillerAnalysisBeforeReview,
             topicHumanReviewEnabled: topicHumanReviewEnabled,
@@ -1087,8 +1138,13 @@ final class WorkflowViewModel: ObservableObject {
             fragmentApplyBlur: fragmentApplyBlur
         )
 
+        let sourceReviewPreferenceToRestore: Bool? = sourceHumanReviewOverride == nil ? nil : sourceHumanReviewEnabled
+        if sourceReviewPreferenceToRestore != nil {
+            simpleRunNeedsPreferenceRestoration = true
+        }
         runTask = Task { [weak self] in
             guard let self else { return }
+            let outcome: Result<WorkflowResult, Error>
             do {
                 let result = try await engine.run(
                     settings: settings,
@@ -1102,6 +1158,23 @@ final class WorkflowViewModel: ObservableObject {
                         }
                     }
                 )
+                outcome = .success(result)
+            } catch {
+                outcome = .failure(error)
+            }
+            do {
+                if let sourceReviewPreferenceToRestore {
+                    defer { self.simpleRunNeedsPreferenceRestoration = false }
+                    do {
+                        try self.restoreSourceHumanReviewPreference(sourceReviewPreferenceToRestore, projectURL: projectURL)
+                    } catch {
+                        if case .failure(let runError) = outcome {
+                            self.log.append(runError.localizedDescription)
+                        }
+                        throw error
+                    }
+                }
+                let result = try outcome.get()
                 self.projectURL = result.projectURL
                 self.outputs = result.outputs
                 if self.loadTopicVariant(language: self.artifactLanguage, granularity: self.topicGranularity) {
@@ -1167,6 +1240,23 @@ final class WorkflowViewModel: ObservableObject {
             self.isRunning = false
             self.isStopping = false
             self.loadDetectedResults()
+        }
+        return true
+    }
+
+    func restoreSourceHumanReviewPreference(_ enabled: Bool, projectURL: URL) throws {
+        do {
+            var manifest = try store.load(from: projectURL)
+            guard manifest.humanReviewState?.sourceReviewEnabled != enabled else { return }
+            var state = manifest.humanReviewState ?? .newProjectDefault
+            state.sourceReviewEnabled = enabled
+            manifest.humanReviewState = state
+            try store.save(manifest, to: projectURL)
+            guard try store.load(from: projectURL).humanReviewState?.sourceReviewEnabled == enabled else {
+                throw WorkflowError.processFailed("Сохранённая настройка Source Human Review не совпадает с исходной.")
+            }
+        } catch {
+            throw WorkflowError.processFailed("Не удалось восстановить исходную настройку Source Human Review. Завершение задания не подтверждено: \(error.localizedDescription)")
         }
     }
 
