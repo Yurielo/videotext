@@ -163,7 +163,8 @@ struct HumanReviewService {
         state.draftRevisionIDs[language.rawValue] = revisionID
         manifest.humanReviewState = state
         var tasks = manifest.reviewTasks ?? []
-        for taskIndex in tasks.indices where tasks[taskIndex].language == language
+        for taskIndex in tasks.indices where tasks[taskIndex].transcriptRevisionID == checkpoint.revisionID
+            && tasks[taskIndex].language == language
             && tasks[taskIndex].cueIDs.contains(cueID)
             && tasks[taskIndex].status == .needsReview {
             tasks[taskIndex].status = .resolved
