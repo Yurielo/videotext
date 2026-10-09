@@ -665,21 +665,67 @@ final class WorkflowViewModel: ObservableObject {
         !isRunning && projectURL != nil && humanReviewCheckpoint == nil && !reviewCues.isEmpty
     }
 
+    func canOpenHumanReview(language: ArtifactLanguage) -> Bool {
+        guard !isRunning, let projectURL,
+              let manifest = try? store.load(from: projectURL) else { return false }
+        if let checkpoint = manifest.humanReviewState?.pendingCheckpoint {
+            guard checkpoint.language == language else { return false }
+        } else {
+            guard manifest.activeTranscriptRevision(for: language)?.reviewStatus == .approved else { return false }
+        }
+        let layout = ProjectLayout(root: projectURL)
+        let subtitleURL = manifest.languageProfile?.effective == language
+            ? layout.fullSRTURL : layout.subtitlesURL(language: language)
+        guard let cues = try? SRTService().load(from: subtitleURL) else { return false }
+        return !cues.isEmpty
+    }
+
     func beginHumanReview() {
-        guard let projectURL else { return }
+        guard !isRunning, let projectURL else { return }
         do {
             let manifest = try store.load(from: projectURL)
             let language = manifest.languageProfile?.effective ?? artifactLanguage
-            humanReviewCheckpoint = try humanReviewService.beginReview(
-                projectURL: projectURL,
-                language: language
-            )
-            sourceHumanReviewEnabled = true
-            status = "Ожидает проверки"
-            refreshProjectResults(projectURL)
-            log.append("Human Review исходной расшифровки открыт вручную.")
+            beginHumanReview(language: language)
         } catch {
             reportPreparationError(error)
+        }
+    }
+
+    @discardableResult
+    func beginHumanReview(language: ArtifactLanguage) -> Bool {
+        guard !isRunning, let projectURL else { return false }
+        do {
+            let manifest = try store.load(from: projectURL)
+            let layout = ProjectLayout(root: projectURL)
+            let subtitleURL = manifest.languageProfile?.effective == language
+                ? layout.fullSRTURL : layout.subtitlesURL(language: language)
+            let cues = try SRTService().load(from: subtitleURL)
+            guard !cues.isEmpty else {
+                throw WorkflowError.invalidSRT("Нет реплик для Human Review выбранного языка.")
+            }
+            if let checkpoint = manifest.humanReviewState?.pendingCheckpoint {
+                guard checkpoint.language == language else {
+                    throw WorkflowError.processFailed("Сначала завершите текущую проверку другого языка.")
+                }
+                humanReviewCheckpoint = checkpoint
+            } else {
+                humanReviewCheckpoint = try humanReviewService.beginReview(
+                    projectURL: projectURL,
+                    language: language
+                )
+            }
+            if humanReviewCheckpoint?.kind == .sourceTranscript {
+                sourceHumanReviewEnabled = true
+            } else {
+                translationHumanReviewEnabled = true
+            }
+            status = "Ожидает проверки"
+            refreshProjectResults(projectURL)
+            log.append("Human Review \(language.rawValue.uppercased()) открыт вручную.")
+            return true
+        } catch {
+            reportPreparationError(error)
+            return false
         }
     }
 

@@ -9,6 +9,7 @@ struct SimpleProjectHomeProbe {
         try verifiesUserFacingResultResolution()
         try verifiesReadableTextDoesNotFallBackToSupportFiles()
         try verifiesSelectedTopicVariantUsesItsOwnTXT()
+        try verifiesApprovedCorrectionTargetsInBothDirections()
         print("SIMPLE_PROJECT_HOME_PROBE_PASS")
     }
 
@@ -71,8 +72,10 @@ struct SimpleProjectHomeProbe {
             ]
         )
         try expect(ready.artifact(.transcription).readiness == .ready, "Утверждённая source-ревизия не показана готовой")
+        try expect(ready.artifact(.transcription).reviewTarget == .source, "Approved Source должен оставаться доступным для исправления")
         try expect(ready.artifact(.transcription).detail == "Русский", "Неверная подпись RU source")
         try expect(ready.artifact(.topics).readiness == .ready, "Утверждённые темы не показаны готовыми")
+        try expect(ready.artifact(.topics).reviewTarget == nil, "Approved Topics correction должен оставаться Advanced-only")
         try expect(ready.artifact(.topics).detail == "тем: 7", "Home не использует существующий summary тем")
         try expect(
             ready.artifact(.topics).openOutputPath == layout.topicsTextURL(language: .ru, granularity: .normal).path,
@@ -87,6 +90,7 @@ struct SimpleProjectHomeProbe {
             discoveredOutputs: [output(kind: "full-srt", path: layout.fullSRTURL.path)]
         )
         try expect(unavailableTranscript.artifact(.transcription).readiness == .missing, "SRT не должен подменять недоступный transcript.txt")
+        try expect(unavailableTranscript.artifact(.transcription).reviewTarget == nil, "Недоступный Source TXT не должен показывать approved correction")
 
         manifest.humanReviewState?.pendingCheckpoint = HumanReviewCheckpoint(
             kind: .sourceTranscript,
@@ -188,6 +192,7 @@ struct SimpleProjectHomeProbe {
             discoveredOutputs: [transcript, translatedText, newer, internalJSON, supportSRT]
         )
         try expect(state.artifact(.translation).readiness == .ready, "Утверждённый EN→RU перевод не показан готовым")
+        try expect(state.artifact(.translation).reviewTarget == .translation, "Approved Translation должен оставаться доступным для исправления")
         try expect(state.artifact(.translation).detail == "Русский", "Неверная подпись EN→RU")
         try expect(state.artifact(.translation).displayTitle == "Перевод RU", "Перевод должен явно показывать целевой язык")
         try expect(state.artifact(.transcription).openOutputPath == layout.transcriptURL.path, "Расшифровка должна открывать transcript.txt")
@@ -212,6 +217,7 @@ struct SimpleProjectHomeProbe {
             discoveredOutputs: [translatedText]
         )
         try expect(pendingTranslation.artifact(.translation).readiness == .needsReview, "Pending Translation Review показан как готовый")
+        try expect(pendingTranslation.artifact(.translation).reviewTarget == .translation, "Pending Translation потерял correction target")
         try expect(pendingTranslation.artifact(.translation).openOutputPath == nil, "Pending перевод ошибочно доступен для открытия")
     }
 
@@ -313,6 +319,38 @@ struct SimpleProjectHomeProbe {
         try expect(topics.readiness == .ready, "Selected translated/coarse topics variant не показан готовым")
         try expect(topics.openOutputPath == layout.topicsTextURL(language: .ru, granularity: .coarse).path, "Selected topic variant должен открыть свой TXT")
         try expect(topics.displayTitle == "Темы RU · Крупный", "Simple mode должен явно называть выбранный variant тем")
+    }
+
+    private static func verifiesApprovedCorrectionTargetsInBothDirections() throws {
+        for language in ArtifactLanguage.allCases {
+            let project = try makeProject("approved-correction-\(language.rawValue)")
+            defer { removeProject(project) }
+            let layout = ProjectLayout(root: project)
+            let source = sourceRevision(language: language, status: .approved)
+            let target = language.translationTarget
+            let translated = TranscriptRevision(
+                id: "approved-translation-\(target.rawValue)", language: target, origin: .userEdited,
+                parentRevisionID: source.id, transcriptArtifactID: "translated-txt",
+                subtitleArtifactID: "translated-srt", contentHash: "translated",
+                createdAt: Date(), reviewStatus: .approved
+            )
+            var manifest = baseManifest(language: language)
+            manifest.transcriptRevisions = [source, translated]
+            manifest.humanReviewState = HumanReviewState(
+                sourceReviewEnabled: true, translationReviewEnabled: true,
+                activeRevisionIDs: [language.rawValue: source.id, target.rawValue: translated.id],
+                draftRevisionIDs: [:], pendingCheckpoint: nil
+            )
+            try writeText("Approved source", to: layout.transcriptURL)
+            try writeText("Approved translation", to: layout.transcriptURL(language: target))
+            let state = SimpleProjectHomeStateService().make(
+                projectURL: project, manifest: manifest, topicsDetail: nil, discoveredOutputs: []
+            )
+            try expect(state.artifact(.transcription).reviewTarget == .source, "\(language.rawValue) approved Source не имеет correction target")
+            try expect(state.artifact(.translation).reviewTarget == .translation, "\(target.rawValue) approved Translation не имеет correction target")
+            try expect(state.artifact(.translation).language == target, "Correction target потерял язык перевода")
+            try expect(state.artifact(.topics).reviewTarget == nil, "Topics correction появился в Simple")
+        }
     }
 
     private static func baseManifest(language: ArtifactLanguage) -> ProjectManifest {

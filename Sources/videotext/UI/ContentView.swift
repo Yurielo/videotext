@@ -4,7 +4,7 @@ import AVKit
 import AVFoundation
 import UniformTypeIdentifiers
 
-private enum SimpleProjectHomeGoal: CaseIterable, Identifiable {
+private enum SimpleProjectHomeGoal: String, CaseIterable, Identifiable {
     case textContent
     case subtitledVideo
     case fragment
@@ -111,13 +111,6 @@ struct ContentView: View {
                 }
             }
         }
-        .sheet(item: $editingReviewCue) { cue in
-            if let mediaURL = model.mediaURL {
-                TranscriptCueEditView(mediaURL: mediaURL, cue: cue) { replacement in
-                    model.saveHumanReviewCue(cue, replacementText: replacement)
-                }
-            }
-        }
         .sheet(isPresented: $showProjectBrowser) {
             simpleProjectBrowser
         }
@@ -158,6 +151,9 @@ struct ContentView: View {
                 results
                     .frame(minWidth: 420, idealWidth: 620)
             }
+        }
+        .sheet(item: $editingReviewCue) { cue in
+            humanReviewCueEditor(cue)
         }
     }
 
@@ -256,6 +252,7 @@ struct ContentView: View {
         .fixedSize(horizontal: true, vertical: false)
         .frame(width: 190)
         .accessibilityLabel("Режим интерфейса")
+        .accessibilityIdentifier("simple.modePicker")
     }
 
     private var simpleHeader: some View {
@@ -578,9 +575,9 @@ struct ContentView: View {
                 }
 
                 simpleSectionTitle("Готово")
-                VStack(spacing: 4) {
+                VStack(alignment: .leading, spacing: 4) {
                     ForEach(state.artifacts) { artifact in
-                        simpleArtifactRow(artifact)
+                        simpleArtifactRow(artifact, section: "ready")
                     }
                 }
 
@@ -594,6 +591,9 @@ struct ContentView: View {
                     simpleGoalCard(.fragment, icon: "scissors")
                     simpleGoalCard(.processVideo, icon: "slider.horizontal.3")
                 }
+                .frame(maxWidth: 680, alignment: .leading)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("simple.goals.grid")
 
                 if showsSimpleTextContent {
                     VStack(alignment: .leading, spacing: 4) {
@@ -602,16 +602,19 @@ struct ContentView: View {
                             Spacer()
                             Button("Скрыть") { showsSimpleTextContent = false }
                                 .buttonStyle(.borderless)
+                                .accessibilityIdentifier("simple.textContent.collapse")
                         }
                         ForEach(state.artifacts.filter {
                             $0.kind == .transcription || $0.kind == .topics || $0.kind == .translation
                         }) { artifact in
-                            simpleArtifactRow(artifact)
+                            simpleArtifactRow(artifact, section: "textContent")
                         }
                     }
                     .padding(10)
                     .background(Color(nsColor: .controlBackgroundColor))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("simple.textContent.panel")
                 }
 
                 simpleSectionTitle("Последние результаты")
@@ -619,7 +622,7 @@ struct ContentView: View {
                     Text("Готовых результатов пока нет")
                         .foregroundStyle(.secondary)
                 } else {
-                    VStack(spacing: 4) {
+                    VStack(alignment: .leading, spacing: 4) {
                         ForEach(state.recentResults) { output in
                             simpleRecentResultRow(output)
                         }
@@ -663,7 +666,7 @@ struct ContentView: View {
             .font(.headline)
     }
 
-    private func simpleArtifactRow(_ artifact: SimpleProjectHomeArtifact) -> some View {
+    private func simpleArtifactRow(_ artifact: SimpleProjectHomeArtifact, section: String) -> some View {
         HStack(spacing: 10) {
             Image(systemName: simpleArtifactIcon(artifact.readiness))
                 .foregroundStyle(simpleArtifactColor(artifact.readiness))
@@ -671,28 +674,37 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(artifact.displayTitle)
                     .fontWeight(.semibold)
+                    .accessibilityIdentifier("simple.\(section).\(artifact.kind.rawValue).title")
                 Text(artifact.detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Spacer()
+            .frame(maxWidth: 230, alignment: .leading)
+            .fixedSize(horizontal: true, vertical: false)
             Text(artifact.readiness.title)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(simpleArtifactColor(artifact.readiness))
+                .accessibilityIdentifier("simple.\(section).\(artifact.kind.rawValue).status")
             if let path = artifact.openOutputPath {
                 Button("Открыть") {
                     openSimpleResult(path)
                 }
                 .buttonStyle(.bordered)
+                .accessibilityIdentifier("simple.\(section).\(artifact.kind.rawValue).open")
             }
-            if let target = artifact.reviewTarget {
-                Button(simpleReviewActionTitle(target)) {
-                    openSimpleReview(target)
+            if let target = artifact.reviewTarget, target != .topics,
+               let language = artifact.language {
+                Button("Исправить") {
+                    openSimpleReview(target, language: language)
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(!model.canOpenHumanReview(language: language))
+                .accessibilityIdentifier("simple.\(section).\(artifact.kind.rawValue).correct")
             }
         }
         .padding(.vertical, 3)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("simple.\(section).\(artifact.kind.rawValue).row")
     }
 
     private func simpleGoalCard(_ goal: SimpleProjectHomeGoal, icon: String) -> some View {
@@ -704,23 +716,29 @@ struct ContentView: View {
                 selectedResultsTab = 0
             }
         } label: {
-            VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 10) {
                 Image(systemName: icon)
                     .font(.title3)
-                Text(goal.title)
-                    .font(.headline)
-                Text(goal.detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.leading)
+                    .frame(width: 22)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(goal.title)
+                        .font(.headline)
+                    Text(goal.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.leading)
+                }
             }
-            .frame(maxWidth: .infinity, minHeight: 94, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: 76, alignment: .leading)
             .padding(10)
             .background(Color(nsColor: .controlBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.45), lineWidth: 1))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(goal.title)
+        .accessibilityIdentifier("simple.goal.\(goal.rawValue)")
     }
 
     private func simpleRecentResultRow(_ output: SimpleProjectHomeResult) -> some View {
@@ -728,11 +746,10 @@ struct ContentView: View {
             Image(systemName: output.isGeneratedMedia ? "film" : "doc")
                 .foregroundStyle(.secondary)
                 .frame(width: 18)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(output.title)
-                    .fontWeight(.semibold)
-            }
-            Spacer()
+            Text(output.title)
+                .fontWeight(.semibold)
+                .frame(maxWidth: 360, alignment: .leading)
+                .fixedSize(horizontal: true, vertical: false)
             Button("Открыть") { openSimpleResult(output.path) }
                 .buttonStyle(.bordered)
             Button {
@@ -750,13 +767,15 @@ struct ContentView: View {
         .padding(.vertical, 3)
     }
 
-    private func openSimpleReview(_ target: SimpleProjectHomeReviewTarget) {
-        guard target != .topics,
+    private func openSimpleReview(_ target: SimpleProjectHomeReviewTarget, language: ArtifactLanguage) {
+        guard let kind = target.checkpointKind,
+              model.canOpenHumanReview(language: language),
+              model.beginHumanReview(language: language),
               let checkpoint = model.humanReviewCheckpoint,
-              (target == .source && checkpoint.kind == .sourceTranscript)
-                || (target == .translation && checkpoint.kind == .translatedTranscript) else {
+              checkpoint.kind == kind, checkpoint.language == language else {
             return
         }
+        showsSimpleTextContent = true
         simpleReviewTarget = target
     }
 
@@ -767,15 +786,26 @@ struct ContentView: View {
                     .font(.headline)
                 Spacer()
                 Button("Закрыть") { simpleReviewTarget = nil }
+                    .accessibilityIdentifier("simple.review.\(target.rawValue).close")
             }
             reviewTasksPanel
         }
         .frame(minWidth: 720, minHeight: 520, alignment: .topLeading)
         .padding(18)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("simple.review.\(target.rawValue).sheet")
+        .sheet(item: $editingReviewCue) { cue in
+            humanReviewCueEditor(cue)
+        }
     }
 
-    private func simpleReviewActionTitle(_ target: SimpleProjectHomeReviewTarget) -> String {
-        "Исправить"
+    @ViewBuilder
+    private func humanReviewCueEditor(_ cue: SubtitleCue) -> some View {
+        if let mediaURL = model.mediaURL {
+            TranscriptCueEditView(mediaURL: mediaURL, cue: cue) { replacement in
+                model.saveHumanReviewCue(cue, replacementText: replacement)
+            }
+        }
     }
 
     private func openSimpleResult(_ path: String) {
@@ -1932,8 +1962,10 @@ struct ContentView: View {
                         .font(.subheadline.bold())
                         .foregroundStyle(.orange)
                     TextField("Поиск в расшифровке", text: $reviewSearch)
+                        .accessibilityIdentifier("humanReview.search")
                     Toggle("Только замечания", isOn: $reviewIssuesOnly)
                         .toggleStyle(.checkbox)
+                        .accessibilityIdentifier("humanReview.issuesOnly")
                     Button {
                         model.approveHumanReview()
                     } label: {
@@ -1941,6 +1973,7 @@ struct ContentView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(model.isRunning)
+                    .accessibilityIdentifier("humanReview.approve")
                 }
 
                 List(filteredReviewCues) { cue in
@@ -1965,6 +1998,7 @@ struct ContentView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(model.isRunning)
+                    .accessibilityIdentifier("humanReview.cue.\(cue.id).edit")
                 }
             }
 
@@ -2614,6 +2648,7 @@ private struct TranscriptCueEditView: View {
                 }
                 Spacer()
                 Button("Закрыть") { dismiss() }
+                    .accessibilityIdentifier("humanReview.cueEditor.close")
             }
             VideoPlayer(player: player)
                 .aspectRatio(16 / 9, contentMode: .fit)
@@ -2633,18 +2668,23 @@ private struct TranscriptCueEditView: View {
                 .frame(minHeight: 120)
                 .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.35)))
                 .accessibilityLabel("Исправленный текст cue")
+                .accessibilityIdentifier("humanReview.cueEditor.text")
             HStack {
                 Spacer()
                 Button("Отмена") { dismiss() }
+                    .accessibilityIdentifier("humanReview.cueEditor.cancel")
                 Button("Сохранить черновик") {
                     if onSave(replacementText) { dismiss() }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(replacementText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityIdentifier("humanReview.cueEditor.save")
             }
         }
         .padding()
         .frame(minWidth: 760, minHeight: 620)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("humanReview.cueEditor")
         .onAppear { playRange() }
         .onDisappear {
             stopTask?.cancel()

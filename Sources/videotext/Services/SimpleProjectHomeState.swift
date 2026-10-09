@@ -45,12 +45,20 @@ enum SimpleProjectNavigationAction: Equatable {
     }
 }
 
-enum SimpleProjectHomeReviewTarget: Identifiable, Equatable {
+enum SimpleProjectHomeReviewTarget: String, Identifiable, Equatable {
     case source
     case topics
     case translation
 
     var id: Self { self }
+
+    var checkpointKind: HumanReviewCheckpointKind? {
+        switch self {
+        case .source: return .sourceTranscript
+        case .translation: return .translatedTranscript
+        case .topics: return nil
+        }
+    }
 }
 
 struct SimpleProjectHomeArtifact: Identifiable, Equatable {
@@ -185,7 +193,8 @@ struct SimpleProjectHomeStateService {
         sourceLanguage: ArtifactLanguage?,
         checkpoint: HumanReviewCheckpoint?
     ) -> SimpleProjectHomeArtifact {
-        if checkpoint?.kind == .sourceTranscript {
+        if let checkpoint, checkpoint.kind == .sourceTranscript,
+           checkpoint.language == sourceLanguage {
             return artifact(
                 .transcription,
                 .needsReview,
@@ -214,7 +223,7 @@ struct SimpleProjectHomeStateService {
             languageDetail(sourceLanguage),
             language: sourceLanguage,
             openOutputPath: openOutputPath,
-            reviewTarget: nil
+            reviewTarget: .source
         )
     }
 
@@ -296,7 +305,8 @@ struct SimpleProjectHomeStateService {
             .ready,
             target.russianTitle,
             language: target,
-            openOutputPath: openOutputPath
+            openOutputPath: openOutputPath,
+            reviewTarget: .translation
         )
     }
 
