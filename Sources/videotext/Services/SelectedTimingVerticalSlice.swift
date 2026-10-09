@@ -496,19 +496,28 @@ struct SeminarTextSelectedTimingRunner {
     }
 
     static func findManifests(in root: URL) -> [URL] {
-        let keys: Set<URLResourceKey> = [.isRegularFileKey]
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isDirectoryKey]
         guard let enumerator = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: Array(keys),
-            options: [.skipsHiddenFiles]
+            options: []
         ) else { return [] }
-        return enumerator.compactMap { item in
-            guard let url = item as? URL,
-                  url.lastPathComponent == "manifest.json",
+        var manifests: [URL] = []
+        while let item = enumerator.nextObject() {
+            guard let url = item as? URL else { continue }
+            // Published packages can retain hidden metadata after leaving .parts.
+            if url.lastPathComponent.hasPrefix(".") {
+                if (try? url.resourceValues(forKeys: keys).isDirectory) == true {
+                    enumerator.skipDescendants()
+                }
+                continue
+            }
+            guard url.lastPathComponent == "manifest.json",
                   url.deletingLastPathComponent().lastPathComponent.hasPrefix("structured_timing"),
-                  (try? url.resourceValues(forKeys: keys).isRegularFile) == true else { return nil }
-            return url
-        }.sorted { $0.path < $1.path }
+                  (try? url.resourceValues(forKeys: keys).isRegularFile) == true else { continue }
+            manifests.append(url)
+        }
+        return manifests.sorted { $0.path < $1.path }
     }
 }
 

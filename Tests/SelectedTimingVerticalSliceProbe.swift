@@ -9,6 +9,7 @@ struct SelectedTimingVerticalSliceProbe {
         try Data("LED media".utf8).write(to: media)
         let package = root.appendingPathComponent("package")
         try makePackage(at: package, media: media)
+        try verifyManifestDiscovery(root: root, media: media, package: package)
         try await verifySingleSeminarTextEntry(root: root, media: media, package: package)
 
         let importer = SelectedTimingImporter()
@@ -348,6 +349,62 @@ struct SelectedTimingVerticalSliceProbe {
         ["text": text, "offsets": ["from": from, "to": to], "p": 0.9]
     }
 
+    private static func verifyManifestDiscovery(root: URL, media: URL, package: URL) throws {
+        let invocation = root.appendingPathComponent("discovery-invocation", isDirectory: true)
+        let run = invocation.appendingPathComponent("run", isDirectory: true)
+        let stage = run.appendingPathComponent(".parts/selected_timing", isDirectory: true)
+        let stagedDecoy = run.appendingPathComponent(".parts/structured_timing-staged", isDirectory: true)
+        let nonregular = run.appendingPathComponent("structured_timing-directory/manifest.json", isDirectory: true)
+        try FileManager.default.createDirectory(at: stage.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: package, to: stage)
+        try FileManager.default.copyItem(at: package, to: stagedDecoy)
+        try FileManager.default.createDirectory(at: nonregular, withIntermediateDirectories: true)
+        try Data("fixture".utf8).write(to: run.appendingPathComponent(".marker"))
+        try require(SeminarTextSelectedTimingRunner.findManifests(in: invocation).isEmpty,
+                    "discovery accepted hidden staging or a nonregular manifest")
+
+        var published = run.appendingPathComponent("structured_timing4", isDirectory: true)
+        try FileManager.default.moveItem(at: stage, to: published)
+        var hiddenMetadata = URLResourceValues()
+        hiddenMetadata.isHidden = true
+        try published.setResourceValues(hiddenMetadata)
+        let publishedMetadata = try published.resourceValues(forKeys: [.isHiddenKey])
+        try require(publishedMetadata.isHidden == true, "fixture did not retain hidden package metadata")
+
+        guard let oldEnumerator = FileManager.default.enumerator(
+            at: invocation,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { throw WorkflowError.processFailed("could not enumerate discovery fixture") }
+        let oldManifests = oldEnumerator.compactMap { item -> URL? in
+            guard let url = item as? URL,
+                  url.lastPathComponent == "manifest.json",
+                  url.deletingLastPathComponent().lastPathComponent.hasPrefix("structured_timing"),
+                  (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { return nil }
+            return url
+        }
+        try require(oldManifests.isEmpty, "fixture did not reproduce skipsHiddenFiles manifest loss")
+        let expected = published.appendingPathComponent("manifest.json")
+        let discovered = SeminarTextSelectedTimingRunner.findManifests(in: invocation)
+        try require(discovered.map { $0.resolvingSymlinksInPath().path } == [expected.resolvingSymlinksInPath().path],
+                    "discovery lost a published hidden-metadata package or included staging: expected \(expected.path), found \(discovered.map(\.path))")
+        _ = try SelectedTimingImporter().importSelectedPackage(
+            packageRoot: discovered[0].deletingLastPathComponent(),
+            expectedMediaURL: media,
+            expectedLanguage: .en
+        )
+
+        let second = run.appendingPathComponent("structured_timing3", isDirectory: true)
+        try FileManager.default.copyItem(at: package, to: second)
+        let expectedPaths = [expected, second.appendingPathComponent("manifest.json")]
+            .map { $0.resolvingSymlinksInPath().path }.sorted()
+        let ambiguousPaths = SeminarTextSelectedTimingRunner.findManifests(in: invocation)
+            .map { $0.resolvingSymlinksInPath().path }
+        try require(ambiguousPaths == expectedPaths,
+                    "discovery hid an ambiguous second package or changed sorted order")
+        print("SELECTED_TIMING_HIDDEN_METADATA_DISCOVERY_PASS")
+    }
+
     private static func verifySingleSeminarTextEntry(root: URL, media: URL, package: URL) async throws {
         let outputRoot = root.appendingPathComponent("seminartext-output")
         let stale = outputRoot.appendingPathComponent("stale/structured_timing")
@@ -384,6 +441,34 @@ struct SelectedTimingVerticalSliceProbe {
         try require(arguments.contains("--language en"), "runner missed source language")
         try require(arguments.contains("--no-open"), "runner did not keep SeminarText headless")
         try require(arguments.contains("|model=/models/selected.bin"), "runner missed selected Whisper model")
+
+        for count in [0, 2] {
+            let copies = (0..<count).map { index in
+                "cp -R '\(package.path)' \"$SEMINARTEXT_OUTPUT/run/structured_timing\(index)\""
+            }.joined(separator: "\n")
+            let cardinalityScript = """
+            #!/bin/sh
+            set -eu
+            mkdir -p "$SEMINARTEXT_OUTPUT/run"
+            \(copies)
+            """
+            try cardinalityScript.write(to: executable, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+            do {
+                _ = try await SeminarTextSelectedTimingRunner().transcribe(
+                    mediaURL: media,
+                    language: .en,
+                    executable: executable,
+                    modelPath: "/models/selected.bin",
+                    outputRoot: outputRoot
+                )
+                throw WorkflowError.processFailed("runner accepted \(count) selected timing manifests")
+            } catch WorkflowError.processFailed(let message) {
+                try require(message.contains("(найдено: \(count))"),
+                            "runner did not reject \(count) manifests within its own invocation: \(message)")
+            }
+        }
+        print("SELECTED_TIMING_MANIFEST_CARDINALITY_PASS")
     }
 
     private static func simplePromptCapture() async throws -> String {
