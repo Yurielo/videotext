@@ -627,8 +627,9 @@ struct ContentView: View {
             projectURL: projectURL,
             manifest: manifest,
             topicsDetail: model.resultSummary.artifact(.topics)?.detail,
-            topicsAreViewable: model.resultSummary.artifact(.topics)?.availability == .ready,
-            discoveredOutputs: outputs
+            discoveredOutputs: outputs,
+            topicLanguage: model.artifactLanguage,
+            topicGranularity: model.topicGranularity
         )
     }
 
@@ -643,7 +644,7 @@ struct ContentView: View {
                 .foregroundStyle(simpleArtifactColor(artifact.readiness))
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 2) {
-                Text(artifact.kind.title)
+                Text(artifact.displayTitle)
                     .fontWeight(.semibold)
                 Text(artifact.detail)
                     .font(.caption)
@@ -653,17 +654,17 @@ struct ContentView: View {
             Text(artifact.readiness.title)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(simpleArtifactColor(artifact.readiness))
+            if let path = artifact.openOutputPath {
+                Button("Открыть") {
+                    openSimpleResult(path)
+                }
+                .buttonStyle(.bordered)
+            }
             if let target = artifact.reviewTarget {
                 Button(simpleReviewActionTitle(target)) {
                     openSimpleReview(target)
                 }
                 .buttonStyle(.borderedProminent)
-            } else if let path = artifact.openOutputPath,
-                      let output = model.outputs.first(where: { $0.path == path }) {
-                Button("Открыть") {
-                    model.openResult(output)
-                }
-                .buttonStyle(.bordered)
             }
         }
         .padding(.vertical, 6)
@@ -693,7 +694,7 @@ struct ContentView: View {
         .accessibilityLabel(goal.title)
     }
 
-    private func simpleRecentResultRow(_ output: ProjectOutput) -> some View {
+    private func simpleRecentResultRow(_ output: SimpleProjectHomeResult) -> some View {
         HStack(spacing: 10) {
             Image(systemName: output.isGeneratedMedia ? "film" : "doc")
                 .foregroundStyle(.secondary)
@@ -707,10 +708,15 @@ struct ContentView: View {
                     .lineLimit(1)
             }
             Spacer()
-            Button("Открыть") { model.openResult(output) }
+            Button("Открыть") { openSimpleResult(output.path) }
                 .buttonStyle(.bordered)
             Button {
-                model.revealResult(output)
+                model.revealResult(ProjectOutput(
+                    id: output.path,
+                    kind: output.isGeneratedMedia ? "user-facing-media" : "user-facing-text",
+                    path: output.path,
+                    createdAt: output.createdAt
+                ))
             } label: {
                 Image(systemName: "folder")
             }
@@ -725,7 +731,16 @@ struct ContentView: View {
     }
 
     private func simpleReviewActionTitle(_ target: SimpleProjectHomeReviewTarget) -> String {
-        target == .topics ? "Проверить темы" : "Проверить"
+        "Исправить"
+    }
+
+    private func openSimpleResult(_ path: String) {
+        model.openResult(ProjectOutput(
+            id: path,
+            kind: "user-facing-text",
+            path: path,
+            createdAt: Date()
+        ))
     }
 
     private func simpleStateIcon(_ state: SimpleProjectHomeState) -> String {

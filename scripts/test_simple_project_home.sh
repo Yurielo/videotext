@@ -30,3 +30,36 @@ swiftc \
   "${ROOT}/Tests/SimpleProjectHomeProbe.swift"
 
 "${TEST_BINARY}"
+
+python3 - "${ROOT}/Sources/videotext/Services/SimpleProjectHomeState.swift" "${ROOT}/Sources/videotext/UI/ContentView.swift" <<'PY'
+import pathlib
+import sys
+
+state = pathlib.Path(sys.argv[1]).read_text()
+ui = pathlib.Path(sys.argv[2]).read_text()
+
+required_state = {
+    "source transcript TXT": "ProjectLayout(root: projectURL).transcriptURL",
+    "topic TXT": "topicsTextURL(language: language, granularity: granularity)",
+    "translated transcript TXT": "transcriptURL(language: target)",
+    "user-facing result filter": "outputs.filter { $0.isGeneratedMedia && isNonemptyFile(at: $0.path) }",
+}
+missing = [name for name, snippet in required_state.items() if snippet not in state]
+if missing:
+    raise SystemExit("Missing Simple user-facing artifact contract: " + ", ".join(missing))
+
+forbidden_state = ["firstPath(in: outputs", 'kinds: ["transcript", "full-srt"]', 'kinds: ["localized-transcript", "localized-subtitles"]']
+present = [snippet for snippet in forbidden_state if snippet in state]
+if present:
+    raise SystemExit("Simple mode still has an internal artifact fallback: " + ", ".join(present))
+
+required_ui = ["openSimpleResult(path)", "model.revealResult(ProjectOutput(", "output.isGeneratedMedia"]
+missing = [snippet for snippet in required_ui if snippet not in ui]
+if missing:
+    raise SystemExit("Simple results UI contract missing: " + ", ".join(missing))
+
+if "WorkflowEngine" in state or "model.run(" in state:
+    raise SystemExit("Simple presentation state must not trigger processing")
+PY
+
+echo "SIMPLE_USER_FACING_RESULTS_UI_CONTRACT_PASS"

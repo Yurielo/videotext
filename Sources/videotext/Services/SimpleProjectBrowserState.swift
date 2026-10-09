@@ -64,7 +64,6 @@ struct SimpleProjectBrowserStateService {
                 projectURL: projectURL,
                 manifest: manifest,
                 topicsDetail: summary.artifact(.topics)?.detail,
-                topicsAreViewable: summary.artifact(.topics)?.availability == .ready,
                 discoveredOutputs: outputs
             )
             return SimpleProjectBrowserEntry(

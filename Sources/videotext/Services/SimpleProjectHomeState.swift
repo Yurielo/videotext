@@ -72,8 +72,34 @@ struct SimpleProjectHomeArtifact: Identifiable, Equatable {
     var kind: Kind
     var readiness: SimpleProjectHomeReadiness
     var detail: String
+    var language: ArtifactLanguage?
+    var topicGranularity: TopicGranularity?
     var openOutputPath: String?
     var reviewTarget: SimpleProjectHomeReviewTarget?
+
+    var displayTitle: String {
+        switch kind {
+        case .translation:
+            guard let language else { return kind.title }
+            return "Перевод \(language.rawValue.uppercased())"
+        case .topics:
+            guard let language, let topicGranularity else { return kind.title }
+            return "Темы \(language.rawValue.uppercased()) · \(topicGranularity.title)"
+        case .transcription:
+            return kind.title
+        }
+    }
+}
+
+/// A deliberately small, presentation-only list item. Simple mode owns this
+/// classification so it cannot accidentally expose project-support files from
+/// the generic result detector.
+struct SimpleProjectHomeResult: Identifiable, Equatable {
+    var id: String { path }
+    var title: String
+    var path: String
+    var createdAt: Date
+    var isGeneratedMedia: Bool
 }
 
 struct SimpleProjectHomeState {
@@ -83,7 +109,7 @@ struct SimpleProjectHomeState {
     var sourceLanguage: ArtifactLanguage?
     var currentState: String
     var artifacts: [SimpleProjectHomeArtifact]
-    var recentResults: [ProjectOutput]
+    var recentResults: [SimpleProjectHomeResult]
 
     func artifact(_ kind: SimpleProjectHomeArtifact.Kind) -> SimpleProjectHomeArtifact {
         artifacts.first(where: { $0.kind == kind })
@@ -91,6 +117,8 @@ struct SimpleProjectHomeState {
                 kind: kind,
                 readiness: .missing,
                 detail: "Не создан",
+                language: nil,
+                topicGranularity: nil,
                 openOutputPath: nil,
                 reviewTarget: nil
             )
@@ -104,8 +132,9 @@ struct SimpleProjectHomeStateService {
         projectURL: URL,
         manifest: ProjectManifest?,
         topicsDetail: String?,
-        topicsAreViewable: Bool,
-        discoveredOutputs: [ProjectOutput]
+        discoveredOutputs: [ProjectOutput],
+        topicLanguage: ArtifactLanguage? = nil,
+        topicGranularity: TopicGranularity = .normal
     ) -> SimpleProjectHomeState {
         let mediaName = manifest.map { URL(fileURLWithPath: $0.sourceMediaPath).lastPathComponent }
             ?? projectURL.lastPathComponent
@@ -113,51 +142,53 @@ struct SimpleProjectHomeStateService {
         let checkpoint = manifest?.humanReviewState?.pendingCheckpoint
         let topicCheckpoint = manifest?.topicReviewState?.pendingCheckpoint
 
+        let transcription = transcriptionState(
+            projectURL: projectURL,
+            manifest: manifest,
+            sourceLanguage: sourceLanguage,
+            checkpoint: checkpoint
+        )
+        let topics = topicsState(
+            projectURL: projectURL,
+            manifest: manifest,
+            checkpoint: topicCheckpoint,
+            detail: topicsDetail,
+            language: topicLanguage ?? sourceLanguage,
+            granularity: topicGranularity
+        )
+        let translation = translationState(
+            projectURL: projectURL,
+            manifest: manifest,
+            sourceLanguage: sourceLanguage,
+            checkpoint: checkpoint
+        )
+
         return SimpleProjectHomeState(
             projectName: projectURL.lastPathComponent,
             mediaName: mediaName,
             durationSeconds: manifest?.durationSeconds,
             sourceLanguage: sourceLanguage,
             currentState: projectState(checkpoint: checkpoint, topicCheckpoint: topicCheckpoint, manifest: manifest),
-            artifacts: [
-                transcriptionState(
-                    manifest: manifest,
-                    sourceLanguage: sourceLanguage,
-                    checkpoint: checkpoint,
-                    outputs: discoveredOutputs
-                ),
-                topicsState(
-                    manifest: manifest,
-                    checkpoint: topicCheckpoint,
-                    detail: topicsDetail,
-                    isViewable: topicsAreViewable,
-                    outputs: discoveredOutputs
-                ),
-                translationState(
-                    manifest: manifest,
-                    sourceLanguage: sourceLanguage,
-                    checkpoint: checkpoint,
-                    outputs: discoveredOutputs
-                )
-            ],
-            recentResults: discoveredOutputs
-                .sorted { $0.createdAt > $1.createdAt }
-                .prefix(6)
-                .map { $0 }
+            artifacts: [transcription, topics, translation],
+            recentResults: userFacingResults(
+                artifacts: [transcription, topics, translation],
+                outputs: discoveredOutputs
+            )
         )
     }
 
     private func transcriptionState(
+        projectURL: URL,
         manifest: ProjectManifest?,
         sourceLanguage: ArtifactLanguage?,
-        checkpoint: HumanReviewCheckpoint?,
-        outputs: [ProjectOutput]
+        checkpoint: HumanReviewCheckpoint?
     ) -> SimpleProjectHomeArtifact {
         if checkpoint?.kind == .sourceTranscript {
             return artifact(
                 .transcription,
                 .needsReview,
                 languageDetail(sourceLanguage),
+                language: sourceLanguage,
                 reviewTarget: .source
             )
         }
@@ -169,53 +200,67 @@ struct SimpleProjectHomeStateService {
             }
             return artifact(.transcription, .missing, "Не создан")
         }
-        let openOutputPath = firstPath(in: outputs, kinds: ["transcript", "full-srt"])
+        let openOutputPath = readableTextPath(
+            ProjectLayout(root: projectURL).transcriptURL
+        )
         guard let openOutputPath else {
-            return artifact(.transcription, .missing, "Файлы расшифровки недоступны")
+            return artifact(.transcription, .missing, "Текст расшифровки недоступен")
         }
         return artifact(
             .transcription,
             .ready,
             languageDetail(sourceLanguage),
-            openOutputPath: openOutputPath
+            language: sourceLanguage,
+            openOutputPath: openOutputPath,
+            reviewTarget: nil
         )
     }
 
     private func topicsState(
+        projectURL: URL,
         manifest: ProjectManifest?,
         checkpoint: TopicReviewCheckpoint?,
         detail: String?,
-        isViewable: Bool,
-        outputs: [ProjectOutput]
+        language: ArtifactLanguage?,
+        granularity: TopicGranularity
     ) -> SimpleProjectHomeArtifact {
         if checkpoint != nil {
-            return artifact(.topics, .needsReview, "Темы готовы", reviewTarget: .topics)
+            return artifact(.topics, .needsReview, "Темы готовы", language: language)
         }
-        let hasApprovedTopics = manifest?.topicReviewState?.activeRevisionIDs.values.contains { revisionID in
-            manifest?.topicRevisions?.contains {
-                $0.id == revisionID && $0.status == .approved
-            } == true
-        } ?? false
-        guard hasApprovedTopics, isViewable else {
+        guard let language else {
+            return artifact(.topics, .missing, "Язык тем не определён")
+        }
+        let variantKey = "\(language.rawValue).\(granularity.rawValue)"
+        let hasApprovedTopics = manifest?.topicReviewState?.activeRevisionIDs[variantKey].flatMap { revisionID in
+            manifest?.topicRevisions?.first(where: { $0.id == revisionID })
+        }.map { $0.status == .approved } ?? false
+        guard hasApprovedTopics else {
             if operationFailed(.topicTimecoding, manifest: manifest) {
-                return artifact(.topics, .failed, "Темы не созданы")
+                return artifact(.topics, .failed, "Темы не созданы", language: language)
             }
-            return artifact(.topics, .missing, "Не созданы")
+            return artifact(.topics, .missing, "Не созданы", language: language)
+        }
+        guard let openOutputPath = readableTextPath(
+            ProjectLayout(root: projectURL).topicsTextURL(language: language, granularity: granularity)
+        ) else {
+            return artifact(.topics, .missing, "Текст тем недоступен", language: language)
         }
         let detail = detail ?? "Готовы"
         return artifact(
             .topics,
             .ready,
             detail,
-            openOutputPath: firstPath(in: outputs, kinds: ["topics", "topics-text"])
+            language: language,
+            topicGranularity: granularity,
+            openOutputPath: openOutputPath
         )
     }
 
     private func translationState(
+        projectURL: URL,
         manifest: ProjectManifest?,
         sourceLanguage: ArtifactLanguage?,
-        checkpoint: HumanReviewCheckpoint?,
-        outputs: [ProjectOutput]
+        checkpoint: HumanReviewCheckpoint?
     ) -> SimpleProjectHomeArtifact {
         guard let sourceLanguage else {
             return artifact(.translation, .missing, "Не создан")
@@ -226,6 +271,7 @@ struct SimpleProjectHomeStateService {
                 .translation,
                 .needsReview,
                 target.russianTitle,
+                language: target,
                 reviewTarget: .translation
             )
         }
@@ -233,18 +279,21 @@ struct SimpleProjectHomeStateService {
               revision.reviewStatus == .approved,
               revision.origin == .translated || revision.origin == .userEdited else {
             if operationFailed(.translateTranscript, manifest: manifest) {
-                return artifact(.translation, .failed, "Перевод не завершён")
+                return artifact(.translation, .failed, "Перевод не завершён", language: target)
             }
-            return artifact(.translation, .missing, "Не создан")
+            return artifact(.translation, .missing, "Не создан", language: target)
         }
-        let openOutputPath = firstPath(in: outputs, kinds: ["localized-transcript", "localized-subtitles"])
+        let openOutputPath = readableTextPath(
+            ProjectLayout(root: projectURL).transcriptURL(language: target)
+        )
         guard let openOutputPath else {
-            return artifact(.translation, .missing, "Файлы перевода недоступны")
+            return artifact(.translation, .missing, "Текст перевода недоступен", language: target)
         }
         return artifact(
             .translation,
             .ready,
             target.russianTitle,
+            language: target,
             openOutputPath: openOutputPath
         )
     }
@@ -269,6 +318,8 @@ struct SimpleProjectHomeStateService {
         _ kind: SimpleProjectHomeArtifact.Kind,
         _ readiness: SimpleProjectHomeReadiness,
         _ detail: String,
+        language: ArtifactLanguage? = nil,
+        topicGranularity: TopicGranularity? = nil,
         openOutputPath: String? = nil,
         reviewTarget: SimpleProjectHomeReviewTarget? = nil
     ) -> SimpleProjectHomeArtifact {
@@ -276,6 +327,8 @@ struct SimpleProjectHomeStateService {
             kind: kind,
             readiness: readiness,
             detail: detail,
+            language: language,
+            topicGranularity: topicGranularity,
             openOutputPath: openOutputPath,
             reviewTarget: reviewTarget
         )
@@ -289,10 +342,50 @@ struct SimpleProjectHomeStateService {
         manifest?.workflow?.operations[operation.rawValue]?.status == .failed
     }
 
-    private func firstPath(in outputs: [ProjectOutput], kinds: [String]) -> String? {
-        for kind in kinds {
-            if let output = outputs.first(where: { $0.kind == kind }) { return output.path }
+    private func readableTextPath(_ expectedURL: URL) -> String? {
+        guard let text = try? String(contentsOf: expectedURL, encoding: .utf8),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
         }
-        return nil
+        return expectedURL.path
+    }
+
+    private func userFacingResults(
+        artifacts: [SimpleProjectHomeArtifact],
+        outputs: [ProjectOutput]
+    ) -> [SimpleProjectHomeResult] {
+        let readableArtifacts = artifacts.compactMap { artifact -> SimpleProjectHomeResult? in
+            guard artifact.readiness == .ready, let path = artifact.openOutputPath else { return nil }
+            return SimpleProjectHomeResult(
+                title: artifact.displayTitle,
+                path: path,
+                createdAt: fileDate(at: path),
+                isGeneratedMedia: false
+            )
+        }
+        let media = outputs.filter { $0.isGeneratedMedia && isNonemptyFile(at: $0.path) }.map {
+            SimpleProjectHomeResult(
+                title: $0.title,
+                path: $0.path,
+                createdAt: $0.createdAt,
+                isGeneratedMedia: true
+            )
+        }
+        return Dictionary(grouping: readableArtifacts + media, by: \.path)
+            .compactMap { $0.value.first }
+            .sorted { $0.createdAt > $1.createdAt }
+            .prefix(6)
+            .map { $0 }
+    }
+
+    private func fileDate(at path: String) -> Date {
+        let url = URL(fileURLWithPath: path)
+        return (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+    }
+
+    private func isNonemptyFile(at path: String) -> Bool {
+        let url = URL(fileURLWithPath: path)
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]) else { return false }
+        return values.isRegularFile == true && (values.fileSize ?? 0) > 0
     }
 }
