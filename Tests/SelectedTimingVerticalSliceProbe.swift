@@ -23,6 +23,39 @@ struct SelectedTimingVerticalSliceProbe {
         try require(source.units.first?.start == 0, "selected JSON token timing was not shifted from its own timebase")
         try require(source.units.last?.end == 2.4, "selected JSON token timing was inferred from SRT/segment boundaries")
         try require(source.selectedTimingEnd == 5.5, "selected timing envelope was not preserved")
+        try require(
+            source.tokenTimeline.contains(where: { $0.text == " They" && $0.start == 0 && $0.end == 0.1 }),
+            "valid token timing was modified"
+        )
+        print("VALID_TOKEN_TIMING_UNCHANGED_PASS")
+
+        let overlappingPreparedRanges = root.appendingPathComponent("overlapping-prepared-ranges")
+        try makeOverlappingPreparedRangePackage(at: overlappingPreparedRanges, media: media)
+        let overlappingPreparedSource = try importer.importSelectedPackage(
+            packageRoot: overlappingPreparedRanges,
+            expectedMediaURL: media,
+            expectedLanguage: .en
+        )
+        try require(
+            overlappingPreparedSource.sourceText == " First. Second.",
+            "valid prepared chunk overlap lost or duplicated selected source text"
+        )
+        try require(
+            overlappingPreparedSource.selectedTimingEnd == 330,
+            "valid prepared chunk overlap did not retain the selected timing envelope"
+        )
+        print("VALID_PREPARED_CHUNK_OVERLAP_PASS")
+
+        let malformedPreparedRange = root.appendingPathComponent("malformed-prepared-range")
+        try makeOverlappingPreparedRangePackage(at: malformedPreparedRange, media: media, malformedRange: true)
+        try expectFailure {
+            _ = try importer.importSelectedPackage(
+                packageRoot: malformedPreparedRange,
+                expectedMediaURL: media,
+                expectedLanguage: .en
+            )
+        }
+        print("MALFORMED_RANGE_REJECTION_PASS")
         let selectedProject = root.appendingPathComponent("selected-project")
         try FileManager.default.createDirectory(at: selectedProject, withIntermediateDirectories: true)
         try SelectedTimingVerticalSlice().persistSource(source, to: selectedProject)
@@ -103,6 +136,32 @@ struct SelectedTimingVerticalSliceProbe {
             zeroWidthSource.units.allSatisfy { $0.end >= $0.start },
             "zero-width selected token corrupted source-unit envelope"
         )
+        let zeroWidthSegmentPackage = root.appendingPathComponent("zero-width-segment-package")
+        try makeZeroWidthSegmentPackage(at: zeroWidthSegmentPackage, media: media)
+        let zeroWidthSegmentSource = try importer.importSelectedPackage(
+            packageRoot: zeroWidthSegmentPackage,
+            expectedMediaURL: media,
+            expectedLanguage: .en
+        )
+        try require(
+            zeroWidthSegmentSource.tokenTimeline.contains(where: { $0.text == " Brief" && $0.start == 0.1 && $0.end == 0.1 }),
+            "zero-width selected segment was rejected or rewritten"
+        )
+        try require(
+            zeroWidthSegmentSource.units.last?.start == 0.2 && zeroWidthSegmentSource.units.last?.end == 0.3,
+            "collapsed token segment did not use its native source-unit envelope"
+        )
+        print("COLLAPSED_TOKEN_VALID_SEGMENT_ENVELOPE_PASS")
+        let invalidCollapsedSegmentPackage = root.appendingPathComponent("invalid-collapsed-segment-package")
+        try makeZeroWidthSegmentPackage(at: invalidCollapsedSegmentPackage, media: media, invalidSegment: true)
+        try expectFailure {
+            _ = try importer.importSelectedPackage(
+                packageRoot: invalidCollapsedSegmentPackage,
+                expectedMediaURL: media,
+                expectedLanguage: .en
+            )
+        }
+        print("INVALID_SEGMENT_WITH_COLLAPSED_TOKENS_REJECTED")
         let malformedPackage = root.appendingPathComponent("malformed-package")
         try makePackage(at: malformedPackage, media: media, overlappingTokens: true)
         try expectFailure { _ = try importer.importSelectedPackage(packageRoot: malformedPackage, expectedMediaURL: media, expectedLanguage: .en) }
@@ -187,6 +246,100 @@ struct SelectedTimingVerticalSliceProbe {
             "source": ["media_sha256": SelectedTimingHash.file(media)],
             "transcription": ["language": "en"],
             "parts": [["id": partID, "order": 0, "absolute_offset_seconds": 0.0, "absolute_range": ["start_seconds": 0.0, "end_seconds": 5.5], "selected_timing_absolute_range": ["start_seconds": 0.0, "end_seconds": 5.5], "selected_attempt": "initial", "artifacts": ["txt": artifact(txtURL), "srt": artifact(srtURL), "json_full": artifact(jsonURL)]]]
+        ]
+        try JSONSerialization.data(withJSONObject: manifest).write(to: root.appendingPathComponent("manifest.json"))
+    }
+
+    private static func makeOverlappingPreparedRangePackage(
+        at root: URL,
+        media: URL,
+        malformedRange: Bool = false
+    ) throws {
+        let parts = root.appendingPathComponent("parts")
+        try FileManager.default.createDirectory(at: parts, withIntermediateDirectories: true)
+
+        func writePart(_ id: String, text: String, offset: Int) throws -> [String: [String: String]] {
+            let jsonURL = parts.appendingPathComponent("\(id).json")
+            let tokens: [[String: Any]] = text == " First."
+                ? [token(" First", 0, 70), token(".", 70, 100)]
+                : [token(" Second", 0, 70), token(".", 70, 100)]
+            let json: [String: Any] = [
+                "transcription": [[
+                    "offsets": ["from": 0, "to": 100],
+                    "tokens": tokens
+                ]]
+            ]
+            try JSONSerialization.data(withJSONObject: json).write(to: jsonURL)
+            let txtURL = parts.appendingPathComponent("\(id).txt")
+            try Data(text.utf8).write(to: txtURL)
+            let srtURL = parts.appendingPathComponent("\(id).srt")
+            try Data("1\n00:00:00,000 --> 00:00:00,100\n\(text)\n".utf8).write(to: srtURL)
+            func artifact(_ url: URL) -> [String: String] {
+                ["path": "parts/\(url.lastPathComponent)", "sha256": SelectedTimingHash.file(url)]
+            }
+            return ["txt": artifact(txtURL), "srt": artifact(srtURL), "json_full": artifact(jsonURL)]
+        }
+
+        let firstArtifacts = try writePart("part_0000", text: " First.", offset: 0)
+        let secondArtifacts = try writePart("part_0001", text: " Second.", offset: 300)
+        let firstStart = malformedRange ? 0.001 : 0.0
+        let manifest: [String: Any] = [
+            "schema_version": 1,
+            "artifact_type": "seminartext.selected_whisper_timing",
+            "source": ["media_sha256": SelectedTimingHash.file(media)],
+            "transcription": ["language": "en"],
+            "parts": [
+                [
+                    "id": "part_0000", "order": 0, "absolute_offset_seconds": 0.0,
+                    "absolute_range": ["start_seconds": firstStart, "end_seconds": 300.032],
+                    "selected_timing_absolute_range": ["start_seconds": 0.0, "end_seconds": 300.130],
+                    "selected_attempt": "initial", "artifacts": firstArtifacts
+                ],
+                [
+                    "id": "part_0001", "order": 1, "absolute_offset_seconds": 300.0,
+                    "absolute_range": ["start_seconds": 300.0, "end_seconds": 326.278063],
+                    "selected_timing_absolute_range": ["start_seconds": 300.0, "end_seconds": 330.0],
+                    "selected_attempt": "initial", "artifacts": secondArtifacts
+                ]
+            ]
+        ]
+        try JSONSerialization.data(withJSONObject: manifest).write(to: root.appendingPathComponent("manifest.json"))
+    }
+
+    private static func makeZeroWidthSegmentPackage(
+        at root: URL,
+        media: URL,
+        invalidSegment: Bool = false
+    ) throws {
+        let parts = root.appendingPathComponent("parts")
+        try FileManager.default.createDirectory(at: parts, withIntermediateDirectories: true)
+        let partID = "part_0000"
+        let jsonURL = parts.appendingPathComponent("\(partID).json")
+        let collapsedSegmentEnd = invalidSegment ? 100 : 300
+        let json: [String: Any] = ["transcription": [
+            ["offsets": ["from": 0, "to": 100], "tokens": [token(" Stable", 0, 70), token(".", 70, 100)]],
+            ["offsets": ["from": 200, "to": collapsedSegmentEnd], "tokens": [token(" Brief", 100, 100), token(".", 100, 100)]]
+        ]]
+        try JSONSerialization.data(withJSONObject: json).write(to: jsonURL)
+        let txtURL = parts.appendingPathComponent("\(partID).txt")
+        try Data(" Stable. Brief.".utf8).write(to: txtURL)
+        let srtURL = parts.appendingPathComponent("\(partID).srt")
+        try Data("1\n00:00:00,000 --> 00:00:00,100\nStable.\n\n2\n00:00:00,200 --> 00:00:00,300\nBrief.\n".utf8).write(to: srtURL)
+        func artifact(_ url: URL) -> [String: String] {
+            ["path": "parts/\(url.lastPathComponent)", "sha256": SelectedTimingHash.file(url)]
+        }
+        let manifest: [String: Any] = [
+            "schema_version": 1,
+            "artifact_type": "seminartext.selected_whisper_timing",
+            "source": ["media_sha256": SelectedTimingHash.file(media)],
+            "transcription": ["language": "en"],
+            "parts": [[
+                "id": partID, "order": 0, "absolute_offset_seconds": 0.0,
+                "absolute_range": ["start_seconds": 0.0, "end_seconds": 0.3],
+                "selected_timing_absolute_range": ["start_seconds": 0.0, "end_seconds": 0.3],
+                "selected_attempt": "initial",
+                "artifacts": ["txt": artifact(txtURL), "srt": artifact(srtURL), "json_full": artifact(jsonURL)]
+            ]]
         ]
         try JSONSerialization.data(withJSONObject: manifest).write(to: root.appendingPathComponent("manifest.json"))
     }

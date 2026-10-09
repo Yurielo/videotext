@@ -61,7 +61,7 @@ enum WorkflowOperation: String, CaseIterable, Identifiable, Codable {
         }
     }
 
-    /// Translation is exposed only through the explicit EN-to-RU action for an
+    /// Translation is exposed only through an explicit EN↔RU action for an
     /// approved source revision. Dubbing remains outside this product slice.
     static let translationEnabledForCurrentRelease = true
     static let dubbingEnabledForCurrentRelease = false

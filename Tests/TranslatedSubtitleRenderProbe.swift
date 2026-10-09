@@ -13,9 +13,17 @@ struct TranslatedSubtitleRenderProbe {
         guard FileManager.default.fileExists(atPath: mediaURL.path) else {
             throw ProbeFailure(message: "controlled project source media is unavailable")
         }
+        guard let sourceLanguage = manifest.languageProfile?.effective else {
+            throw ProbeFailure(message: "controlled project source language is unavailable")
+        }
+        let targetLanguage = sourceLanguage.translationTarget
         let layout = ProjectLayout(root: projectURL)
         let sourceBytes = try Data(contentsOf: layout.fullSRTURL)
-        let translation = try SubtitleSourceResolver.resolve(.approvedTranslation(.ru), manifest: manifest, projectURL: projectURL)
+        let translation = try SubtitleSourceResolver.resolve(
+            .approvedTranslation(targetLanguage),
+            manifest: manifest,
+            projectURL: projectURL
+        )
         let translationBytes = try Data(contentsOf: translation.srtURL)
         let ffmpeg = FFmpegAdapter()
         guard let duration = try await ffmpeg.duration(of: mediaURL) else {
@@ -24,22 +32,22 @@ struct TranslatedSubtitleRenderProbe {
         _ = try await ffmpeg.burnSubtitles(
             mediaURL: mediaURL,
             srtURL: translation.srtURL,
-            outputURL: layout.subtitledVideoURL(language: .ru),
+            outputURL: layout.subtitledVideoURL(language: targetLanguage),
             mediaDuration: duration,
             style: .standard
         ) { _ in }
-        _ = try await ffmpeg.strictValidationReport(mediaURL: layout.subtitledVideoURL(language: .ru), expectedDuration: duration)
-        try store.registerOutput(kind: "subtitled-video-ru", url: layout.subtitledVideoURL(language: .ru), in: projectURL)
+        _ = try await ffmpeg.strictValidationReport(mediaURL: layout.subtitledVideoURL(language: targetLanguage), expectedDuration: duration)
+        try store.registerOutput(kind: "subtitled-video-\(targetLanguage.rawValue)", url: layout.subtitledVideoURL(language: targetLanguage), in: projectURL)
 
-        try require(nonempty(layout.subtitledVideoURL(language: .ru)), "RU full subtitled video was not created")
-        try require(try Data(contentsOf: layout.fullSRTURL) == sourceBytes, "full.srt changed while rendering RU subtitles")
-        try require(try Data(contentsOf: translation.srtURL) == translationBytes, "approved RU SRT changed while rendering")
+        try require(nonempty(layout.subtitledVideoURL(language: targetLanguage)), "translated full subtitled video was not created")
+        try require(try Data(contentsOf: layout.fullSRTURL) == sourceBytes, "full.srt changed while rendering translated subtitles")
+        try require(try Data(contentsOf: translation.srtURL) == translationBytes, "approved translated SRT changed while rendering")
         let fullOutputs = ResultsDetector().discover(in: projectURL)
-        try require(fullOutputs.contains { $0.kind == "subtitled-video-ru" }, "RU full video is not discoverable")
+        try require(fullOutputs.contains { $0.kind == "subtitled-video-\(targetLanguage.rawValue)" }, "translated full video is not discoverable")
 
         let cues = try SRTService().load(from: translation.srtURL)
-        guard let first = cues.first else { throw ProbeFailure(message: "approved RU SRT is empty") }
-        let fragmentID = "ru-render-probe"
+        guard let first = cues.first else { throw ProbeFailure(message: "approved translated SRT is empty") }
+        let fragmentID = "\(targetLanguage.rawValue)-render-probe"
         let fragmentVideo = layout.fragmentVideoURL(kind: fragmentID)
         let fragmentSRT = layout.fragmentSRTURL(kind: fragmentID)
         let fragmentOutput = layout.fragmentSubtitledVideoURL(kind: fragmentID)
@@ -51,23 +59,23 @@ struct TranslatedSubtitleRenderProbe {
         _ = try await ffmpeg.burnSubtitles(mediaURL: fragmentVideo, srtURL: fragmentSRT, outputURL: fragmentOutput, mediaDuration: fragmentDuration, style: .standard) { _ in }
         _ = try await ffmpeg.strictValidationReport(mediaURL: fragmentOutput, expectedDuration: fragmentDuration)
         let fragment = FragmentRecord(
-            id: fragmentID, name: "RU subtitle render probe", start: first.start, end: first.end, createdAt: Date(),
+            id: fragmentID, name: "\(targetLanguage.rawValue.uppercased()) subtitle render probe", start: first.start, end: first.end, createdAt: Date(),
             videoPath: fragmentVideo.path, subtitlePath: fragmentSRT.path, subtitledVideoPath: fragmentOutput.path,
-            ffprobeReportPath: nil, style: .standard, language: .ru
+            ffprobeReportPath: nil, style: .standard, language: targetLanguage
         )
         try store.registerFragment(fragment, in: projectURL)
-        try store.registerOutput(kind: "fragment-subtitled-video-ru", url: fragmentOutput, in: projectURL)
-        try require(fragment.language == .ru && nonempty(fragmentOutput), "RU subtitled fragment was not created")
+        try store.registerOutput(kind: "fragment-subtitled-video-\(targetLanguage.rawValue)", url: fragmentOutput, in: projectURL)
+        try require(fragment.language == targetLanguage && nonempty(fragmentOutput), "translated subtitled fragment was not created")
         let renderedFragmentCues = try SRTService().load(from: fragmentSRT)
         try require(renderedFragmentCues.map(\.text) == fragmentCues.map(\.text),
-                    "fragment SRT does not preserve the selected RU subtitle text")
+                    "fragment SRT does not preserve the selected translated subtitle text")
         try require(renderedFragmentCues.count == fragmentCues.count && zip(renderedFragmentCues, fragmentCues).allSatisfy {
             abs($0.start - $1.start) < 0.001 && abs($0.end - $1.end) < 0.001
         },
-                    "fragment SRT does not preserve selected RU subtitle timing")
+                    "fragment SRT does not preserve selected translated subtitle timing")
         let fragmentOutputs = ResultsDetector().discover(in: projectURL)
-        try require(fragmentOutputs.contains { $0.kind == "fragment-subtitled-video-ru" },
-                    "RU fragment is not discoverable")
+        try require(fragmentOutputs.contains { $0.kind == "fragment-subtitled-video-\(targetLanguage.rawValue)" },
+                    "translated fragment is not discoverable")
         let finalManifest = try store.load(from: projectURL)
         try require(finalManifest.workflow?.operations[WorkflowOperation.transcribe.rawValue]?.status == manifest.workflow?.operations[WorkflowOperation.transcribe.rawValue]?.status,
                     "subtitle rendering changed ASR workflow state")

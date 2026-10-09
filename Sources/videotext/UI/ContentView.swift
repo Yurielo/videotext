@@ -381,17 +381,17 @@ struct ContentView: View {
 
                 GroupBox("Перевод") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(model.translationToRussianStatus)
+                        Text(model.translationStatus)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         HStack {
                             Button {
-                                model.translateToRussian()
+                                model.translateApprovedTranscript()
                             } label: {
-                                Label("Перевести на русский", systemImage: "character.book.closed")
+                                Label(model.translationActionTitle, systemImage: "character.book.closed")
                             }
                             .buttonStyle(.borderedProminent)
-                            .disabled(!model.canTranslateToRussian)
+                            .disabled(!model.canTranslate)
                             Spacer()
                             Label("Human Review обязателен", systemImage: "checkmark.seal")
                                 .font(.caption)

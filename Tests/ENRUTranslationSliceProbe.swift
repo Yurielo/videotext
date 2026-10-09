@@ -121,7 +121,7 @@ struct ENRUTranslationSliceProbe {
             ).run(settings: settings(fixture), onLog: { _ in })
             throw ProbeFailure(message: "unapproved source was translated")
         } catch WorkflowError.processFailed(let message) {
-            try require(message.contains("утверждённой английской"), "wrong unapproved-source failure")
+            try require(message.contains("утверждённой исходной"), "wrong unapproved-source failure")
         }
         try require(translator.requests.isEmpty, "provider ran before source approval")
     }
@@ -199,7 +199,7 @@ struct ENRUTranslationSliceProbe {
             ).run(settings: settings(fixture), onLog: { _ in })
             throw ProbeFailure(message: "modified approved source unexpectedly translated")
         } catch WorkflowError.processFailed(let message) {
-            try require(message.contains("не совпадает с утверждённой английской ревизией"),
+            try require(message.contains("не совпадает с утверждённой исходной ревизией"),
                         "modified approved source produced the wrong failure")
         }
         try require(translator.requests.isEmpty, "provider ran for source text not matching approved revision")
