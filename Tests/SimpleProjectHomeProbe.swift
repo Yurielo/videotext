@@ -4,9 +4,16 @@ import Foundation
 struct SimpleProjectHomeProbe {
     static func main() throws {
         try verifiesPresentationModes()
+        try verifiesSimpleNavigationContract()
         try verifiesApprovedAndPendingStates()
         try verifiesLanguageLabelsAndExistingResults()
         print("SIMPLE_PROJECT_HOME_PROBE_PASS")
+    }
+
+    private static func verifiesSimpleNavigationContract() throws {
+        try expect(!SimpleProjectNavigationAction.openKnownProjects.usesSystemPicker, "Открытие известных проектов не должно вызывать Finder")
+        try expect(SimpleProjectNavigationAction.createFromMedia.usesSystemPicker, "Новый проект должен сохранять выбор медиа")
+        try expect(SimpleProjectNavigationAction.locateProjectOnDisk.usesSystemPicker, "Ручной поиск проекта должен сохранять выбор папки")
     }
 
     private static func verifiesPresentationModes() throws {
@@ -101,6 +108,32 @@ struct SimpleProjectHomeProbe {
         )
         try expect(pendingTopics.artifact(.topics).readiness == .needsReview, "Pending Topic Review показан как готовый")
         try expect(pendingTopics.artifact(.topics).reviewTarget == .topics, "Для Topic Review не указан переход к проверке")
+
+        var failedManifest = baseManifest(language: .ru)
+        failedManifest.workflow = ProjectWorkflowState(
+            status: .failed,
+            progress: 0.4,
+            mode: .resumeProject,
+            operations: [
+                WorkflowOperation.translateTranscript.rawValue: ProjectOperationRecord(
+                    status: .failed,
+                    startedAt: Date(),
+                    finishedAt: Date(),
+                    inputSignature: nil,
+                    outputPaths: [],
+                    errorMessage: "test"
+                )
+            ],
+            lastError: "test"
+        )
+        let failed = service.make(
+            projectURL: URL(fileURLWithPath: "/tmp/Проект", isDirectory: true),
+            manifest: failedManifest,
+            topicsDetail: nil,
+            topicsAreViewable: false,
+            discoveredOutputs: []
+        )
+        try expect(failed.artifact(.translation).readiness == .failed, "Failed перевод должен быть показан как ошибка")
     }
 
     private static func verifiesLanguageLabelsAndExistingResults() throws {

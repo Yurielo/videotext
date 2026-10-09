@@ -45,6 +45,10 @@ struct ContentView: View {
     @State private var confirmTopicRemoval = false
     @State private var selectedResultsTab = 0
     @State private var presentationMode: ProjectPresentationMode = .simple
+    @State private var showProjectBrowser = false
+    @State private var projectSearch = ""
+    @State private var selectedBrowserProjectPath: String?
+    @State private var knownProjects: [SimpleProjectBrowserEntry] = []
 
     var body: some View {
         Group {
@@ -112,6 +116,9 @@ struct ContentView: View {
                 }
             }
         }
+        .sheet(isPresented: $showProjectBrowser) {
+            simpleProjectBrowser
+        }
         .confirmationDialog(
             "Удалить границу темы?",
             isPresented: $confirmTopicRemoval,
@@ -169,7 +176,7 @@ struct ContentView: View {
             HStack(spacing: 12) {
                 appIdentity
                 Spacer(minLength: 12)
-                presentationModePicker
+                advancedPresentationModePicker
                 projectActions()
                 workflowActions(includeStatus: true)
             }
@@ -177,7 +184,7 @@ struct ContentView: View {
                 HStack {
                     appIdentity
                     Spacer()
-                    presentationModePicker
+                    advancedPresentationModePicker
                     statusLabel
                 }
                 HStack(spacing: 10) {
@@ -221,7 +228,7 @@ struct ContentView: View {
         .fixedSize(horizontal: true, vertical: false)
     }
 
-    private var presentationModePicker: some View {
+    private var advancedPresentationModePicker: some View {
         Picker("Режим", selection: $presentationMode) {
             ForEach(ProjectPresentationMode.allCases) { mode in
                 Text(mode.title).tag(mode)
@@ -232,21 +239,34 @@ struct ContentView: View {
         .accessibilityLabel("Режим интерфейса")
     }
 
+    private var simplePresentationModePicker: some View {
+        Picker("", selection: $presentationMode) {
+            ForEach(ProjectPresentationMode.allCases) { mode in
+                Text(mode.title).tag(mode)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize(horizontal: true, vertical: false)
+        .frame(width: 190)
+        .accessibilityLabel("Режим интерфейса")
+    }
+
     private var simpleHeader: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
                 simpleAppIdentity
                 Spacer(minLength: 12)
-                presentationModePicker
-                projectActions(includeDiagnostics: false)
+                simplePresentationModePicker
+                simpleProjectActions
             }
             VStack(spacing: 10) {
                 HStack {
                     simpleAppIdentity
                     Spacer()
-                    presentationModePicker
+                    simplePresentationModePicker
                 }
-                projectActions(includeDiagnostics: false)
+                simpleProjectActions
             }
         }
         .padding()
@@ -275,19 +295,255 @@ struct ContentView: View {
     }
 
     private var simpleEmptyState: some View {
-        ContentUnavailableView {
-            Label("Откройте существующий проект или выберите видео", systemImage: "folder")
-        } actions: {
-            HStack(spacing: 10) {
-                Button("Открыть проект") {
-                    if let url = openProjectDirectory() { model.openProject(url) }
+        let recent = Array(simpleProjectBrowserEntries.filter(\.isAvailable).prefix(4))
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Продолжить работу")
+                        .font(.title2.bold())
+                    Spacer()
+                    Button("Все проекты") {
+                        handleSimpleNavigation(.openKnownProjects)
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.borderedProminent)
-                Button("Выбрать видео") {
-                    if let url = openMediaFile() { model.selectMedia(url) }
+
+                if recent.isEmpty {
+                    ContentUnavailableView("Проектов пока нет", systemImage: "clock.arrow.circlepath")
+                        .frame(maxWidth: .infinity, minHeight: 220)
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(recent) { entry in
+                            simpleProjectBrowserRow(entry, compact: true)
+                            if entry.id != recent.last?.id { Divider() }
+                        }
+                    }
+                }
+
+                Divider()
+
+                Button {
+                    handleSimpleNavigation(.locateProjectOnDisk)
+                } label: {
+                    Label("Найти проект на диске…", systemImage: "folder")
+                }
+                .buttonStyle(.bordered)
+            }
+            .frame(maxWidth: 820, alignment: .leading)
+            .padding(28)
+        }
+        .onAppear(perform: reloadSimpleProjectBrowser)
+    }
+
+    private var simpleProjectActions: some View {
+        HStack(spacing: 10) {
+            Button {
+                handleSimpleNavigation(.createFromMedia)
+            } label: {
+                Label("Новый проект", systemImage: "plus")
+            }
+            .disabled(model.isRunning)
+            Button {
+                handleSimpleNavigation(.openKnownProjects)
+            } label: {
+                Label("Открыть проект", systemImage: "folder")
+            }
+            .disabled(model.isRunning)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var simpleProjectBrowserEntries: [SimpleProjectBrowserEntry] {
+        knownProjects
+    }
+
+    private var filteredSimpleProjectBrowserEntries: [SimpleProjectBrowserEntry] {
+        let query = projectSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return simpleProjectBrowserEntries }
+        return simpleProjectBrowserEntries.filter { entry in
+            entry.projectName.localizedCaseInsensitiveContains(query)
+                || entry.history.mediaName.localizedCaseInsensitiveContains(query)
+                || entry.history.projectPath.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private var selectedSimpleProjectBrowserEntry: SimpleProjectBrowserEntry? {
+        guard let selectedBrowserProjectPath else { return nil }
+        return filteredSimpleProjectBrowserEntries.first { $0.id == selectedBrowserProjectPath }
+    }
+
+    private var simpleProjectBrowser: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Text("Все проекты")
+                    .font(.title2.bold())
+                Spacer()
+                TextField("Поиск", text: $projectSearch)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 260)
+                Button("Закрыть") {
+                    dismissSimpleProjectBrowser()
                 }
             }
+            .padding(18)
+
+            Divider()
+
+            if filteredSimpleProjectBrowserEntries.isEmpty {
+                ContentUnavailableView("Проекты не найдены", systemImage: "folder")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(filteredSimpleProjectBrowserEntries, selection: $selectedBrowserProjectPath) { entry in
+                    simpleProjectBrowserRow(entry, compact: false)
+                        .tag(entry.id)
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) {
+                            openSimpleProject(entry)
+                        }
+                }
+                .listStyle(.inset)
+            }
+
+            Divider()
+
+            HStack {
+                Button {
+                    handleSimpleNavigation(.locateProjectOnDisk)
+                } label: {
+                    Label("Найти проект на диске…", systemImage: "folder")
+                }
+                .disabled(model.isRunning)
+                Spacer()
+                Button("Открыть") {
+                    if let entry = selectedSimpleProjectBrowserEntry {
+                        openSimpleProject(entry)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(selectedSimpleProjectBrowserEntry?.isAvailable != true || model.isRunning)
+            }
+            .padding(18)
         }
+        .frame(minWidth: 760, idealWidth: 860, minHeight: 520, idealHeight: 620)
+        .onAppear {
+            projectSearch = ""
+            selectedBrowserProjectPath = filteredSimpleProjectBrowserEntries.first(where: \.isAvailable)?.id
+        }
+    }
+
+    @ViewBuilder
+    private func simpleProjectBrowserRow(_ entry: SimpleProjectBrowserEntry, compact: Bool) -> some View {
+        if compact {
+            Button {
+                openSimpleProject(entry)
+            } label: {
+                simpleProjectBrowserRowContent(entry, compact: true)
+            }
+            .buttonStyle(.plain)
+            .disabled(!entry.isAvailable || model.isRunning)
+        } else {
+            simpleProjectBrowserRowContent(entry, compact: false)
+        }
+    }
+
+    private func simpleProjectBrowserRowContent(_ entry: SimpleProjectBrowserEntry, compact: Bool) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: entry.isAvailable ? "folder.fill" : "folder.badge.questionmark")
+                .foregroundStyle(entry.isAvailable ? Color.accentColor : Color.secondary)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text(entry.projectName)
+                        .font(.headline)
+                        .lineLimit(1)
+                    Spacer()
+                    Text(entry.history.updatedAt, style: .date)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if entry.history.mediaName != entry.projectName {
+                    Text(entry.history.mediaName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                if let home = entry.home {
+                    Text(home.currentState)
+                        .font(.caption.weight(.semibold))
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 12) {
+                            if let language = home.sourceLanguage {
+                                Text(language.russianTitle)
+                            }
+                            ForEach(home.artifacts) { artifact in
+                                Label(simpleBrowserArtifactLabel(artifact), systemImage: simpleArtifactIcon(artifact.readiness))
+                                    .foregroundStyle(simpleArtifactColor(artifact.readiness))
+                            }
+                        }
+                        VStack(alignment: .leading, spacing: 3) {
+                            if let language = home.sourceLanguage {
+                                Text(language.russianTitle)
+                            }
+                            ForEach(home.artifacts) { artifact in
+                                Label(simpleBrowserArtifactLabel(artifact), systemImage: simpleArtifactIcon(artifact.readiness))
+                                    .foregroundStyle(simpleArtifactColor(artifact.readiness))
+                            }
+                        }
+                    }
+                    .font(.caption)
+                    .lineLimit(1)
+                    if !compact {
+                        Text("Видео: \(entry.generatedVideoCount) · Фрагменты: \(entry.fragmentCount)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if let issue = entry.availabilityIssue {
+                    Text(issue)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+            if compact, entry.isAvailable { Image(systemName: "chevron.right").foregroundStyle(.tertiary) }
+        }
+        .padding(.vertical, compact ? 10 : 7)
+    }
+
+    private func handleSimpleNavigation(_ action: SimpleProjectNavigationAction) {
+        switch action {
+        case .openKnownProjects:
+            reloadSimpleProjectBrowser()
+            showProjectBrowser = true
+        case .createFromMedia:
+            if let url = openMediaFile() { model.selectMedia(url) }
+        case .locateProjectOnDisk:
+            if let url = openProjectDirectory() {
+                model.openProject(url)
+                dismissSimpleProjectBrowser()
+            }
+        }
+    }
+
+    private func openSimpleProject(_ entry: SimpleProjectBrowserEntry) {
+        guard entry.isAvailable, !model.isRunning else { return }
+        model.openProject(URL(fileURLWithPath: entry.history.projectPath, isDirectory: true))
+        dismissSimpleProjectBrowser()
+    }
+
+    private func dismissSimpleProjectBrowser() {
+        showProjectBrowser = false
+        projectSearch = ""
+        selectedBrowserProjectPath = nil
+    }
+
+    private func reloadSimpleProjectBrowser() {
+        knownProjects = SimpleProjectBrowserStateService().entries()
+    }
+
+    private func simpleBrowserArtifactLabel(_ artifact: SimpleProjectHomeArtifact) -> String {
+        let base = "\(artifact.kind.title): \(artifact.readiness.title)"
+        guard artifact.readiness == .ready || artifact.readiness == .needsReview else { return base }
+        return "\(base) · \(artifact.detail)"
     }
 
     private var simpleProjectHome: some View {
@@ -363,12 +619,16 @@ struct ContentView: View {
             )
         }
         let manifest = try? ProjectStore().load(from: projectURL)
+        let outputs = SimpleProjectArtifactValidator().validatedOutputs(
+            model.outputs,
+            mediaDuration: manifest?.durationSeconds
+        )
         return SimpleProjectHomeStateService().make(
             projectURL: projectURL,
             manifest: manifest,
             topicsDetail: model.resultSummary.artifact(.topics)?.detail,
             topicsAreViewable: model.resultSummary.artifact(.topics)?.availability == .ready,
-            discoveredOutputs: model.outputs
+            discoveredOutputs: outputs
         )
     }
 
@@ -469,13 +729,14 @@ struct ContentView: View {
     }
 
     private func simpleStateIcon(_ state: SimpleProjectHomeState) -> String {
-        state.artifacts.contains(where: { $0.readiness == .needsReview })
-            ? "exclamationmark.circle.fill"
-            : "checkmark.circle.fill"
+        if state.artifacts.contains(where: { $0.readiness == .failed }) { return "xmark.circle.fill" }
+        if state.artifacts.contains(where: { $0.readiness == .needsReview }) { return "exclamationmark.circle.fill" }
+        return "checkmark.circle.fill"
     }
 
     private func simpleStateColor(_ state: SimpleProjectHomeState) -> Color {
-        state.artifacts.contains(where: { $0.readiness == .needsReview }) ? .orange : .green
+        if state.artifacts.contains(where: { $0.readiness == .failed }) { return .red }
+        return state.artifacts.contains(where: { $0.readiness == .needsReview }) ? .orange : .green
     }
 
     private func simpleArtifactIcon(_ readiness: SimpleProjectHomeReadiness) -> String {
@@ -483,6 +744,7 @@ struct ContentView: View {
         case .ready: return "checkmark.circle.fill"
         case .needsReview: return "exclamationmark.circle.fill"
         case .missing: return "minus.circle"
+        case .failed: return "xmark.circle.fill"
         }
     }
 
@@ -491,6 +753,7 @@ struct ContentView: View {
         case .ready: return .green
         case .needsReview: return .orange
         case .missing: return .secondary
+        case .failed: return .red
         }
     }
 

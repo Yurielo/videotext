@@ -25,15 +25,25 @@ struct ProjectHistoryStore {
     }
 
     func entries() -> [ProjectHistoryEntry] {
+        allEntries().filter {
+            FileManager.default.fileExists(
+                atPath: ProjectLayout(root: URL(fileURLWithPath: $0.projectPath)).manifestURL.path
+            )
+        }
+    }
+
+    /// Includes stale references so the Simple Project Browser can explain
+    /// that a known project moved or disappeared. Advanced mode keeps using
+    /// `entries()` and therefore preserves its existing behavior.
+    func allEntries() -> [ProjectHistoryEntry] {
         guard let data = try? Data(contentsOf: indexURL),
               let decoded = try? decoder.decode([ProjectHistoryEntry].self, from: data) else { return [] }
         return decoded
-            .filter { FileManager.default.fileExists(atPath: ProjectLayout(root: URL(fileURLWithPath: $0.projectPath)).manifestURL.path) }
             .sorted { $0.updatedAt > $1.updatedAt }
     }
 
     func record(_ manifest: ProjectManifest) throws {
-        var history = entries()
+        var history = allEntries()
         let workflow = manifest.workflow ?? ProjectWorkflowState(
             status: .ready,
             progress: 0,

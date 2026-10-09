@@ -20,12 +20,27 @@ enum SimpleProjectHomeReadiness: Equatable {
     case ready
     case needsReview
     case missing
+    case failed
 
     var title: String {
         switch self {
         case .ready: return "Готово"
         case .needsReview: return "Требуется проверка"
         case .missing: return "Отсутствует"
+        case .failed: return "Ошибка"
+        }
+    }
+}
+
+enum SimpleProjectNavigationAction: Equatable {
+    case openKnownProjects
+    case createFromMedia
+    case locateProjectOnDisk
+
+    var usesSystemPicker: Bool {
+        switch self {
+        case .openKnownProjects: return false
+        case .createFromMedia, .locateProjectOnDisk: return true
         }
     }
 }
@@ -149,6 +164,9 @@ struct SimpleProjectHomeStateService {
         guard let sourceLanguage,
               let revision = manifest?.activeTranscriptRevision(for: sourceLanguage),
               revision.reviewStatus == .approved else {
+            if operationFailed(.transcribe, manifest: manifest) {
+                return artifact(.transcription, .failed, "Расшифровка не завершена")
+            }
             return artifact(.transcription, .missing, "Не создан")
         }
         let openOutputPath = firstPath(in: outputs, kinds: ["transcript", "full-srt"])
@@ -179,6 +197,9 @@ struct SimpleProjectHomeStateService {
             } == true
         } ?? false
         guard hasApprovedTopics, isViewable else {
+            if operationFailed(.topicTimecoding, manifest: manifest) {
+                return artifact(.topics, .failed, "Темы не созданы")
+            }
             return artifact(.topics, .missing, "Не созданы")
         }
         let detail = detail ?? "Готовы"
@@ -211,6 +232,9 @@ struct SimpleProjectHomeStateService {
         guard let revision = manifest?.activeTranscriptRevision(for: target),
               revision.reviewStatus == .approved,
               revision.origin == .translated || revision.origin == .userEdited else {
+            if operationFailed(.translateTranscript, manifest: manifest) {
+                return artifact(.translation, .failed, "Перевод не завершён")
+            }
             return artifact(.translation, .missing, "Не создан")
         }
         let openOutputPath = firstPath(in: outputs, kinds: ["localized-transcript", "localized-subtitles"])
@@ -259,6 +283,10 @@ struct SimpleProjectHomeStateService {
 
     private func languageDetail(_ language: ArtifactLanguage?) -> String {
         language?.russianTitle ?? "Язык не определён"
+    }
+
+    private func operationFailed(_ operation: WorkflowOperation, manifest: ProjectManifest?) -> Bool {
+        manifest?.workflow?.operations[operation.rawValue]?.status == .failed
     }
 
     private func firstPath(in outputs: [ProjectOutput], kinds: [String]) -> String? {
