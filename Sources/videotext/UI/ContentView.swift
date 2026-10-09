@@ -50,6 +50,7 @@ struct ContentView: View {
     @State private var selectedBrowserProjectPath: String?
     @State private var knownProjects: [SimpleProjectBrowserEntry] = []
     @State private var simpleReviewTarget: SimpleProjectHomeReviewTarget?
+    @State private var showsSimpleTextContent = false
 
     var body: some View {
         Group {
@@ -594,6 +595,25 @@ struct ContentView: View {
                     simpleGoalCard(.processVideo, icon: "slider.horizontal.3")
                 }
 
+                if showsSimpleTextContent {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            simpleSectionTitle("Текст и содержание")
+                            Spacer()
+                            Button("Скрыть") { showsSimpleTextContent = false }
+                                .buttonStyle(.borderless)
+                        }
+                        ForEach(state.artifacts.filter {
+                            $0.kind == .transcription || $0.kind == .topics || $0.kind == .translation
+                        }) { artifact in
+                            simpleArtifactRow(artifact)
+                        }
+                    }
+                    .padding(10)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+
                 simpleSectionTitle("Последние результаты")
                 if state.recentResults.isEmpty {
                     Text("Готовых результатов пока нет")
@@ -677,7 +697,9 @@ struct ContentView: View {
 
     private func simpleGoalCard(_ goal: SimpleProjectHomeGoal, icon: String) -> some View {
         Button {
-            if goal != .textContent {
+            if goal == .textContent {
+                showsSimpleTextContent = true
+            } else {
                 presentationMode = .advanced
                 selectedResultsTab = 0
             }
@@ -709,10 +731,6 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(output.title)
                     .fontWeight(.semibold)
-                Text(URL(fileURLWithPath: output.path).lastPathComponent)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
             }
             Spacer()
             Button("Открыть") { openSimpleResult(output.path) }

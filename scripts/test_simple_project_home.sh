@@ -60,8 +60,10 @@ if missing:
 
 if "simpleReviewTarget = target" not in ui or "simpleHumanReviewSheet(target)" not in ui:
     raise SystemExit("Simple Human Review action must stay inside the Simple review sheet")
-if "if goal != .textContent" not in ui:
-    raise SystemExit("Text and content must not implicitly switch to Advanced mode")
+if "showsSimpleTextContent = true" not in ui or 'simpleSectionTitle("Текст и содержание")' not in ui:
+    raise SystemExit("Text and content must reveal a Simple content flow")
+if 'Text(URL(fileURLWithPath: output.path).lastPathComponent)' in ui:
+    raise SystemExit("Simple recent results must not expose physical filenames")
 if "presentationMode = .advanced\n        selectedResultsTab = target" in ui:
     raise SystemExit("Simple Human Review must not implicitly switch to Advanced mode")
 
