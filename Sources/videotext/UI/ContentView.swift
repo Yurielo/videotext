@@ -49,6 +49,7 @@ struct ContentView: View {
     @State private var projectSearch = ""
     @State private var selectedBrowserProjectPath: String?
     @State private var knownProjects: [SimpleProjectBrowserEntry] = []
+    @State private var simpleReviewTarget: SimpleProjectHomeReviewTarget?
 
     var body: some View {
         Group {
@@ -119,6 +120,9 @@ struct ContentView: View {
         .sheet(isPresented: $showProjectBrowser) {
             simpleProjectBrowser
         }
+        .sheet(item: $simpleReviewTarget) { target in
+            simpleHumanReviewSheet(target)
+        }
         .confirmationDialog(
             "Удалить границу темы?",
             isPresented: $confirmTopicRemoval,
@@ -131,6 +135,7 @@ struct ContentView: View {
         }
         .onChange(of: model.humanReviewCheckpoint) { _, checkpoint in
             if checkpoint != nil { selectedResultsTab = 2 }
+            if checkpoint == nil { simpleReviewTarget = nil }
         }
         .onChange(of: model.topicReviewCheckpoint) { _, checkpoint in
             if checkpoint != nil { selectedResultsTab = 1 }
@@ -549,8 +554,8 @@ struct ContentView: View {
     private var simpleProjectHome: some View {
         let state = simpleHomeState
         return ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: 17) {
+                VStack(alignment: .leading, spacing: 5) {
                     Text(state.mediaName)
                         .font(.title2.bold())
                         .lineLimit(2)
@@ -572,7 +577,7 @@ struct ContentView: View {
                 }
 
                 simpleSectionTitle("Готово")
-                VStack(spacing: 8) {
+                VStack(spacing: 4) {
                     ForEach(state.artifacts) { artifact in
                         simpleArtifactRow(artifact)
                     }
@@ -580,8 +585,8 @@ struct ContentView: View {
 
                 simpleSectionTitle("Что хотите получить?")
                 LazyVGrid(
-                    columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
-                    spacing: 12
+                    columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)],
+                    spacing: 8
                 ) {
                     simpleGoalCard(.textContent, icon: "text.alignleft")
                     simpleGoalCard(.subtitledVideo, icon: "captions.bubble")
@@ -594,7 +599,7 @@ struct ContentView: View {
                     Text("Готовых результатов пока нет")
                         .foregroundStyle(.secondary)
                 } else {
-                    VStack(spacing: 8) {
+                    VStack(spacing: 4) {
                         ForEach(state.recentResults) { output in
                             simpleRecentResultRow(output)
                         }
@@ -602,7 +607,7 @@ struct ContentView: View {
                 }
             }
             .frame(maxWidth: 920, alignment: .leading)
-            .padding(24)
+            .padding(18)
         }
     }
 
@@ -667,15 +672,17 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
             }
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 3)
     }
 
     private func simpleGoalCard(_ goal: SimpleProjectHomeGoal, icon: String) -> some View {
         Button {
-            presentationMode = .advanced
-            selectedResultsTab = 0
+            if goal != .textContent {
+                presentationMode = .advanced
+                selectedResultsTab = 0
+            }
         } label: {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
                 Image(systemName: icon)
                     .font(.title3)
                 Text(goal.title)
@@ -685,8 +692,8 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.leading)
             }
-            .frame(maxWidth: .infinity, minHeight: 116, alignment: .leading)
-            .padding(14)
+            .frame(maxWidth: .infinity, minHeight: 94, alignment: .leading)
+            .padding(10)
             .background(Color(nsColor: .controlBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 8))
         }
@@ -722,12 +729,31 @@ struct ContentView: View {
             }
             .help("Показать в Finder")
         }
-        .padding(.vertical, 5)
+        .padding(.vertical, 3)
     }
 
     private func openSimpleReview(_ target: SimpleProjectHomeReviewTarget) {
-        presentationMode = .advanced
-        selectedResultsTab = target == .topics ? 1 : 2
+        guard target != .topics,
+              let checkpoint = model.humanReviewCheckpoint,
+              (target == .source && checkpoint.kind == .sourceTranscript)
+                || (target == .translation && checkpoint.kind == .translatedTranscript) else {
+            return
+        }
+        simpleReviewTarget = target
+    }
+
+    private func simpleHumanReviewSheet(_ target: SimpleProjectHomeReviewTarget) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(target == .source ? "Проверка расшифровки" : "Проверка перевода")
+                    .font(.headline)
+                Spacer()
+                Button("Закрыть") { simpleReviewTarget = nil }
+            }
+            reviewTasksPanel
+        }
+        .frame(minWidth: 720, minHeight: 520, alignment: .topLeading)
+        .padding(18)
     }
 
     private func simpleReviewActionTitle(_ target: SimpleProjectHomeReviewTarget) -> String {

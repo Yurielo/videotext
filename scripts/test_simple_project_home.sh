@@ -58,12 +58,12 @@ missing = [snippet for snippet in required_ui if snippet not in ui]
 if missing:
     raise SystemExit("Simple results UI contract missing: " + ", ".join(missing))
 
-review_route = '''private func openSimpleReview(_ target: SimpleProjectHomeReviewTarget) {
-        presentationMode = .advanced
-        selectedResultsTab = target == .topics ? 1 : 2
-    }'''
-if review_route not in ui:
-    raise SystemExit("Simple Human Review action must route pending source/translation review to Advanced Results")
+if "simpleReviewTarget = target" not in ui or "simpleHumanReviewSheet(target)" not in ui:
+    raise SystemExit("Simple Human Review action must stay inside the Simple review sheet")
+if "if goal != .textContent" not in ui:
+    raise SystemExit("Text and content must not implicitly switch to Advanced mode")
+if "presentationMode = .advanced\n        selectedResultsTab = target" in ui:
+    raise SystemExit("Simple Human Review must not implicitly switch to Advanced mode")
 
 if "WorkflowEngine" in state or "model.run(" in state:
     raise SystemExit("Simple presentation state must not trigger processing")

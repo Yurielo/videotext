@@ -45,10 +45,12 @@ enum SimpleProjectNavigationAction: Equatable {
     }
 }
 
-enum SimpleProjectHomeReviewTarget: Equatable {
+enum SimpleProjectHomeReviewTarget: Identifiable, Equatable {
     case source
     case topics
     case translation
+
+    var id: Self { self }
 }
 
 struct SimpleProjectHomeArtifact: Identifiable, Equatable {
