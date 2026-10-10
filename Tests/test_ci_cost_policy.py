@@ -93,11 +93,44 @@ class RiskClassifierTests(unittest.TestCase):
                     ),
                 )
 
-    def test_bundled_launcher_is_protected_level_b(self):
+    def test_bundled_launcher_content_only_change_is_level_a(self):
+        self.assertLevel(
+            "LEVEL_A",
+            classifier.Change("M", "Resources/SeminarText/seminartext", changed_text="cmd+=(-pp -of prefix)"),
+        )
+
+    def test_bundled_launcher_runtime_discovery_change_is_level_b(self):
         self.assertLevel(
             "LEVEL_B",
-            classifier.Change("M", "Resources/SeminarText/seminartext", changed_text="reorder candidates"),
+            classifier.Change(
+                "M",
+                "Resources/SeminarText/seminartext",
+                changed_text='whisper_cli="$(command -v whisper-cli)"',
+            ),
         )
+        self.assertLevel(
+            "LEVEL_B",
+            classifier.Change(
+                "M",
+                "Resources/SeminarText/seminartext",
+                changed_text='whisper_cli="$HOME/.local/bin/whisper-cli"',
+            ),
+        )
+        for changed_text in (
+            'cmd=(./tools/whisper-wrapper -m "$MODEL")',
+            'exec ./tools/whisper-wrapper "$@"',
+            './tools/whisper-wrapper "$@"',
+            'wrapper=(./tools/whisper-wrapper -m "$MODEL")',
+        ):
+            with self.subTest(changed_text=changed_text):
+                self.assertLevel(
+                    "LEVEL_B",
+                    classifier.Change(
+                        "M",
+                        "Resources/SeminarText/seminartext",
+                        changed_text=changed_text,
+                    ),
+                )
 
     def test_xcode_and_build_configuration_are_level_b(self):
         self.assertLevel("LEVEL_B", classifier.Change("M", "VideoText.xcodeproj/project.pbxproj"))
@@ -117,7 +150,7 @@ class RiskClassifierTests(unittest.TestCase):
             ),
         )
 
-    def test_runtime_discovery_is_level_b(self):
+    def test_runtime_discovery_and_executable_selection_are_level_b(self):
         for path in POLICY["knownRuntimeDiscoveryPaths"]:
             with self.subTest(path=path):
                 self.assertLevel("LEVEL_B", classifier.Change("M", path))
@@ -130,7 +163,13 @@ class RiskClassifierTests(unittest.TestCase):
             ),
         )
         for changed_text in (
+            'let executable = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) })',
+            'let bundled = Bundle.main.resourceURL?.appendingPathComponent("SeminarText/seminartext")',
+            'let executable = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".local/bin/whisper-cli")',
+            'let executable = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("bin/whisper-cli")',
             'let path = ProcessInfo.processInfo.environment["PATH"]',
+            'export PATH="/opt/homebrew/bin:$PATH"',
+            'env PATH="/usr/local/bin" whisper-cli',
             'FileManager.default.isExecutableFile(atPath: candidate)',
             'ffmpeg = shutil.which("ffmpeg")',
             'FileManager.default.fileExists(atPath: "/usr/bin/ffmpeg")',
@@ -147,10 +186,31 @@ class RiskClassifierTests(unittest.TestCase):
                     ),
                 )
 
-    def test_new_service_or_adapter_file_fails_closed(self):
+    def test_new_presentation_service_is_level_a(self):
+        self.assertLevel(
+            "LEVEL_A",
+            classifier.Change(
+                "A",
+                "Sources/videotext/Services/SimpleTranscriptionPresentation.swift",
+                changed_text="struct SimpleTranscriptionPresentation {}",
+            ),
+        )
+
+    def test_new_service_with_runtime_loading_is_level_b(self):
+        self.assertLevel(
+            "LEVEL_B",
+            classifier.Change(
+                "A",
+                "Sources/videotext/Services/SimpleTranscriptionPresentation.swift",
+                changed_text='let bundled = Bundle.main.resourceURL?.appendingPathComponent("SeminarText")',
+            ),
+        )
+
+    def test_new_ambiguous_infrastructure_service_or_adapter_fails_closed(self):
         for path in (
             "Sources/videotext/Services/NewToolLocator.swift",
             "Sources/videotext/Adapters/NewProcessAdapter.swift",
+            "Sources/videotext/Services/NewWorkflowService.swift",
         ):
             with self.subTest(path=path):
                 self.assertLevel("LEVEL_B", classifier.Change("A", path, changed_text="let value = 1"))
@@ -162,6 +222,26 @@ class RiskClassifierTests(unittest.TestCase):
                 "M",
                 "Sources/videotext/Services/WorkflowEngine.swift",
                 changed_text="let result = operation.result",
+            ),
+        )
+
+    def test_selected_timing_validation_only_change_is_level_a(self):
+        self.assertLevel(
+            "LEVEL_A",
+            classifier.Change(
+                "M",
+                "Sources/videotext/Services/SelectedTimingVerticalSlice.swift",
+                changed_text="guard tokenStart >= 0, tokenEnd >= 0 else { return }",
+            ),
+        )
+
+    def test_selected_timing_runtime_discovery_change_is_level_b(self):
+        self.assertLevel(
+            "LEVEL_B",
+            classifier.Change(
+                "M",
+                "Sources/videotext/Services/SelectedTimingVerticalSlice.swift",
+                changed_text='let bundled = Bundle.main.resourceURL?.appendingPathComponent("SeminarText/seminartext")',
             ),
         )
 
@@ -327,6 +407,13 @@ class GitClassifierIntegrationTests(unittest.TestCase):
         result = classifier.classify_repository(self.repo, self.base, head, classifier.POLICY_PATH)
         self.assertEqual(result["level"], "LEVEL_A")
         self.assertEqual(result["changes"][0]["status"], "M")
+
+    def test_issue_19_diff_is_level_a_by_content(self):
+        base = "dc622566bc41f48e5cc8aa730fcb701802db330b"
+        head = "c1a83ebfec55a664b65bfec1c6ac4ddf8c8f02ee"
+        result = classifier.classify_repository(ROOT, base, head, classifier.POLICY_PATH)
+        self.assertEqual(result["level"], "LEVEL_A", result)
+        self.assertFalse(result["decision"]["hostedMacosRequired"])
 
     def test_real_git_mode_change_fails_closed(self):
         source = self.repo / "Sources" / "videotext" / "UI" / "ContentView.swift"

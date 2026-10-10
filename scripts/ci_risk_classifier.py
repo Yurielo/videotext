@@ -229,13 +229,21 @@ def classify_changes(changes: Iterable[Change], policy: dict) -> dict:
             reasons.append({"code": code, "level": "LEVEL_B", "path": change.path})
         if change.binary:
             reasons.append({"code": "native-binary-content", "level": "LEVEL_B", "path": change.path})
-        ambiguous_new_file = change.status == "A" and any(
-            change.path.startswith(prefix)
-            for prefix in policy["ambiguousNewFileLevelBPrefixes"]
+        new_service = change.status == "A" and change.path.startswith("Sources/videotext/Services/")
+        presentation_service = new_service and any(
+            fnmatch.fnmatch(change.path, pattern)
+            for pattern in policy["newPresentationServiceGlobs"]
+        )
+        ambiguous_new_file = change.status == "A" and (
+            any(
+                fnmatch.fnmatch(change.path, pattern)
+                for pattern in policy["ambiguousNewInfrastructureFileGlobs"]
+            )
+            or (new_service and not presentation_service)
         )
         if ambiguous_new_file:
             reasons.append(
-                {"code": "ambiguous-new-service-or-adapter", "level": "LEVEL_B", "path": change.path}
+                {"code": "ambiguous-new-infrastructure-file", "level": "LEVEL_B", "path": change.path}
             )
         ambiguous_change_type = (
             change.status not in {"A", "M"}

@@ -31,17 +31,28 @@
     ".xcworkspace"
   ],
   "knownRuntimeDiscoveryPaths": [
-    "Resources/SeminarText/seminartext",
     "Sources/videotext/Adapters/MediaAdapters.swift",
     "Sources/videotext/Adapters/SpeechSynthesisAdapter.swift",
     "Sources/videotext/Services/Diagnostics.swift",
-    "Sources/videotext/Services/SelectedTimingVerticalSlice.swift",
     "Sources/videotext/Services/ToolRunner.swift",
     "Sources/videotext/Services/WhisperModelLocator.swift"
   ],
-  "ambiguousNewFileLevelBPrefixes": [
-    "Sources/videotext/Adapters/",
-    "Sources/videotext/Services/"
+  "ambiguousNewInfrastructureFileGlobs": [
+    "Sources/videotext/Adapters/*",
+    "Sources/videotext/Services/*Adapter*.swift",
+    "Sources/videotext/Services/*Binary*.swift",
+    "Sources/videotext/Services/*Executor*.swift",
+    "Sources/videotext/Services/*Launcher*.swift",
+    "Sources/videotext/Services/*Loader*.swift",
+    "Sources/videotext/Services/*Locator*.swift",
+    "Sources/videotext/Services/*Process*.swift",
+    "Sources/videotext/Services/*Resolver*.swift",
+    "Sources/videotext/Services/*Runner*.swift",
+    "Sources/videotext/Services/*Runtime*.swift",
+    "Sources/videotext/Services/*Tool*.swift"
+  ],
+  "newPresentationServiceGlobs": [
+    "Sources/videotext/Services/*Presentation.swift"
   ],
   "levelAExactPaths": [
     ".gitignore",
@@ -87,7 +98,19 @@
     },
     {
       "code": "runtime-discovery-marker",
-      "pattern": "(?i)(/opt/homebrew|/usr/local|/(?:usr/)?s?bin|command -v|(?:shutil\\.)?which\\s*\\(|isExecutableFile|processInfo\\.environment|os\\.environ(?:\\.get\\s*\\(\\s*[\"']PATH[\"']|\\s*\\[\\s*[\"']PATH[\"'])|environment\\s*\\[\\s*[\"']PATH[\"']|getenv\\s*\\(\\s*[\"']PATH[\"']|Bundle\\.main|launchPath|executableURL|DYLD_|@rpath|dlopen\\()"
+      "pattern": "(?i)(/opt/homebrew|/usr/local|/(?:usr/)?s?bin|\\$\\{?HOME\\}?|~/|NSHomeDirectory\\s*\\(|homeDirectoryForCurrentUser|command -v|(?:shutil\\.)?which\\s*\\(|isExecutableFile|processInfo\\.environment|os\\.environ(?:\\.get\\s*\\(\\s*[\"']PATH[\"']|\\s*\\[\\s*[\"']PATH[\"'])|environment\\s*\\[\\s*[\"']PATH[\"']|getenv\\s*\\(\\s*[\"']PATH[\"']|Bundle\\.main|launchPath|executableURL|DYLD_|@rpath|dlopen\\()"
+    },
+    {
+      "code": "shell-path-assignment-marker",
+      "pattern": "(?m)^\\s*(?:export\\s+)?PATH\\s*=|\\benv\\s+PATH\\s*="
+    },
+    {
+      "code": "shell-executable-selection-marker",
+      "pattern": "(?m)^\\s*(?:local\\s+(?:-a\\s+)?)?[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*\\("
+    },
+    {
+      "code": "shell-direct-exec-marker",
+      "pattern": "(?m)^\\s*(?:exec\\s+)?(?:\\./|\\.\\./)"
     },
     {
       "code": "runtime-discovery-api-marker",
