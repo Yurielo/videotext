@@ -126,6 +126,8 @@ class RiskClassifierTests(unittest.TestCase):
             'let path = ProcessInfo.processInfo.environment["PATH"]',
             'FileManager.default.isExecutableFile(atPath: candidate)',
             'ffmpeg = shutil.which("ffmpeg")',
+            'FileManager.default.fileExists(atPath: "/usr/bin/ffmpeg")',
+            'process.launchPath = "/bin/ffmpeg"',
         ):
             with self.subTest(changed_text=changed_text):
                 self.assertLevel(
@@ -471,6 +473,31 @@ class LocalGateEvidenceTests(unittest.TestCase):
         evidence["completedGates"].remove("owner-test")
         with self.assertRaisesRegex(dispatcher.DispatchError, "every governed local gate"):
             dispatcher.validate_local_gate_evidence(evidence, self.SHA)
+
+    def test_mandatory_local_gate_cannot_be_not_applicable(self):
+        evidence = self.evidence()
+        evidence["completedGates"].remove("independent-qa-review")
+        evidence["notApplicableGates"] = {
+            "independent-qa-review": "attempted to waive review"
+        }
+        with self.assertRaisesRegex(dispatcher.DispatchError, "mandatory local gates"):
+            dispatcher.validate_local_gate_evidence(evidence, self.SHA)
+
+    def test_local_evidence_bundle_digest_is_verified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            bundle = directory / "release-evidence.json"
+            bundle.write_text('{"status":"PASS"}\n', encoding="utf-8")
+            evidence = self.evidence()
+            evidence["evidenceSha256"] = dispatcher.sha256_evidence_bundle(bundle)
+            summary = directory / "local-gates.json"
+            summary.write_text(json.dumps(evidence), encoding="utf-8")
+            self.assertEqual(
+                dispatcher.load_local_gate_evidence(summary, self.SHA, bundle), evidence
+            )
+            bundle.write_text('{"status":"CHANGED"}\n', encoding="utf-8")
+            with self.assertRaisesRegex(dispatcher.DispatchError, "digest does not match"):
+                dispatcher.load_local_gate_evidence(summary, self.SHA, bundle)
 
     def test_local_gate_evidence_is_bound_to_exact_sha(self):
         with self.assertRaisesRegex(dispatcher.DispatchError, "SHA does not match"):

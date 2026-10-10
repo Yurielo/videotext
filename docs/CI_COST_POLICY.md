@@ -52,7 +52,8 @@ trigger. The supported entry point is:
 ```bash
 python3 scripts/dispatch_paid_macos_gate.py \
   <full-expected-sha> --ref <remote-branch> \
-  --local-gate-evidence <exact-sha-local-gates.json>
+  --local-gate-evidence <exact-sha-local-gates.json> \
+  --local-evidence-bundle <machine-readable-evidence-file>
 ```
 
 The dispatcher resolves the remote branch, runs the classifier, rejects A,
@@ -70,8 +71,10 @@ only so the single controlled retry can inspect machine check annotations.
 
 Local-gate evidence uses this schema. Every governed gate must appear exactly
 once, either in `completedGates` or in `notApplicableGates` with a non-empty
-reason. `evidenceSha256` identifies the underlying local evidence bundle; the
-summary itself is exact-SHA-bound and recorded by `ci-cd-engineer`.
+reason. Focused tests, regression, independent QA, and independent code review
+are never optional. `evidenceSha256` is recomputed from the supplied underlying
+local evidence file before dispatch; the summary itself is exact-SHA-bound and
+recorded by `ci-cd-engineer`.
 
 ```json
 {
@@ -124,9 +127,12 @@ check, classifier, signature check, or other started step is not retryable.
 
 Direct GitHub UI dispatch is an administrative escape hatch, not the governed
 entry point. It cannot be triggered by an ordinary PR or push, and the workflow
-still fails closed unless its exact-SHA Level B evidence matches. Repository
-write access can always modify workflows; branch protection and Owner review
-remain the control for such administrative changes.
+still fails closed unless its exact-SHA Level B evidence matches. A person with
+repository write access can deliberately create repeated fresh dispatches; that
+is an administrative spending action, not an automatic retry loop, and cannot
+be rejected before runner allocation without an external preflight or protected
+environment. Repository access control, branch protection, and Owner review
+remain the control for such administrative actions.
 
 Without a Linux preflight, protected environment, or external GitHub App, the
 repository cannot execute the classifier before GitHub allocates the explicitly

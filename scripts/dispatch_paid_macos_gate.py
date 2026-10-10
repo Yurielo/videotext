@@ -37,6 +37,12 @@ LOCAL_GATE_NAMES = {
     "codesign-lifecycle",
     "owner-test",
 }
+MANDATORY_LOCAL_GATES = {
+    "focused-tests",
+    "regression",
+    "independent-qa-review",
+    "independent-code-review",
+}
 
 
 class DispatchError(RuntimeError):
@@ -202,6 +208,12 @@ def validate_local_gate_evidence(evidence: dict, expected_sha: str) -> dict:
         raise DispatchError("a local gate cannot be both completed and not applicable")
     if completed_set | not_applicable_set != LOCAL_GATE_NAMES:
         raise DispatchError("local gate evidence must account for every governed local gate")
+    missing_mandatory = MANDATORY_LOCAL_GATES - completed_set
+    if missing_mandatory:
+        raise DispatchError(
+            "mandatory local gates cannot be not applicable: "
+            + ", ".join(sorted(missing_mandatory))
+        )
     if not re.fullmatch(r"[0-9a-f]{64}", str(evidence["evidenceSha256"])):
         raise DispatchError("local gate evidence digest must be a lowercase SHA-256")
     if evidence["recordedBy"] != "ci-cd-engineer":
@@ -215,12 +227,28 @@ def validate_local_gate_evidence(evidence: dict, expected_sha: str) -> dict:
     return evidence
 
 
-def load_local_gate_evidence(path: pathlib.Path, expected_sha: str) -> dict:
+def sha256_evidence_bundle(path: pathlib.Path) -> str:
+    if not path.is_file():
+        raise DispatchError("local evidence bundle must be an existing regular file")
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_local_gate_evidence(
+    path: pathlib.Path, expected_sha: str, evidence_bundle: pathlib.Path
+) -> dict:
     try:
         evidence = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise DispatchError(f"invalid local gate evidence: {error}") from error
-    return validate_local_gate_evidence(evidence, expected_sha)
+    validated = validate_local_gate_evidence(evidence, expected_sha)
+    actual_digest = sha256_evidence_bundle(evidence_bundle)
+    if validated["evidenceSha256"] != actual_digest:
+        raise DispatchError("local evidence bundle digest does not match evidenceSha256")
+    return validated
 
 
 def load_retry_evidence(
@@ -254,13 +282,16 @@ def main() -> int:
     parser.add_argument("expected_sha")
     parser.add_argument("--ref", required=True, help="remote branch containing expected_sha")
     parser.add_argument("--local-gate-evidence", required=True, type=pathlib.Path)
+    parser.add_argument("--local-evidence-bundle", required=True, type=pathlib.Path)
     parser.add_argument("--retry-evidence", type=pathlib.Path)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     try:
         expected_sha = full_sha(args.expected_sha, "expected_sha")
-        local_gate_evidence = load_local_gate_evidence(args.local_gate_evidence, expected_sha)
+        local_gate_evidence = load_local_gate_evidence(
+            args.local_gate_evidence, expected_sha, args.local_evidence_bundle
+        )
         if run(["git", "rev-parse", "HEAD"]).stdout.strip() != expected_sha:
             raise DispatchError("dispatcher checkout HEAD must equal expected_sha")
         if run(["git", "status", "--porcelain"]).stdout.strip():
