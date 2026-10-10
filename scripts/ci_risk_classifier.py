@@ -31,6 +31,7 @@ NATIVE_MAGICS = {
 REQUIRED_LEVEL_B_EXACT_PATHS = {
     ".ci/ci-risk-policy.json",
     ".github/workflows/topic-regression.yml",
+    "Tests/test_ci_cost_policy.py",
     "scripts/ci_risk_classifier.py",
     "scripts/dispatch_paid_macos_gate.py",
     "scripts/test_ci_cost_policy.sh",

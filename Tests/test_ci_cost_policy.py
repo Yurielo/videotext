@@ -204,15 +204,21 @@ class RiskClassifierTests(unittest.TestCase):
         )
 
     def test_policy_cannot_unprotect_its_bootstrap_files(self):
-        weakened = dict(POLICY)
-        weakened["levelBExactPaths"] = [
-            path for path in POLICY["levelBExactPaths"] if path != ".ci/ci-risk-policy.json"
-        ]
-        with tempfile.TemporaryDirectory() as directory:
-            path = pathlib.Path(directory) / "policy.json"
-            path.write_text(json.dumps(weakened), encoding="utf-8")
-            with self.assertRaisesRegex(classifier.ClassificationError, "cannot unprotect"):
-                classifier.load_policy(path)
+        for protected_path in classifier.REQUIRED_LEVEL_B_EXACT_PATHS:
+            with self.subTest(protected_path=protected_path), tempfile.TemporaryDirectory() as directory:
+                weakened = dict(POLICY)
+                weakened["levelBExactPaths"] = [
+                    path for path in POLICY["levelBExactPaths"] if path != protected_path
+                ]
+                path = pathlib.Path(directory) / "policy.json"
+                path.write_text(json.dumps(weakened), encoding="utf-8")
+                with self.assertRaisesRegex(classifier.ClassificationError, "cannot unprotect"):
+                    classifier.load_policy(path)
+
+    def test_policy_test_suite_is_level_b(self):
+        self.assertLevel(
+            "LEVEL_B", classifier.Change("M", "Tests/test_ci_cost_policy.py")
+        )
 
     def test_empty_diff_is_not_hosted_eligible(self):
         result = self.assertLevel("LEVEL_B")
