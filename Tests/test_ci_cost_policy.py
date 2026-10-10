@@ -121,6 +121,7 @@ class RiskClassifierTests(unittest.TestCase):
             'exec ./tools/whisper-wrapper "$@"',
             './tools/whisper-wrapper "$@"',
             'wrapper=(./tools/whisper-wrapper -m "$MODEL")',
+            'whisper_cli="$PROJECT_ROOT/tools/whisper-cli"\n"$whisper_cli" "$@"',
         ):
             with self.subTest(changed_text=changed_text):
                 self.assertLevel(
@@ -128,6 +129,34 @@ class RiskClassifierTests(unittest.TestCase):
                     classifier.Change(
                         "M",
                         "Resources/SeminarText/seminartext",
+                        changed_text=changed_text,
+                    ),
+                )
+
+    def test_new_presentation_service_runtime_loading_is_level_b(self):
+        self.assertLevel(
+            "LEVEL_B",
+            classifier.Change(
+                "A",
+                "Sources/videotext/Services/LooksLikePresentation.swift",
+                changed_text=(
+                    "let directory = FileManager.default.urls(\n"
+                    "    for: .applicationSupportDirectory,\n"
+                    "    in: .userDomainMask\n"
+                    ")[0]\n"
+                    "let executable = directory.appendingPathComponent(toolName)"
+                ),
+            ),
+        )
+
+    def test_native_loading_is_level_b(self):
+        for changed_text in ('dlopen("@rpath/libwhisper.dylib", RTLD_NOW)', '@rpath/libwhisper.dylib'):
+            with self.subTest(changed_text=changed_text):
+                self.assertLevel(
+                    "LEVEL_B",
+                    classifier.Change(
+                        "M",
+                        "Sources/videotext/Services/SelectedTimingVerticalSlice.swift",
                         changed_text=changed_text,
                     ),
                 )

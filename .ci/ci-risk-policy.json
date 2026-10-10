@@ -106,7 +106,7 @@
     },
     {
       "code": "shell-executable-selection-marker",
-      "pattern": "(?m)^\\s*(?:local\\s+(?:-a\\s+)?)?[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*\\("
+      "pattern": "(?im)(?:^\\s*(?:local\\s+(?:-a\\s+)?)?[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*\\(|^\\s*(?:local\\s+(?:-a\\s+)?)?[A-Za-z_][A-Za-z0-9_]*(?:cli|binary|executable|tool|runner|launcher|wrapper|command)[A-Za-z0-9_]*\\s*=\\s*[\\\"']?[^\\n]*(?:/|\\$)[^\\n]*|^\\s*(?:exec\\s+)?[\\\"']?\\$[A-Za-z_][A-Za-z0-9_]*[\\\"']?(?:\\s|$))"
     },
     {
       "code": "shell-direct-exec-marker",
@@ -114,7 +114,7 @@
     },
     {
       "code": "runtime-discovery-api-marker",
-      "pattern": "(?is)(urlForApplication\\s*\\(|fileExists\\s*\\([\\s\\S]{0,512}(?:ffmpeg|ffprobe|whisper|ollama|seminartext|homebrew|(?:usr/)?s?bin|executable|binary|cli)|(?:ffmpeg|ffprobe|whisper|ollama|seminartext|homebrew|(?:usr/)?s?bin|executable|binary|cli)[\\s\\S]{0,512}fileExists\\s*\\()"
+      "pattern": "(?is)(urlForApplication\\s*\\(|(?:applicationSupportDirectory|userDomainMask)[\\s\\S]{0,512}(?:executable|binary|cli|tool|runner|launcher|wrapper)|(?:executable|binary|cli|tool|runner|launcher|wrapper)[\\s\\S]{0,512}(?:applicationSupportDirectory|userDomainMask)|fileExists\\s*\\([\\s\\S]{0,512}(?:ffmpeg|ffprobe|whisper|ollama|seminartext|homebrew|(?:usr/)?s?bin|executable|binary|cli)|(?:ffmpeg|ffprobe|whisper|ollama|seminartext|homebrew|(?:usr/)?s?bin|executable|binary|cli)[\\s\\S]{0,512}fileExists\\s*\\()"
     },
     {
       "code": "native-architecture-marker",
