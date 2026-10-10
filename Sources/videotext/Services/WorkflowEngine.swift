@@ -401,6 +401,13 @@ final class WorkflowViewModel: ObservableObject {
     }
 
     func previewFiller(_ candidate: FillerWordCandidate, afterMute: Bool) {
+        guard candidate.start.isFinite, candidate.end.isFinite,
+              candidate.start >= 0, candidate.end > candidate.start else { return }
+        if let projectURL,
+           let knownDuration = (try? store.load(from: projectURL))?.durationSeconds {
+            guard knownDuration.isFinite, knownDuration > 0,
+                  candidate.end <= knownDuration else { return }
+        }
         let sourceURL: URL?
         if afterMute {
             sourceURL = outputs
@@ -2051,20 +2058,23 @@ final class WorkflowEngine: @unchecked Sendable {
                         throw WorkflowError.processFailed("Не найдена актуальная ревизия расшифровки для анализа слов-паразитов.")
                     }
                     let cues = try srt.load(from: layout.subtitlesURL(language: language))
+                    let mediaDuration = try await requiredDuration(of: mediaURL, manifest: current)
                     let report: FillerAnalysisReport
                     if let selectedSource = try selectedTimingTranslation.loadPersistedSource(projectURL: projectURL, mediaURL: mediaURL) {
                         report = try fillerWords.analyze(
                             selectedTiming: selectedSource,
                             cues: cues,
                             language: language,
-                            transcriptRevisionID: revision.id
+                            transcriptRevisionID: revision.id,
+                            mediaDuration: mediaDuration
                         )
                     } else {
                         report = try fillerWords.analyze(
                             whisperJSONURL: layout.whisperJSONURL,
                             cues: cues,
                             language: language,
-                            transcriptRevisionID: revision.id
+                            transcriptRevisionID: revision.id,
+                            mediaDuration: mediaDuration
                         )
                     }
                     try encoderForDerivedTimeline().encode(report).write(to: layout.fillerWordsURL, options: .atomic)
@@ -2133,6 +2143,12 @@ final class WorkflowEngine: @unchecked Sendable {
                     }
                     let current = try store.load(from: projectURL)
                     let duration = try await requiredDuration(of: mediaURL, manifest: current)
+                    guard selected.allSatisfy({
+                        $0.start.isFinite && $0.end.isFinite
+                            && $0.start >= 0 && $0.end > $0.start && $0.end <= duration
+                    }) else {
+                        throw WorkflowError.processFailed("Выбранный диапазон слова-паразита выходит за пределы медиа.")
+                    }
                     let id = "filler-mute-\(UUID().uuidString.lowercased())"
                     let outputAudio = layout.fillerMutedAudioURL(id: id)
                     let outputVideo = layout.fillerMutedVideoURL(id: id)
@@ -2746,6 +2762,16 @@ final class WorkflowEngine: @unchecked Sendable {
             }
             guard !selected.isEmpty else {
                 throw WorkflowError.processFailed("В выбранном фрагменте нет слов-паразитов для mute.")
+            }
+            let manifest = try store.load(from: projectURL)
+            let sourceDuration = try await requiredDuration(
+                of: URL(fileURLWithPath: manifest.sourceMediaPath), manifest: manifest
+            )
+            guard selected.allSatisfy({
+                $0.start.isFinite && $0.end.isFinite
+                    && $0.start >= 0 && $0.end > $0.start && $0.end <= sourceDuration
+            }) else {
+                throw WorkflowError.processFailed("Диапазон слова-паразита для фрагмента выходит за пределы исходного медиа.")
             }
             let intervals = selected.map {
                 ClosedRangeRecord(

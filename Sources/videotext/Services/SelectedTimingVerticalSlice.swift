@@ -333,7 +333,7 @@ struct SelectedTimingVerticalSlice {
         for cue in cues {
             guard !cue.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   cue.start >= 0,
-                  cue.end >= cue.start,
+                  cue.end > cue.start,
                   previousEnd.map({ cue.start >= $0 }) ?? true else {
                 throw WorkflowError.processFailed("Активная исходная расшифровка имеет недопустимые cue для selected timing перевода.")
             }
@@ -680,6 +680,13 @@ struct SeminarTextCoreTranscriptionEvidence: Codable {
     let outputDirectory: String
 }
 
+/// Whisper JSON-full control markers include both `[_BEG_]` and timestamp
+/// markers such as `[_TT_128]`. They stay in core JSON provenance, but are not
+/// spoken tokens for source units, tokenTimeline or timed-speech capability.
+private func isSelectedWhisperControlToken(_ text: String) -> Bool {
+    text.hasPrefix("[_") && text.hasSuffix("]")
+}
+
 /// Imports selected JSON-full artifacts from the same selected SeminarText
 /// attempt into the long-standing VideoText `whisper.json` shape. The legacy
 /// core consumers require only raw Whisper segment/token evidence. Their
@@ -818,8 +825,10 @@ struct SeminarTextCoreWhisperEvidenceImporter {
             guard let tokenOffsets = token["offsets"] as? [String: Any],
                   let tokenStart = number(tokenOffsets["from"]),
                   let tokenEnd = number(tokenOffsets["to"]),
-                  tokenStart >= 0, tokenEnd >= tokenStart,
+                  tokenStart >= 0, tokenEnd >= 0,
                   absoluteOffset + tokenStart / 1000 >= range.start - 0.000_001,
+                  absoluteOffset + tokenStart / 1000 <= range.end + 0.000_001,
+                  absoluteOffset + tokenEnd / 1000 >= range.start - 0.000_001,
                   absoluteOffset + tokenEnd / 1000 <= range.end + 0.000_001 else {
                 throw WorkflowError.processFailed("Selected JSON-full \(partID) содержит недопустимый token timing.")
             }
@@ -831,10 +840,11 @@ struct SeminarTextCoreWhisperEvidenceImporter {
         return tokens.contains { token in
             guard let text = (token["text"] as? String) ?? (token["token"] as? String),
                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !isSelectedWhisperControlToken(text),
                   let offsets = token["offsets"] as? [String: Any],
                   let start = number(offsets["from"]),
                   let end = number(offsets["to"]) else { return false }
-            return end > start
+            return start >= 0 && end >= 0 && end != start
         }
     }
 
@@ -967,7 +977,8 @@ struct TimedSourceDocument: Codable, Equatable {
               unitIDs.allSatisfy({ $0 > 0 }),
               Set(unitIDs).count == unitIDs.count,
               zip(unitIDs, unitIDs.dropFirst()).allSatisfy({ $0 < $1 }),
-              units.allSatisfy({ !$0.text.isEmpty && $0.start >= 0 && $0.end >= $0.start && !$0.sourcePartIDs.isEmpty }) else {
+              units.allSatisfy({ !$0.text.isEmpty && $0.start.isFinite && $0.end.isFinite
+                  && $0.start >= 0 && $0.end > $0.start && !$0.sourcePartIDs.isEmpty }) else {
             throw WorkflowError.processFailed("Selected timing source units нарушают базовую структуру.")
         }
         for (previous, current) in zip(units, units.dropFirst()) where current.start < previous.end {
@@ -980,9 +991,12 @@ struct TimedSourceDocument: Codable, Equatable {
         guard units.allSatisfy({ SelectedTimingHash.string($0.text) == $0.textSHA256 }) else {
             throw WorkflowError.processFailed("Selected timing source units имеют неверный text SHA-256.")
         }
-        // Token offsets retain native selected-Whisper evidence. Equal bounds
-        // are valid zero-width evidence; only reverse intervals are invalid.
-        guard tokenTimeline.allSatisfy({ !$0.text.isEmpty && $0.start >= 0 && $0.end >= $0.start && !$0.sourcePartID.isEmpty }) else {
+        // Token offsets are raw Whisper evidence, not executable ranges.
+        // Both boundaries must be nonnegative, but their direction is retained.
+        guard tokenTimeline.allSatisfy({
+            !$0.text.isEmpty && $0.start.isFinite && $0.end.isFinite
+                && $0.start >= 0 && $0.end >= 0 && !$0.sourcePartID.isEmpty
+        }) else {
             throw WorkflowError.processFailed("Selected timing source token timeline содержит недопустимый речевой интервал.")
         }
         let validUnitIDs = Set(unitIDs)
@@ -1105,18 +1119,16 @@ struct SelectedTimingImporter {
             _ = try verify(part.artifacts.srt, in: packageRoot, expectedPart: part.id, fileExtension: "srt")
             let jsonURL = try verify(part.artifacts.jsonFull, in: packageRoot, expectedPart: part.id, fileExtension: "json")
             let json = try JSONDecoder().decode(SelectedWhisperJSON.self, from: Data(contentsOf: jsonURL))
-            var previousTokenEnd: Int?
-            var previousAtomEnd: TimeInterval?
             for segment in json.transcription {
-                let spokenTokens = segment.tokens.filter { !Self.isControlToken($0.text) }
-                guard let firstToken = spokenTokens.first,
-                      let lastToken = spokenTokens.last else { continue }
+                let spokenTokens = segment.tokens.filter { !isSelectedWhisperControlToken($0.text) }
+                guard let firstToken = spokenTokens.first else { continue }
                 guard segment.offsets.from >= 0,
-                      segment.offsets.to >= segment.offsets.from,
-                      lastToken.offsets.to >= firstToken.offsets.from else {
+                      segment.offsets.to >= segment.offsets.from else {
                     throw WorkflowError.processFailed("Selected timing JSON содержит недопустимый segment interval.")
                 }
-                let collapsedTokenEnvelope = lastToken.offsets.to == firstToken.offsets.from
+                let collapsedTokenEnvelope = spokenTokens.allSatisfy {
+                    $0.offsets.from == firstToken.offsets.from && $0.offsets.to == firstToken.offsets.from
+                }
                 let segmentEnvelope: (start: TimeInterval, end: TimeInterval)?
                 if collapsedTokenEnvelope {
                     let start = part.absoluteOffsetSeconds + Double(segment.offsets.from) / 1000
@@ -1132,41 +1144,32 @@ struct SelectedTimingImporter {
                 }
                 for token in spokenTokens {
                     guard token.offsets.from >= 0,
-                          token.offsets.to >= token.offsets.from,
-                          previousTokenEnd.map({ token.offsets.from >= $0 }) ?? true else {
-                        throw WorkflowError.processFailed("Selected timing JSON содержит обратный token interval.")
+                          token.offsets.to >= 0 else {
+                        throw WorkflowError.processFailed("Selected timing JSON содержит недопустимый token boundary.")
                     }
-                    previousTokenEnd = token.offsets.to
                     // The canonical contract publishes token offsets in the
                     // selected JSON timebase. Shift them only by the chunk's
                     // absolute offset: do not clip, compress or infer timing
                     // from SRT/segment boundaries downstream.
-                    var start = part.absoluteOffsetSeconds + Double(token.offsets.from) / 1000
-                    var end = part.absoluteOffsetSeconds + Double(token.offsets.to) / 1000
+                    let start = part.absoluteOffsetSeconds + Double(token.offsets.from) / 1000
+                    let end = part.absoluteOffsetSeconds + Double(token.offsets.to) / 1000
                     guard start >= selectedRange.startSeconds - 0.000_001,
+                          start <= selectedRange.endSeconds + 0.000_001,
+                          end >= selectedRange.startSeconds - 0.000_001,
                           end <= selectedRange.endSeconds + 0.000_001 else {
                         throw WorkflowError.processFailed("Selected timing JSON выходит за published selected timing envelope.")
                     }
-                    if let previousAtomEnd {
-                        guard start + 0.000_001 >= previousAtomEnd else {
-                            throw WorkflowError.processFailed("Selected timing JSON содержит пересекающиеся absolute token intervals.")
-                        }
-                        start = max(start, previousAtomEnd)
-                        end = max(end, start)
-                    }
-                    // JSON-full is evidence from the chosen Whisper attempt.
-                    // A non-control token can legitimately have equal raw
-                    // offsets after Whisper/VAD time mapping. Preserve that
-                    // zero-width evidence verbatim; do not invent a duration
-                    // or discard its source text. Sentence units retain their
-                    // truthful envelope from the surrounding token evidence.
-                    previousAtomEnd = end
+                    // Preserve each selected Whisper boundary and token order.
+                    // Source units use an ordered range derived from a reverse
+                    // token's own boundaries. Only fully collapsed token timing
+                    // needs the native segment envelope. Neither changes raw
+                    // tokenTimeline values or order.
                     atoms.append(SelectedTimingAtom(
                         text: token.text,
                         start: start,
                         end: end,
-                        sourceUnitEnvelopeStart: segmentEnvelope?.start ?? start,
-                        sourceUnitEnvelopeEnd: segmentEnvelope?.end ?? end,
+                        sourceUnitEnvelopeStart: segmentEnvelope?.start ?? min(start, end),
+                        sourceUnitEnvelopeEnd: segmentEnvelope?.end ?? max(start, end),
                         maximumEnd: selectedRange.endSeconds,
                         partID: part.id,
                         confidence: token.confidence,
@@ -1233,7 +1236,7 @@ struct SelectedTimingImporter {
         atoms: [SelectedTimingAtom]
     ) -> [TimedSourceQualityEvidence] {
         units.compactMap { unit in
-            let matching = atoms.filter { $0.start < unit.end && $0.end > unit.start }
+            let matching = atoms.filter { $0.sourceUnitEnvelopeStart < unit.end && $0.sourceUnitEnvelopeEnd > unit.start }
             let confidences = matching.compactMap(\.confidence)
             let noSpeech = matching.compactMap(\.noSpeechProbability)
             guard !confidences.isEmpty || !noSpeech.isEmpty else { return nil }
@@ -1256,10 +1259,6 @@ struct SelectedTimingImporter {
             throw WorkflowError.processFailed("Selected timing artifact hash не совпадает: \(artifact.path).")
         }
         return url
-    }
-
-    private static func isControlToken(_ value: String) -> Bool {
-        value.hasPrefix("[_") && value.hasSuffix("_]")
     }
 
     private static func endsSentence(_ value: String) -> Bool {

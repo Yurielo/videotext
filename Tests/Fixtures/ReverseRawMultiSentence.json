@@ -1,0 +1,16 @@
+{
+  "result": {"language": "en"},
+  "transcription": [
+    {
+      "offsets": {"from": 0, "to": 1200},
+      "no_speech_prob": 0.04,
+      "tokens": [
+        {"text": " One", "offsets": {"from": 100, "to": 80}, "p": 0.91},
+        {"text": ".", "offsets": {"from": 120, "to": 140}, "p": 0.90},
+        {"text": " Two", "offsets": {"from": 200, "to": 300}, "p": 0.88},
+        {"text": ".", "offsets": {"from": 300, "to": 320}, "p": 0.92},
+        {"text": "[_TT_128]", "offsets": {"from": 320, "to": 320}, "p": 1.0}
+      ]
+    }
+  ]
+}

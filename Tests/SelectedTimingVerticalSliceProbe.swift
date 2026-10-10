@@ -30,6 +30,90 @@ struct SelectedTimingVerticalSliceProbe {
         )
         print("VALID_TOKEN_TIMING_UNCHANGED_PASS")
 
+        let reverseRawPackage = root.appendingPathComponent("reverse-raw-package")
+        try makeReverseRawPackage(at: reverseRawPackage, media: media)
+        let reverseRawSource = try importer.importSelectedPackage(
+            packageRoot: reverseRawPackage,
+            expectedMediaURL: media,
+            expectedLanguage: .en
+        )
+        let expectedRawTokens: [(String, Double, Double)] = [
+            (" Um", 0.12, 0.08), (" I", 0.15, 0.25),
+            (" um", 0.34, 0.31), (" speak.", 0.4, 0.62)
+        ]
+        try require(reverseRawSource.tokenTimeline.count == expectedRawTokens.count,
+                    "reverse raw tokens were removed")
+        try require(zip(reverseRawSource.tokenTimeline, expectedRawTokens).allSatisfy { token, expected in
+            token.text == expected.0 && token.start == expected.1 && token.end == expected.2
+        }, "reverse raw token endpoints or source order changed")
+        try require(reverseRawSource.units.allSatisfy { $0.start >= 0 && $0.end >= $0.start },
+                    "reverse raw evidence produced invalid executable source units")
+        try reverseRawSource.validateCoverage()
+        let reverseRawRoundTrip = try JSONDecoder().decode(
+            TimedSourceDocument.self, from: JSONEncoder().encode(reverseRawSource)
+        )
+        try require(reverseRawRoundTrip == reverseRawSource,
+                    "reverse raw token timing or order did not survive Codable round-trip")
+        let reverseFillerReport = try FillerWordService().analyze(
+            selectedTiming: reverseRawRoundTrip,
+            cues: try reverseRawRoundTrip.subtitleCues(),
+            language: .en,
+            transcriptRevisionID: "reverse-raw-evidence"
+        )
+        try require(reverseFillerReport.words.map(\.text) == ["Um", "I", "um", "speak."],
+                    "selected filler analysis lost or reordered reverse raw tokens")
+        try require(reverseFillerReport.words[0].start == 0.12 && reverseFillerReport.words[0].end == 0.08
+                    && reverseFillerReport.words[2].start == 0.34 && reverseFillerReport.words[2].end == 0.31,
+                    "selected filler analysis changed reverse raw endpoints")
+        try require(reverseFillerReport.candidates.filter { $0.normalized == "um" }.count == 2
+                    && reverseFillerReport.candidates.allSatisfy { $0.start >= 0 && $0.end > $0.start },
+                    "selected filler analysis lost reverse words or emitted invalid executable candidates")
+        var invalidReverseUnit = reverseRawSource
+        invalidReverseUnit.units[0].start = invalidReverseUnit.units[0].end + 0.01
+        try expectFailure { try invalidReverseUnit.validateCoverage() }
+        print("REVERSE_RAW_SELECTED_TIMING_PRESERVATION_PASS")
+
+        let twoSentencePackage = root.appendingPathComponent("two-sentence-reverse-raw-package")
+        try makeReverseRawPackage(
+            at: twoSentencePackage, media: media,
+            fixtureName: "ReverseRawMultiSentence.json", sourceText: " One. Two.", srtText: "One. Two."
+        )
+        let twoSentenceSource = try importer.importSelectedPackage(
+            packageRoot: twoSentencePackage, expectedMediaURL: media, expectedLanguage: .en
+        )
+        try require(twoSentenceSource.sourceText == " One. Two."
+                    && twoSentenceSource.tokenTimeline.map(\.text) == [" One", ".", " Two", "."]
+                    && twoSentenceSource.tokenTimeline[0].start == 0.1
+                    && twoSentenceSource.tokenTimeline[0].end == 0.08,
+                    "two-sentence import changed reverse speech tokens or retained [_TT_128] as source text")
+        try require(twoSentenceSource.units.map(\.text) == [" One.", " Two."]
+                    && twoSentenceSource.units[0].end <= twoSentenceSource.units[1].start
+                    && twoSentenceSource.units.allSatisfy { $0.start >= 0 && $0.end > $0.start },
+                    "reverse token expanded its derived unit across the next sentence")
+        try twoSentenceSource.validateCoverage()
+        var overlappingDerivedUnit = twoSentenceSource
+        overlappingDerivedUnit.units[1].start = overlappingDerivedUnit.units[0].end - 0.01
+        try expectFailure { try overlappingDerivedUnit.validateCoverage() }
+        var zeroWidthDerivedUnit = twoSentenceSource
+        zeroWidthDerivedUnit.units[0].end = zeroWidthDerivedUnit.units[0].start
+        try expectFailure { try zeroWidthDerivedUnit.validateCoverage() }
+        let twoSentenceFiller = try FillerWordService().analyze(
+            selectedTiming: twoSentenceSource,
+            cues: try twoSentenceSource.subtitleCues(),
+            language: .en, transcriptRevisionID: "two-sentence-control-filter"
+        )
+        try require(twoSentenceFiller.words.map(\.text) == ["One", "Two"],
+                    "selected filler words retained [_TT_128] control marker")
+        let twoSentenceCoreJSON = try SeminarTextCoreWhisperEvidenceImporter().importSelectedWhisperJSON(
+            packageRoot: twoSentencePackage, expectedMediaURL: media, expectedLanguage: .en
+        )
+        let twoSentenceCoreObject = try JSONSerialization.jsonObject(with: twoSentenceCoreJSON) as? [String: Any]
+        let twoSentenceCoreTokens = ((twoSentenceCoreObject?["transcription"] as? [[String: Any]])?.first?["tokens"] as? [[String: Any]]) ?? []
+        try require(twoSentenceCoreTokens.map { $0["text"] as? String ?? "" }
+                    == [" One", ".", " Two", ".", "[_TT_128]"],
+                    "core whisper.json removed or reordered raw [_TT_128] marker")
+        print("REVERSE_RAW_TWO_SENTENCE_DERIVED_UNIT_BOUNDARY_PASS")
+
         let overlappingPreparedRanges = root.appendingPathComponent("overlapping-prepared-ranges")
         try makeOverlappingPreparedRangePackage(at: overlappingPreparedRanges, media: media)
         let overlappingPreparedSource = try importer.importSelectedPackage(
@@ -98,8 +182,8 @@ struct SelectedTimingVerticalSliceProbe {
 
         var fillerSource = source
         fillerSource.tokenTimeline = [
-            TimedSourceToken(text: " Um", start: 3.55, end: 3.65, sourcePartID: "part_0000"),
-            TimedSourceToken(text: " um", start: 3.70, end: 3.80, sourcePartID: "part_0000")
+            TimedSourceToken(text: " Um", start: 0.55, end: 0.65, sourcePartID: "part_0000"),
+            TimedSourceToken(text: " um", start: 0.70, end: 0.80, sourcePartID: "part_0000")
         ]
         let fillerReport = try FillerWordService().analyze(
             selectedTiming: fillerSource,
@@ -163,9 +247,16 @@ struct SelectedTimingVerticalSliceProbe {
             )
         }
         print("INVALID_SEGMENT_WITH_COLLAPSED_TOKENS_REJECTED")
-        let malformedPackage = root.appendingPathComponent("malformed-package")
-        try makePackage(at: malformedPackage, media: media, overlappingTokens: true)
-        try expectFailure { _ = try importer.importSelectedPackage(packageRoot: malformedPackage, expectedMediaURL: media, expectedLanguage: .en) }
+        let overlappingRawPackage = root.appendingPathComponent("overlapping-raw-package")
+        try makePackage(at: overlappingRawPackage, media: media, overlappingTokens: true)
+        let overlappingRawSource = try importer.importSelectedPackage(
+            packageRoot: overlappingRawPackage, expectedMediaURL: media, expectedLanguage: .en
+        )
+        try require(overlappingRawSource.tokenTimeline[1].text == " save"
+                    && overlappingRawSource.tokenTimeline[1].start == 0.05
+                    && overlappingRawSource.tokenTimeline[1].end == 0.2,
+                    "overlapping raw token evidence was rejected or rewritten")
+        try overlappingRawSource.validateCoverage()
 
         let originalSRT = root.appendingPathComponent("full.srt")
         let srtBytes = Data("1\n00:00:00,000 --> 00:00:01,000\nLegacy full SRT\n".utf8)
@@ -247,6 +338,41 @@ struct SelectedTimingVerticalSliceProbe {
             "source": ["media_sha256": SelectedTimingHash.file(media)],
             "transcription": ["language": "en"],
             "parts": [["id": partID, "order": 0, "absolute_offset_seconds": 0.0, "absolute_range": ["start_seconds": 0.0, "end_seconds": 5.5], "selected_timing_absolute_range": ["start_seconds": 0.0, "end_seconds": 5.5], "selected_attempt": "initial", "artifacts": ["txt": artifact(txtURL), "srt": artifact(srtURL), "json_full": artifact(jsonURL)]]]
+        ]
+        try JSONSerialization.data(withJSONObject: manifest).write(to: root.appendingPathComponent("manifest.json"))
+    }
+
+    private static func makeReverseRawPackage(
+        at root: URL, media: URL,
+        fixtureName: String = "ReverseRawTokens.json",
+        sourceText: String = " Um I um speak.",
+        srtText: String = "Um I um speak."
+    ) throws {
+        let parts = root.appendingPathComponent("parts")
+        try FileManager.default.createDirectory(at: parts, withIntermediateDirectories: true)
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/\(fixtureName)")
+        let jsonURL = parts.appendingPathComponent("part_0000.json")
+        try Data(contentsOf: fixture).write(to: jsonURL)
+        let txtURL = parts.appendingPathComponent("part_0000.txt")
+        try Data(sourceText.utf8).write(to: txtURL)
+        let srtURL = parts.appendingPathComponent("part_0000.srt")
+        try Data("1\n00:00:00,000 --> 00:00:01,200\n\(srtText)\n".utf8).write(to: srtURL)
+        func artifact(_ url: URL) -> [String: String] {
+            ["path": "parts/\(url.lastPathComponent)", "sha256": SelectedTimingHash.file(url)]
+        }
+        let manifest: [String: Any] = [
+            "schema_version": 1,
+            "artifact_type": "seminartext.selected_whisper_timing",
+            "source": ["media_sha256": SelectedTimingHash.file(media)],
+            "transcription": ["language": "en"],
+            "parts": [[
+                "id": "part_0000", "order": 0, "absolute_offset_seconds": 0.0,
+                "absolute_range": ["start_seconds": 0.0, "end_seconds": 1.2],
+                "selected_timing_absolute_range": ["start_seconds": 0.0, "end_seconds": 1.2],
+                "selected_attempt": "initial",
+                "artifacts": ["txt": artifact(txtURL), "srt": artifact(srtURL), "json_full": artifact(jsonURL)]
+            ]]
         ]
         try JSONSerialization.data(withJSONObject: manifest).write(to: root.appendingPathComponent("manifest.json"))
     }
