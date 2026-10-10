@@ -138,6 +138,7 @@ class RiskClassifierTests(unittest.TestCase):
             'whisper_cli="$PROJECT_ROOT/tools/whisper-cli"\n"$whisper_cli" "$@"',
             'declare -a cmd=(tools/whisper-wrapper -m "$MODEL")',
             'readonly cmd=(tools/whisper-wrapper -m "$MODEL")',
+            'cmd+=(./tools/whisper-wrapper -m "$MODEL")',
             'tools/whisper-wrapper "$@"',
             'if ready; then tools/whisper-wrapper "$@"; fi',
         ):
@@ -168,7 +169,11 @@ class RiskClassifierTests(unittest.TestCase):
         )
 
     def test_native_loading_is_level_b(self):
-        for changed_text in ('dlopen("@rpath/libwhisper.dylib", RTLD_NOW)', '@rpath/libwhisper.dylib'):
+        for changed_text in (
+            'dlopen("@rpath/libwhisper.dylib", RTLD_NOW)',
+            '@rpath/libwhisper.dylib',
+            'let loaded = Bundle(path: pluginPath)?.load()',
+        ):
             with self.subTest(changed_text=changed_text):
                 self.assertLevel(
                     "LEVEL_B",
@@ -178,6 +183,28 @@ class RiskClassifierTests(unittest.TestCase):
                         changed_text=changed_text,
                     ),
                 )
+
+    def test_runtime_launch_apis_are_level_b(self):
+        for changed_text in ('Process.run(arguments)', 'posix_spawn(&pid, path, nil, nil, argv, environ)'):
+            with self.subTest(changed_text=changed_text):
+                self.assertLevel(
+                    "LEVEL_B",
+                    classifier.Change(
+                        "A",
+                        "Sources/videotext/Services/StatusPresentation.swift",
+                        changed_text=changed_text,
+                    ),
+                )
+
+    def test_home_directory_output_path_remains_level_a(self):
+        self.assertLevel(
+            "LEVEL_A",
+            classifier.Change(
+                "M",
+                "Sources/videotext/Services/WorkflowEngine.swift",
+                changed_text='let output = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies")',
+            ),
+        )
 
     def test_xcode_and_build_configuration_are_level_b(self):
         self.assertLevel("LEVEL_B", classifier.Change("M", "VideoText.xcodeproj/project.pbxproj"))

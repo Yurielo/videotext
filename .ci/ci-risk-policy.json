@@ -98,7 +98,7 @@
     },
     {
       "code": "runtime-discovery-marker",
-      "pattern": "(?i)(/opt/homebrew|/usr/local|/(?:usr/)?s?bin|\\$\\{?HOME(?=\\}|[:%+\\-]|\\b)|~/|NSHomeDirectory\\s*\\(|homeDirectoryForCurrentUser|command -v|(?:shutil\\.)?which\\s*\\(|isExecutableFile|processInfo\\.environment|os\\.environ(?:\\.get\\s*\\(\\s*[\"']PATH[\"']|\\s*\\[\\s*[\"']PATH[\"'])|environment\\s*\\[\\s*[\"']PATH[\"']|getenv\\s*\\(\\s*[\"']PATH[\"']|Bundle\\.main|launchPath|executableURL|DYLD_|@rpath|dlopen\\()"
+      "pattern": "(?i)(/opt/homebrew|/usr/local|/(?:usr/)?s?bin|\\$\\{?HOME(?=\\}|[:%+\\-]|\\b)|~/|command -v|(?:shutil\\.)?which\\s*\\(|isExecutableFile|processInfo\\.environment|os\\.environ(?:\\.get\\s*\\(\\s*[\"']PATH[\"']|\\s*\\[\\s*[\"']PATH[\"'])|environment\\s*\\[\\s*[\"']PATH[\"']|getenv\\s*\\(\\s*[\"']PATH[\"']|Bundle\\.main|launchPath|executableURL|DYLD_|@rpath|dlopen\\()"
     },
     {
       "code": "shell-path-assignment-marker",
@@ -106,7 +106,7 @@
     },
     {
       "code": "shell-executable-selection-marker",
-      "pattern": "(?im)(?:^\\s*(?:(?:local|declare|readonly)(?:\\s+-[A-Za-z]+)?\\s+)?[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*\\(|^\\s*(?:local\\s+(?:-a\\s+)?)?[A-Za-z_][A-Za-z0-9_]*(?:cli|binary|executable|tool|runner|launcher|wrapper|command)[A-Za-z0-9_]*\\s*=\\s*[\\\"']?[^\\n]*(?:/|\\$)[^\\n]*|^\\s*(?:exec\\s+)?[\\\"']?\\$[A-Za-z_][A-Za-z0-9_]*[\\\"']?(?:\\s|$))"
+      "pattern": "(?im)(?:^\\s*(?:(?:local|declare|readonly)(?:\\s+-[A-Za-z]+)?\\s+)?[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*\\(|^\\s*(?:(?:local|declare|readonly)(?:\\s+-[A-Za-z]+)?\\s+)?[A-Za-z_][A-Za-z0-9_]*\\s*\\+=\\s*\\(\\s*(?:\\./|\\.\\./|tools/|/|\\$)|^\\s*(?:local\\s+(?:-a\\s+)?)?[A-Za-z_][A-Za-z0-9_]*(?:cli|binary|executable|tool|runner|launcher|wrapper|command)[A-Za-z0-9_]*\\s*=\\s*[\\\"']?[^\\n]*(?:/|\\$)[^\\n]*|^\\s*(?:exec\\s+)?[\\\"']?\\$[A-Za-z_][A-Za-z0-9_]*[\\\"']?(?:\\s|$))"
     },
     {
       "code": "shell-direct-exec-marker",
@@ -114,7 +114,15 @@
     },
     {
       "code": "runtime-discovery-api-marker",
-      "pattern": "(?is)(urlForApplication\\s*\\(|(?:applicationSupportDirectory|userDomainMask)[\\s\\S]{0,512}(?:executable|binary|cli|tool|runner|launcher|wrapper)|(?:executable|binary|cli|tool|runner|launcher|wrapper)[\\s\\S]{0,512}(?:applicationSupportDirectory|userDomainMask)|fileExists\\s*\\([\\s\\S]{0,512}(?:ffmpeg|ffprobe|whisper|ollama|seminartext|homebrew|(?:usr/)?s?bin|executable|binary|cli)|(?:ffmpeg|ffprobe|whisper|ollama|seminartext|homebrew|(?:usr/)?s?bin|executable|binary|cli)[\\s\\S]{0,512}fileExists\\s*\\()"
+      "pattern": "(?is)(urlForApplication\\s*\\(|(?:applicationSupportDirectory|userDomainMask|NSHomeDirectory|homeDirectoryForCurrentUser)[\\s\\S]{0,512}(?:executable|binary|cli|tool|runner|launcher|wrapper)|(?:executable|binary|cli|tool|runner|launcher|wrapper)[\\s\\S]{0,512}(?:applicationSupportDirectory|userDomainMask|NSHomeDirectory|homeDirectoryForCurrentUser)|fileExists\\s*\\([\\s\\S]{0,512}(?:ffmpeg|ffprobe|whisper|ollama|seminartext|homebrew|(?:usr/)?s?bin|executable|binary|cli)|(?:ffmpeg|ffprobe|whisper|ollama|seminartext|homebrew|(?:usr/)?s?bin|executable|binary|cli)[\\s\\S]{0,512}fileExists\\s*\\()"
+    },
+    {
+      "code": "runtime-launch-api-marker",
+      "pattern": "(?i)(Process\\s*\\.\\s*(?:run|launch)|posix_spawn(?:p)?\\s*\\()"
+    },
+    {
+      "code": "native-loading-api-marker",
+      "pattern": "(?is)Bundle\\s*\\([^\\n]*\\)[^\\n]{0,256}\\.load\\s*\\("
     },
     {
       "code": "native-architecture-marker",
