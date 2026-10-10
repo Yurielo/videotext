@@ -86,7 +86,7 @@
     },
     {
       "code": "runtime-discovery-marker",
-      "pattern": "(?i)(/opt/homebrew|/usr/local|/(?:usr/)?bin|command -v|shutil\\.which\\s*\\(|isExecutableFile|processInfo\\.environment|environment\\s*\\[\\s*[\"']PATH[\"']|getenv\\s*\\(\\s*[\"']PATH[\"']|Bundle\\.main|launchPath|executableURL|DYLD_|@rpath|dlopen\\()"
+      "pattern": "(?i)(/opt/homebrew|/usr/local|/(?:usr/)?s?bin|command -v|shutil\\.which\\s*\\(|isExecutableFile|processInfo\\.environment|environment\\s*\\[\\s*[\"']PATH[\"']|getenv\\s*\\(\\s*[\"']PATH[\"']|Bundle\\.main|launchPath|executableURL|DYLD_|@rpath|dlopen\\()"
     },
     {
       "code": "native-architecture-marker",

@@ -163,7 +163,12 @@ def collect_changes(repo: pathlib.Path, base: str, head: str) -> list[Change]:
                 mode_changed=(
                     new_mode not in {"100644", "100755"}
                     if short_status == "A"
-                    else short_status != "D" and old_mode != new_mode
+                    else short_status != "D"
+                    and (
+                        old_mode != new_mode
+                        or old_mode not in {"100644", "100755"}
+                        or new_mode not in {"100644", "100755"}
+                    )
                 ),
             )
         )

@@ -128,13 +128,14 @@ class RiskClassifierTests(unittest.TestCase):
             'ffmpeg = shutil.which("ffmpeg")',
             'FileManager.default.fileExists(atPath: "/usr/bin/ffmpeg")',
             'process.launchPath = "/bin/ffmpeg"',
+            'let tool = "/usr/sbin/helper"',
         ):
             with self.subTest(changed_text=changed_text):
                 self.assertLevel(
                     "LEVEL_B",
                     classifier.Change(
-                        "A",
-                        "Sources/videotext/Services/NewToolLocator.swift",
+                        "M",
+                        "Sources/videotext/Services/WorkflowEngine.swift",
                         changed_text=changed_text,
                     ),
                 )
@@ -288,6 +289,21 @@ class GitClassifierIntegrationTests(unittest.TestCase):
         link.symlink_to("/tmp/outside-snapshot.swift")
         head = self.commit("symlink")
         result = classifier.classify_repository(self.repo, self.base, head, classifier.POLICY_PATH)
+        self.assertEqual(result["level"], "LEVEL_B")
+        self.assertTrue(result["changes"][0]["modeChanged"])
+
+    def test_modified_symlink_fails_closed(self):
+        link = self.repo / "Sources" / "videotext" / "UI" / "Injected.swift"
+        link.symlink_to("first-target.swift")
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "tracked symlink"], cwd=self.repo, check=True)
+        symlink_base = self.sha()
+        link.unlink()
+        link.symlink_to("second-target.swift")
+        head = self.commit("retarget symlink")
+        result = classifier.classify_repository(
+            self.repo, symlink_base, head, classifier.POLICY_PATH
+        )
         self.assertEqual(result["level"], "LEVEL_B")
         self.assertTrue(result["changes"][0]["modeChanged"])
 
