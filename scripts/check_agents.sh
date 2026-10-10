@@ -84,5 +84,11 @@ done
   fail "AGENTS.md не содержит команду release-gate"
 /usr/bin/grep -Fiq "flaky-результат или исправление сбрасывает счетчик в ноль" "$AGENTS_FILE" || \
   fail "AGENTS.md не сбрасывает E2E-счетчик после ошибки"
+[[ -s "$ROOT/docs/CI_COST_POLICY.md" ]] || fail "отсутствует docs/CI_COST_POLICY.md"
+[[ -s "$ROOT/.ci/ci-risk-policy.json" ]] || fail "отсутствует deterministic CI risk policy"
+/usr/bin/grep -Fq "scripts/ci_risk_classifier.py" "$AGENTS_FILE" || \
+  fail "AGENTS.md не маршрутизирует deterministic CI risk classifier"
+/usr/bin/grep -Fiq "billing/spending" "$AGENTS_FILE" || \
+  fail "AGENTS.md не содержит billing hard stop"
 
 printf 'Agent integration PASS: %d custom agents, TOML-схема, маршрутизация и QA-gate проверены.\n' "${#roles[@]}"

@@ -1,66 +1,173 @@
-name: Core Candidate Gate
+name: Paid macOS Infrastructure Gate
 
-# Hosted macOS is an explicit release/governance gate, not a development loop.
-# Run this workflow manually on the exact Candidate/pre-merge ref that needs
-# acceptance. Ordinary PR pushes and main pushes do not consume hosted macOS.
+# Cost boundary: never add push, pull_request, schedule, or workflow_call here.
+# Governed dispatch starts with scripts/dispatch_paid_macos_gate.py.
 on:
   workflow_dispatch:
     inputs:
-      reason:
-        description: "Why the hosted macOS gate is required"
+      base_sha:
+        description: "Exact classified base commit SHA"
+        required: true
+        type: string
+      expected_sha:
+        description: "Exact 40-character LEVEL_B commit SHA"
+        required: true
+        type: string
+      classification_sha256:
+        description: "SHA-256 of deterministic local classification JSON"
+        required: true
+        type: string
+      attempt:
+        description: "Initial validation or the single controlled infrastructure retry"
         required: true
         type: choice
         options:
-          - candidate
-          - pre-merge
-          - exceptional
+          - initial
+          - infrastructure_retry
+      retry_evidence:
+        description: "Compact retry evidence JSON; {} for initial"
+        required: true
+        default: "{}"
+        type: string
 
-# A newer explicit validation for the same ref supersedes an older one.
+permissions:
+  contents: read
+  actions: read
+
 concurrency:
-  group: videotext-ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: videotext-paid-macos-${{ inputs.expected_sha }}
+  cancel-in-progress: false
 
 jobs:
-  core-candidate:
-    name: Core Candidate / Pre-merge
+  clean-build-toolchain:
+    if: ${{ github.run_attempt == 1 && github.sha == inputs.expected_sha }}
+    name: Exact-SHA clean macOS build/toolchain validation
     runs-on: macos-14
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
-      - name: Record exact source identity
-        run: git rev-parse HEAD
-      - name: Quality Gate — owned TMP lifecycle
-        run: scripts/test_owned_tmp.sh
-      - name: Validate development baseline
-        run: scripts/test_baseline_guard.sh
-      - name: Validate Whisper VAD and long-form recovery
-        run: scripts/test_whisper_vad.sh
-      - name: Validate transcription quality
-        run: scripts/test_transcription_quality.sh
-      - name: Validate project schema
-        run: scripts/test_project_schema.sh
-      - name: Validate human review
-        run: scripts/test_human_review.sh
-      - name: Validate topic analysis
-        run: scripts/test_topics.sh
-      - name: Validate topic review matrix
-        run: scripts/test_topic_matrix.sh
-      - name: Validate result discovery and access contract
-        run: scripts/test_result_access.sh
-      - name: Validate application/process lifecycle
+          persist-credentials: false
+          ref: ${{ inputs.expected_sha }}
+
+      - name: Verify exact SHA and retry contract
+        env:
+          ATTEMPT: ${{ inputs.attempt }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          RETRY_EVIDENCE: ${{ inputs.retry_evidence }}
         run: |
-          scripts/test_process_shutdown.sh
-          scripts/test_application_lifecycle.sh
-      - name: Build exact core source
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+
+          sys.path.insert(0, "scripts")
+          import dispatch_paid_macos_gate as guard
+
+          expected = os.environ["EXPECTED_SHA"]
+          base = os.environ["BASE_SHA"]
+          if not re.fullmatch(r"[0-9a-f]{40}", expected):
+              raise SystemExit("expected_sha must be a full lowercase SHA")
+          if not re.fullmatch(r"[0-9a-f]{40}", base):
+              raise SystemExit("base_sha must be a full lowercase SHA")
+          actual = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          if actual != expected:
+              raise SystemExit(f"exact SHA mismatch: {actual} != {expected}")
+          default_branch = os.environ["DEFAULT_BRANCH"]
+          subprocess.run(
+              [
+                  "git",
+                  "fetch",
+                  "--quiet",
+                  "origin",
+                  f"refs/heads/{default_branch}:refs/remotes/origin/{default_branch}",
+              ],
+              check=True,
+          )
+          canonical_base = subprocess.check_output(
+              ["git", "merge-base", f"origin/{default_branch}", expected], text=True
+          ).strip()
+          if base != canonical_base:
+              raise SystemExit(f"base_sha is not canonical merge-base: {base} != {canonical_base}")
+
+          same_sha_runs = guard.workflow_runs(expected)
+          prior_same_sha_runs = [
+              item for item in same_sha_runs if str(item["id"]) != os.environ["GITHUB_RUN_ID"]
+          ]
+
+          attempt = os.environ["ATTEMPT"]
+          evidence = json.loads(os.environ["RETRY_EVIDENCE"])
+          if attempt == "initial":
+              if evidence != {}:
+                  raise SystemExit("initial attempt must not contain retry evidence")
+              if prior_same_sha_runs:
+                  raise SystemExit("initial attempt is not the first exact-SHA dispatch")
+          elif attempt == "infrastructure_retry":
+              if len(prior_same_sha_runs) != 1:
+                  raise SystemExit("only one same-SHA infrastructure retry is permitted")
+              verified_failure_class = guard.classify_prior_failure(
+                  evidence.get("priorRunId", 0), expected
+              )
+              guard.validate_retry_evidence(
+                  evidence,
+                  expected,
+                  prior_same_sha_runs,
+                  verified_failure_class,
+              )
+          else:
+              raise SystemExit("unknown attempt type")
+          PY
+
+      - name: Verify deterministic LEVEL_B eligibility
         env:
-          VIDEOTEXT_APP_PATH: ${{ runner.temp }}/videotext-core.app
+          BASE_SHA: ${{ inputs.base_sha }}
+          CLASSIFICATION_SHA256: ${{ inputs.classification_sha256 }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          python3 scripts/ci_risk_classifier.py \
+            --base "$BASE_SHA" \
+            --head "$EXPECTED_SHA" \
+            --output "$RUNNER_TEMP/ci-risk.json" \
+            > "$RUNNER_TEMP/ci-risk.stdout.json"
+          python3 - "$RUNNER_TEMP/ci-risk.json" "$CLASSIFICATION_SHA256" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          expected_digest = sys.argv[2]
+          actual_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+          result = json.loads(path.read_text(encoding="utf-8"))
+          if actual_digest != expected_digest:
+              raise SystemExit("classification evidence digest mismatch")
+          if result["level"] != "LEVEL_B" or not result["decision"]["hostedMacosEligible"]:
+              raise SystemExit("paid macOS is not eligible for this diff")
+          PY
+
+      - name: Record clean toolchain identity
+        run: |
+          sw_vers
+          xcodebuild -version
+          swiftc --version
+
+      - name: Build exact source snapshot
+        env:
+          VIDEOTEXT_APP_PATH: ${{ runner.temp }}/videotext-infrastructure-gate.app
         run: scripts/build_app.sh
-      - name: Verify core bundle
+
+      - name: Verify bundle, signature, and native architecture
         env:
-          VIDEOTEXT_APP_PATH: ${{ runner.temp }}/videotext-core.app
+          VIDEOTEXT_APP_PATH: ${{ runner.temp }}/videotext-infrastructure-gate.app
         run: |
           codesign --verify --deep --strict "$VIDEOTEXT_APP_PATH"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$VIDEOTEXT_APP_PATH/Contents/Info.plist")" = "local.codex.videotext.v3"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$VIDEOTEXT_APP_PATH/Contents/Info.plist")" = "0.6.8"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$VIDEOTEXT_APP_PATH/Contents/Info.plist")" = "2026.09.25.1"
+          file "$VIDEOTEXT_APP_PATH/Contents/MacOS/videotext" | grep -Eq 'Mach-O.*(arm64|x86_64|universal)'
