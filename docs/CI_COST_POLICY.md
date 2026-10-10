@@ -34,7 +34,11 @@ python3 scripts/ci_risk_classifier.py --base <full-base-sha> --head <full-head-s
 Rules live in `.ci/ci-risk-policy.json`. The JSON result records changed paths,
 change types, reasons, exact SHAs, and hosted-macOS eligibility. Protected paths,
 native files, infrastructure markers, mixed diffs, and unknown paths classify
-as `LEVEL_B`. An empty diff is fail-closed and not eligible for a hosted run.
+as `LEVEL_B`. Added symlinks and other non-regular modes, FAT/FAT64 native
+binaries, policy self-changes, and runtime-discovery markers are also
+fail-closed B inputs. The policy loader refuses a policy that removes protection
+from its classifier, dispatcher, tests, or paid workflow. An empty diff is
+fail-closed and not eligible for a hosted run.
 
 The classifier is a policy input. LLM judgment may explain a result but cannot
 replace or downgrade it. Ambiguous infrastructure-sensitive changes stay B
@@ -47,19 +51,51 @@ trigger. The supported entry point is:
 
 ```bash
 python3 scripts/dispatch_paid_macos_gate.py \
-  <full-expected-sha> --ref <remote-branch>
+  <full-expected-sha> --ref <remote-branch> \
+  --local-gate-evidence <exact-sha-local-gates.json>
 ```
 
 The dispatcher resolves the remote branch, runs the classifier, rejects A,
 requires its own checkout to be clean and exactly at the expected SHA, records
-the classification digest, and refuses a second initial attempt across the
+the classification digest, verifies exact-SHA machine-readable evidence for
+every governed local gate, and refuses a second initial attempt across the
 complete exact-SHA run history. A local exact-SHA lock prevents concurrent
 dispatches from the governed owner Mac. The
 workflow checks out `expected_sha`, verifies exact identity, recomputes the
 canonical merge-base against the current default branch, recomputes the
 classification, and validates the digest before its bounded build/toolchain
 check. It uses read-only permissions, SHA-scoped concurrency, no automatic
-rerun, and a 20-minute timeout.
+rerun, and a 20-minute timeout. The read-only token includes `checks: read`
+only so the single controlled retry can inspect machine check annotations.
+
+Local-gate evidence uses this schema. Every governed gate must appear exactly
+once, either in `completedGates` or in `notApplicableGates` with a non-empty
+reason. `evidenceSha256` identifies the underlying local evidence bundle; the
+summary itself is exact-SHA-bound and recorded by `ci-cd-engineer`.
+
+```json
+{
+  "schemaVersion": 1,
+  "expectedSha": "<full-sha>",
+  "classification": "LEVEL_B",
+  "status": "PASS",
+  "completedGates": [
+    "focused-tests",
+    "regression",
+    "real-scenarios",
+    "independent-qa-review",
+    "independent-code-review",
+    "core-e2e",
+    "candidate-identity",
+    "codesign-lifecycle",
+    "owner-test"
+  ],
+  "notApplicableGates": {},
+  "evidenceSha256": "<sha256-of-local-evidence-bundle>",
+  "recordedBy": "ci-cd-engineer",
+  "recordedAt": "2026-10-11T12:00:00Z"
+}
+```
 
 A single same-SHA retry is possible only with a JSON evidence file containing:
 

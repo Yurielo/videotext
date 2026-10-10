@@ -122,6 +122,20 @@ class RiskClassifierTests(unittest.TestCase):
                 changed_text='let path = "/opt/homebrew/bin/ffmpeg"',
             ),
         )
+        for changed_text in (
+            'let path = ProcessInfo.processInfo.environment["PATH"]',
+            'FileManager.default.isExecutableFile(atPath: candidate)',
+            'ffmpeg = shutil.which("ffmpeg")',
+        ):
+            with self.subTest(changed_text=changed_text):
+                self.assertLevel(
+                    "LEVEL_B",
+                    classifier.Change(
+                        "A",
+                        "Sources/videotext/Services/NewToolLocator.swift",
+                        changed_text=changed_text,
+                    ),
+                )
 
     def test_native_architecture_and_toolchain_are_level_b(self):
         self.assertLevel(
@@ -167,6 +181,17 @@ class RiskClassifierTests(unittest.TestCase):
             "LEVEL_B",
             classifier.Change("M", "Sources/videotext/UI/ContentView.swift", mode_changed=True),
         )
+
+    def test_policy_cannot_unprotect_its_bootstrap_files(self):
+        weakened = dict(POLICY)
+        weakened["levelBExactPaths"] = [
+            path for path in POLICY["levelBExactPaths"] if path != ".ci/ci-risk-policy.json"
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "policy.json"
+            path.write_text(json.dumps(weakened), encoding="utf-8")
+            with self.assertRaisesRegex(classifier.ClassificationError, "cannot unprotect"):
+                classifier.load_policy(path)
 
     def test_empty_diff_is_not_hosted_eligible(self):
         result = self.assertLevel("LEVEL_B")
@@ -238,6 +263,23 @@ class GitClassifierIntegrationTests(unittest.TestCase):
         self.assertEqual(result["level"], "LEVEL_B")
         self.assertTrue(result["changes"][0]["modeChanged"])
 
+    def test_added_symlink_fails_closed(self):
+        link = self.repo / "Sources" / "videotext" / "UI" / "Injected.swift"
+        link.symlink_to("/tmp/outside-snapshot.swift")
+        head = self.commit("symlink")
+        result = classifier.classify_repository(self.repo, self.base, head, classifier.POLICY_PATH)
+        self.assertEqual(result["level"], "LEVEL_B")
+        self.assertTrue(result["changes"][0]["modeChanged"])
+
+    def test_fat64_native_binary_fails_closed(self):
+        binary = self.repo / "Resources" / "SeminarText" / "native-helper"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"\xca\xfe\xba\xbf" + b"native")
+        head = self.commit("fat64")
+        result = classifier.classify_repository(self.repo, self.base, head, classifier.POLICY_PATH)
+        self.assertEqual(result["level"], "LEVEL_B")
+        self.assertTrue(result["changes"][0]["binary"])
+
     def test_non_ancestor_base_is_rejected(self):
         subprocess.run(["git", "checkout", "-qb", "side"], cwd=self.repo, check=True)
         side_file = self.repo / "side.txt"
@@ -272,6 +314,7 @@ class WorkflowContractTests(unittest.TestCase):
             "expected_sha:",
             "base_sha:",
             "classification_sha256:",
+            "local_gate_evidence:",
             "timeout-minutes: 20",
             "cancel-in-progress: false",
             "videotext-paid-macos-${{ inputs.expected_sha }}",
@@ -281,6 +324,8 @@ class WorkflowContractTests(unittest.TestCase):
             "grep -Eq 'Mach-O.*(arm64|x86_64|universal)'",
             "hostedMacosEligible",
             '"LEVEL_B"',
+            "checks: read",
+            "validate_local_gate_evidence",
         ):
             self.assertIn(expected, self.workflow)
 
@@ -390,6 +435,46 @@ class RetryEvidenceTests(unittest.TestCase):
         with mock.patch.object(dispatcher, "github_json", side_effect=responses):
             with self.assertRaisesRegex(dispatcher.DispatchError, "reached workflow steps"):
                 dispatcher.classify_prior_failure(123, self.SHA)
+
+
+class LocalGateEvidenceTests(unittest.TestCase):
+    SHA = "a" * 40
+
+    def evidence(self):
+        return {
+            "schemaVersion": 1,
+            "expectedSha": self.SHA,
+            "classification": "LEVEL_B",
+            "status": "PASS",
+            "completedGates": sorted(dispatcher.LOCAL_GATE_NAMES),
+            "notApplicableGates": {},
+            "evidenceSha256": "b" * 64,
+            "recordedBy": "ci-cd-engineer",
+            "recordedAt": "2026-10-11T12:00:00Z",
+        }
+
+    def test_all_local_gates_are_required_before_dispatch(self):
+        evidence = self.evidence()
+        self.assertEqual(
+            dispatcher.validate_local_gate_evidence(evidence, self.SHA), evidence
+        )
+
+    def test_not_applicable_gate_requires_a_reason(self):
+        evidence = self.evidence()
+        evidence["completedGates"].remove("core-e2e")
+        evidence["notApplicableGates"] = {"core-e2e": ""}
+        with self.assertRaisesRegex(dispatcher.DispatchError, "non-empty reasons"):
+            dispatcher.validate_local_gate_evidence(evidence, self.SHA)
+
+    def test_missing_local_gate_blocks_dispatch(self):
+        evidence = self.evidence()
+        evidence["completedGates"].remove("owner-test")
+        with self.assertRaisesRegex(dispatcher.DispatchError, "every governed local gate"):
+            dispatcher.validate_local_gate_evidence(evidence, self.SHA)
+
+    def test_local_gate_evidence_is_bound_to_exact_sha(self):
+        with self.assertRaisesRegex(dispatcher.DispatchError, "SHA does not match"):
+            dispatcher.validate_local_gate_evidence(self.evidence(), "c" * 40)
 
 
 if __name__ == "__main__":

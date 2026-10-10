@@ -138,7 +138,8 @@ sensitive diff классифицируется fail-closed как `LEVEL_B`; LL
 
 Paid macOS workflow не запускается на `push`, `pull_request`, `schedule` или
 `workflow_call`. Governed entry point — `scripts/dispatch_paid_macos_gate.py`;
-он допускает только exact-SHA `LEVEL_B`. Норма — одна попытка. Единственный
+он допускает только exact-SHA `LEVEL_B` после machine-readable подтверждения
+всех применимых локальных gates. Норма — одна попытка. Единственный
 повтор на том же SHA разрешен только для документированной infrastructure
 failure по контракту `docs/CI_COST_POLICY.md`. Product/test failure не дает
 основания для повтора. Billing/spending failure является hard stop: Codex и

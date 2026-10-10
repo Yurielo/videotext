@@ -26,6 +26,17 @@ ALLOWED_INFRA_FAILURES = {
     "timed-out-before-steps",
 }
 PROHIBITED_RETRY_WORDS = {"billing", "budget", "spending", "product", "test", "assertion"}
+LOCAL_GATE_NAMES = {
+    "focused-tests",
+    "regression",
+    "real-scenarios",
+    "independent-qa-review",
+    "independent-code-review",
+    "core-e2e",
+    "candidate-identity",
+    "codesign-lifecycle",
+    "owner-test",
+}
 
 
 class DispatchError(RuntimeError):
@@ -156,6 +167,62 @@ def validate_retry_evidence(
     return evidence
 
 
+def validate_local_gate_evidence(evidence: dict, expected_sha: str) -> dict:
+    required = {
+        "schemaVersion",
+        "expectedSha",
+        "classification",
+        "status",
+        "completedGates",
+        "notApplicableGates",
+        "evidenceSha256",
+        "recordedBy",
+        "recordedAt",
+    }
+    if set(evidence) != required or evidence["schemaVersion"] != 1:
+        raise DispatchError("local gate evidence has an unexpected schema")
+    if evidence["expectedSha"] != expected_sha:
+        raise DispatchError("local gate evidence SHA does not match expected SHA")
+    if evidence["classification"] != "LEVEL_B" or evidence["status"] != "PASS":
+        raise DispatchError("local gate evidence must record a passing LEVEL_B verdict")
+    completed = evidence["completedGates"]
+    not_applicable = evidence["notApplicableGates"]
+    if not isinstance(completed, list) or not all(isinstance(item, str) for item in completed):
+        raise DispatchError("completedGates must be a string array")
+    if len(completed) != len(set(completed)):
+        raise DispatchError("completedGates contains duplicates")
+    if not isinstance(not_applicable, dict) or not all(
+        isinstance(gate, str) and isinstance(reason, str) and reason.strip()
+        for gate, reason in not_applicable.items()
+    ):
+        raise DispatchError("notApplicableGates must map gate names to non-empty reasons")
+    completed_set = set(completed)
+    not_applicable_set = set(not_applicable)
+    if completed_set & not_applicable_set:
+        raise DispatchError("a local gate cannot be both completed and not applicable")
+    if completed_set | not_applicable_set != LOCAL_GATE_NAMES:
+        raise DispatchError("local gate evidence must account for every governed local gate")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(evidence["evidenceSha256"])):
+        raise DispatchError("local gate evidence digest must be a lowercase SHA-256")
+    if evidence["recordedBy"] != "ci-cd-engineer":
+        raise DispatchError("local gate evidence must be recorded by ci-cd-engineer")
+    try:
+        recorded_at = dt.datetime.fromisoformat(str(evidence["recordedAt"]).replace("Z", "+00:00"))
+    except ValueError as error:
+        raise DispatchError("local gate evidence timestamp is invalid") from error
+    if recorded_at.tzinfo is None:
+        raise DispatchError("local gate evidence timestamp must include a timezone")
+    return evidence
+
+
+def load_local_gate_evidence(path: pathlib.Path, expected_sha: str) -> dict:
+    try:
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise DispatchError(f"invalid local gate evidence: {error}") from error
+    return validate_local_gate_evidence(evidence, expected_sha)
+
+
 def load_retry_evidence(
     path: pathlib.Path,
     expected_sha: str,
@@ -186,12 +253,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("expected_sha")
     parser.add_argument("--ref", required=True, help="remote branch containing expected_sha")
+    parser.add_argument("--local-gate-evidence", required=True, type=pathlib.Path)
     parser.add_argument("--retry-evidence", type=pathlib.Path)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     try:
         expected_sha = full_sha(args.expected_sha, "expected_sha")
+        local_gate_evidence = load_local_gate_evidence(args.local_gate_evidence, expected_sha)
         if run(["git", "rev-parse", "HEAD"]).stdout.strip() != expected_sha:
             raise DispatchError("dispatcher checkout HEAD must equal expected_sha")
         if run(["git", "status", "--porcelain"]).stdout.strip():
@@ -260,6 +329,7 @@ def main() -> int:
                 "classificationSha256": classification_digest,
                 "baseSha": base_sha,
                 "expectedSha": expected_sha,
+                "localGateEvidence": local_gate_evidence,
                 "ref": args.ref,
                 "retryEvidence": retry_evidence,
                 "workflow": WORKFLOW,
@@ -279,6 +349,8 @@ def main() -> int:
                     f"base_sha={base_sha}",
                     "-f",
                     f"expected_sha={expected_sha}",
+                    "-f",
+                    f"local_gate_evidence={json.dumps(local_gate_evidence, separators=(',', ':'))}",
                     "-f",
                     f"classification_sha256={classification_digest}",
                     "-f",

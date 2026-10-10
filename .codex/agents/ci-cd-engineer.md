@@ -31,6 +31,8 @@
   build/toolchain validation после применимых локальных gates.
 - Запускать paid workflow только через `scripts/dispatch_paid_macos_gate.py`.
   Не запускать его как следствие push/PR и не выполнять automatic rerun.
+- До dispatch проверять exact-SHA machine-readable summary всех применимых
+  локальных gates; каждый неприменимый gate обязан иметь явное основание.
 - Разрешать единственный same-SHA retry только по валидному evidence
   infrastructure failure. Product/test failure не retryable; billing/spending
   failure является hard stop. Не менять budget или spending limits.

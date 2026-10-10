@@ -20,12 +20,22 @@ FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 NATIVE_MAGICS = {
     b"\x7fELF",
     b"\xbe\xba\xfe\xca",
+    b"\xbf\xba\xfe\xca",
     b"\xca\xfe\xba\xbe",
+    b"\xca\xfe\xba\xbf",
     b"\xce\xfa\xed\xfe",
     b"\xcf\xfa\xed\xfe",
     b"\xfe\xed\xfa\xce",
     b"\xfe\xed\xfa\xcf",
 }
+REQUIRED_LEVEL_B_EXACT_PATHS = {
+    ".ci/ci-risk-policy.json",
+    ".github/workflows/topic-regression.yml",
+    "scripts/ci_risk_classifier.py",
+    "scripts/dispatch_paid_macos_gate.py",
+    "scripts/test_ci_cost_policy.sh",
+}
+REQUIRED_LEVEL_B_PREFIXES = {".github/workflows/"}
 
 
 class ClassificationError(RuntimeError):
@@ -47,6 +57,10 @@ def load_policy(path: pathlib.Path = POLICY_PATH) -> dict:
         policy = json.load(source)
     if policy.get("schemaVersion") != 1:
         raise ClassificationError("unsupported policy schema")
+    if not REQUIRED_LEVEL_B_EXACT_PATHS.issubset(policy.get("levelBExactPaths", [])):
+        raise ClassificationError("policy cannot unprotect classifier, dispatcher, tests, or workflow")
+    if not REQUIRED_LEVEL_B_PREFIXES.issubset(policy.get("levelBPrefixes", [])):
+        raise ClassificationError("policy cannot unprotect workflow infrastructure")
     return policy
 
 
@@ -94,7 +108,9 @@ def _is_native_binary(repo: pathlib.Path, base: str, head: str, status: str, pat
 
 
 def _changed_text(repo: pathlib.Path, base: str, head: str, path: str) -> str:
-    output = _git(repo, "diff", "--unified=0", base, head, "--", path)
+    output = _git(repo, "diff", "--unified=0", base, head, "--", path, text=False).decode(
+        "utf-8", "replace"
+    )
     lines = []
     for line in output.splitlines():
         if line.startswith(("+++", "---")):
@@ -144,7 +160,11 @@ def collect_changes(repo: pathlib.Path, base: str, head: str) -> list[Change]:
                 old_path=old_path,
                 binary=_is_native_binary(repo, base, head, short_status, path),
                 changed_text=_changed_text(repo, base, head, path),
-                mode_changed=short_status not in {"A", "D"} and old_mode != new_mode,
+                mode_changed=(
+                    new_mode not in {"100644", "100755"}
+                    if short_status == "A"
+                    else short_status != "D" and old_mode != new_mode
+                ),
             )
         )
     return changes

@@ -17,6 +17,10 @@ on:
         description: "SHA-256 of deterministic local classification JSON"
         required: true
         type: string
+      local_gate_evidence:
+        description: "Machine-readable exact-SHA evidence for all applicable local gates"
+        required: true
+        type: string
       attempt:
         description: "Initial validation or the single controlled infrastructure retry"
         required: true
@@ -33,6 +37,7 @@ on:
 permissions:
   contents: read
   actions: read
+  checks: read
 
 concurrency:
   group: videotext-paid-macos-${{ inputs.expected_sha }}
@@ -60,6 +65,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_RUN_ID: ${{ github.run_id }}
+          LOCAL_GATE_EVIDENCE: ${{ inputs.local_gate_evidence }}
           RETRY_EVIDENCE: ${{ inputs.retry_evidence }}
         run: |
           python3 - <<'PY'
@@ -97,6 +103,10 @@ jobs:
           ).strip()
           if base != canonical_base:
               raise SystemExit(f"base_sha is not canonical merge-base: {base} != {canonical_base}")
+
+          guard.validate_local_gate_evidence(
+              json.loads(os.environ["LOCAL_GATE_EVIDENCE"]), expected
+          )
 
           same_sha_runs = guard.workflow_runs(expected)
           prior_same_sha_runs = [
