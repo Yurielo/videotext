@@ -117,11 +117,29 @@ class RiskClassifierTests(unittest.TestCase):
             ),
         )
         for changed_text in (
+            'whisper_cli="${HOME:-/tmp}/bin/whisper-cli"',
+            'whisper_cli="${HOME%/}/bin/whisper-cli"',
+            'whisper_cli="${HOME:+$HOME/bin/whisper-cli}"',
+        ):
+            with self.subTest(changed_text=changed_text):
+                self.assertLevel(
+                    "LEVEL_B",
+                    classifier.Change(
+                        "M",
+                        "Resources/SeminarText/seminartext",
+                        changed_text=changed_text,
+                    ),
+                )
+        for changed_text in (
             'cmd=(./tools/whisper-wrapper -m "$MODEL")',
             'exec ./tools/whisper-wrapper "$@"',
             './tools/whisper-wrapper "$@"',
             'wrapper=(./tools/whisper-wrapper -m "$MODEL")',
             'whisper_cli="$PROJECT_ROOT/tools/whisper-cli"\n"$whisper_cli" "$@"',
+            'declare -a cmd=(tools/whisper-wrapper -m "$MODEL")',
+            'readonly cmd=(tools/whisper-wrapper -m "$MODEL")',
+            'tools/whisper-wrapper "$@"',
+            'if ready; then tools/whisper-wrapper "$@"; fi',
         ):
             with self.subTest(changed_text=changed_text):
                 self.assertLevel(

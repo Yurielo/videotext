@@ -98,7 +98,7 @@
     },
     {
       "code": "runtime-discovery-marker",
-      "pattern": "(?i)(/opt/homebrew|/usr/local|/(?:usr/)?s?bin|\\$\\{?HOME\\}?|~/|NSHomeDirectory\\s*\\(|homeDirectoryForCurrentUser|command -v|(?:shutil\\.)?which\\s*\\(|isExecutableFile|processInfo\\.environment|os\\.environ(?:\\.get\\s*\\(\\s*[\"']PATH[\"']|\\s*\\[\\s*[\"']PATH[\"'])|environment\\s*\\[\\s*[\"']PATH[\"']|getenv\\s*\\(\\s*[\"']PATH[\"']|Bundle\\.main|launchPath|executableURL|DYLD_|@rpath|dlopen\\()"
+      "pattern": "(?i)(/opt/homebrew|/usr/local|/(?:usr/)?s?bin|\\$\\{?HOME(?=\\}|[:%+\\-]|\\b)|~/|NSHomeDirectory\\s*\\(|homeDirectoryForCurrentUser|command -v|(?:shutil\\.)?which\\s*\\(|isExecutableFile|processInfo\\.environment|os\\.environ(?:\\.get\\s*\\(\\s*[\"']PATH[\"']|\\s*\\[\\s*[\"']PATH[\"'])|environment\\s*\\[\\s*[\"']PATH[\"']|getenv\\s*\\(\\s*[\"']PATH[\"']|Bundle\\.main|launchPath|executableURL|DYLD_|@rpath|dlopen\\()"
     },
     {
       "code": "shell-path-assignment-marker",
@@ -106,11 +106,11 @@
     },
     {
       "code": "shell-executable-selection-marker",
-      "pattern": "(?im)(?:^\\s*(?:local\\s+(?:-a\\s+)?)?[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*\\(|^\\s*(?:local\\s+(?:-a\\s+)?)?[A-Za-z_][A-Za-z0-9_]*(?:cli|binary|executable|tool|runner|launcher|wrapper|command)[A-Za-z0-9_]*\\s*=\\s*[\\\"']?[^\\n]*(?:/|\\$)[^\\n]*|^\\s*(?:exec\\s+)?[\\\"']?\\$[A-Za-z_][A-Za-z0-9_]*[\\\"']?(?:\\s|$))"
+      "pattern": "(?im)(?:^\\s*(?:(?:local|declare|readonly)(?:\\s+-[A-Za-z]+)?\\s+)?[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*\\(|^\\s*(?:local\\s+(?:-a\\s+)?)?[A-Za-z_][A-Za-z0-9_]*(?:cli|binary|executable|tool|runner|launcher|wrapper|command)[A-Za-z0-9_]*\\s*=\\s*[\\\"']?[^\\n]*(?:/|\\$)[^\\n]*|^\\s*(?:exec\\s+)?[\\\"']?\\$[A-Za-z_][A-Za-z0-9_]*[\\\"']?(?:\\s|$))"
     },
     {
       "code": "shell-direct-exec-marker",
-      "pattern": "(?m)^\\s*(?:exec\\s+)?(?:\\./|\\.\\./)"
+      "pattern": "(?m)(?:^|\\bthen\\s+|;\\s*)(?:exec\\s+)?(?:\\./|\\.\\./|tools/)"
     },
     {
       "code": "runtime-discovery-api-marker",

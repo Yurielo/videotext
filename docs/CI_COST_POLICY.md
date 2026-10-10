@@ -50,9 +50,9 @@ only when its filename matches the explicit presentation-only allowlist
 (`*Presentation.swift`) and its changed lines have no infrastructure marker.
 All other new Services and all new Adapters remain fail-closed `LEVEL_B`.
 Runtime-discovery markers include bundle lookup, executable APIs, system,
-home-relative, and Application Support/user-domain executable paths,
+home-relative (including parameter expansion), and Application Support/user-domain executable paths,
 `PATH`/environment resolution, dynamic-loader paths, command-array/direct
-relative launcher selection, shell executable-variable assignment/invocation,
+relative launcher selection (including branch-local `tools/...` invocations), shell executable-variable assignment/invocation,
 and command lookup. Existing business-logic edits remain A unless
 another protected path, marker, native file, or ambiguous change rule applies.
 Five specialized discovery owners (`MediaAdapters`, `SpeechSynthesisAdapter`,
