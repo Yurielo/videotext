@@ -139,6 +139,24 @@ class RiskClassifierTests(unittest.TestCase):
                     ),
                 )
 
+    def test_new_service_or_adapter_file_fails_closed(self):
+        for path in (
+            "Sources/videotext/Services/NewToolLocator.swift",
+            "Sources/videotext/Adapters/NewProcessAdapter.swift",
+        ):
+            with self.subTest(path=path):
+                self.assertLevel("LEVEL_B", classifier.Change("A", path, changed_text="let value = 1"))
+
+    def test_existing_service_business_logic_remains_level_a(self):
+        self.assertLevel(
+            "LEVEL_A",
+            classifier.Change(
+                "M",
+                "Sources/videotext/Services/WorkflowEngine.swift",
+                changed_text="let result = operation.result",
+            ),
+        )
+
     def test_native_architecture_and_toolchain_are_level_b(self):
         self.assertLevel(
             "LEVEL_B", classifier.Change("M", "Resources/Runtime/libhelper.dylib", binary=True)

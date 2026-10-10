@@ -223,7 +223,19 @@ def classify_changes(changes: Iterable[Change], policy: dict) -> dict:
             reasons.append({"code": code, "level": "LEVEL_B", "path": change.path})
         if change.binary:
             reasons.append({"code": "native-binary-content", "level": "LEVEL_B", "path": change.path})
-        ambiguous_change_type = change.status in {"C", "D", "R", "T", "U"} or change.mode_changed
+        ambiguous_new_file = change.status == "A" and any(
+            change.path.startswith(prefix)
+            for prefix in policy["ambiguousNewFileLevelBPrefixes"]
+        )
+        if ambiguous_new_file:
+            reasons.append(
+                {"code": "ambiguous-new-service-or-adapter", "level": "LEVEL_B", "path": change.path}
+            )
+        ambiguous_change_type = (
+            change.status in {"C", "D", "R", "T", "U"}
+            or change.mode_changed
+            or ambiguous_new_file
+        )
         if ambiguous_change_type:
             reasons.append(
                 {"code": "ambiguous-change-type-fail-closed", "level": "LEVEL_B", "path": change.path}

@@ -38,6 +38,10 @@
     "Sources/videotext/Services/ToolRunner.swift",
     "Sources/videotext/Services/WhisperModelLocator.swift"
   ],
+  "ambiguousNewFileLevelBPrefixes": [
+    "Sources/videotext/Adapters/",
+    "Sources/videotext/Services/"
+  ],
   "levelAExactPaths": [
     ".gitignore",
     "AGENTS.md",

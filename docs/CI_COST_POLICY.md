@@ -39,6 +39,10 @@ binaries, policy self-changes, and runtime-discovery markers are also
 fail-closed B inputs. The policy loader refuses a policy that removes protection
 from its classifier, dispatcher, tests, or paid workflow. An empty diff is
 fail-closed and not eligible for a hosted run.
+New files under `Sources/videotext/Services/` or `Adapters/` are conservatively
+B because a new integration boundary cannot be proven to be ordinary business
+logic from its path alone. Existing business-logic edits there remain A unless
+another protected path, marker, native file, or ambiguous change rule applies.
 
 The classifier is a policy input. LLM judgment may explain a result but cannot
 replace or downgrade it. Ambiguous infrastructure-sensitive changes stay B
