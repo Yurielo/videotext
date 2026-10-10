@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "policyVersion": "2026-10-11",
+  "levelBExactPaths": [
+    ".ci/ci-risk-policy.json",
+    ".github/workflows/topic-regression.yml",
+    "Package.resolved",
+    "Package.swift",
+    "Resources/Info.plist",
+    "Tests/test_ci_cost_policy.py",
+    "scripts/build_app.sh",
+    "scripts/check_baseline.sh",
+    "scripts/ci_risk_classifier.py",
+    "scripts/dispatch_paid_macos_gate.py",
+    "scripts/release_gate.sh",
+    "scripts/test_ci_cost_policy.sh"
+  ],
+  "levelBPrefixes": [
+    ".github/actions/",
+    ".github/workflows/"
+  ],
+  "levelBExtensions": [
+    ".a",
+    ".dylib",
+    ".entitlements",
+    ".framework",
+    ".so",
+    ".xcconfig",
+    ".xcframework",
+    ".xcodeproj",
+    ".xcworkspace"
+  ],
+  "knownRuntimeDiscoveryPaths": [
+    "Resources/SeminarText/seminartext",
+    "Sources/videotext/Adapters/MediaAdapters.swift",
+    "Sources/videotext/Adapters/SpeechSynthesisAdapter.swift",
+    "Sources/videotext/Services/Diagnostics.swift",
+    "Sources/videotext/Services/SelectedTimingVerticalSlice.swift",
+    "Sources/videotext/Services/ToolRunner.swift",
+    "Sources/videotext/Services/WhisperModelLocator.swift"
+  ],
+  "ambiguousNewFileLevelBPrefixes": [
+    "Sources/videotext/Adapters/",
+    "Sources/videotext/Services/"
+  ],
+  "levelAExactPaths": [
+    ".gitignore",
+    "AGENTS.md",
+    "DEVELOPMENT_PLAN.md",
+    "README.md",
+    "scripts/check_agents.sh"
+  ],
+  "levelAPrefixes": [
+    ".codex/agents/",
+    "Resources/Branding/",
+    "Resources/SeminarText/",
+    "Sources/",
+    "Tests/",
+    "docs/"
+  ],
+  "levelAGlobs": [
+    "Resources/*.icns",
+    "Resources/AppIcon.iconset/*",
+    "scripts/test_*.sh"
+  ],
+  "markerScanPrefixes": [
+    "Resources/SeminarText/",
+    "Sources/",
+    "scripts/"
+  ],
+  "markerScanExcludedPrefixes": [
+    "Tests/",
+    "scripts/test_"
+  ],
+  "infrastructureMarkers": [
+    {
+      "code": "build-toolchain-marker",
+      "pattern": "(?i)(xcodebuild|swiftc|MACOSX_DEPLOYMENT_TARGET|SDKROOT|ARCHS|VALID_ARCHS)"
+    },
+    {
+      "code": "signing-notarization-marker",
+      "pattern": "(?i)(codesign|notarytool|altool|CODE_SIGN|DEVELOPMENT_TEAM|PROVISIONING_PROFILE)"
+    },
+    {
+      "code": "packaging-marker",
+      "pattern": "(?i)(pkgbuild|productbuild|Contents/(MacOS|Resources)|CFBundleExecutable|CFBundleIdentifier)"
+    },
+    {
+      "code": "runtime-discovery-marker",
+      "pattern": "(?i)(/opt/homebrew|/usr/local|/(?:usr/)?s?bin|command -v|(?:shutil\\.)?which\\s*\\(|isExecutableFile|processInfo\\.environment|os\\.environ(?:\\.get\\s*\\(\\s*[\"']PATH[\"']|\\s*\\[\\s*[\"']PATH[\"'])|environment\\s*\\[\\s*[\"']PATH[\"']|getenv\\s*\\(\\s*[\"']PATH[\"']|Bundle\\.main|launchPath|executableURL|DYLD_|@rpath|dlopen\\()"
+    },
+    {
+      "code": "runtime-discovery-api-marker",
+      "pattern": "(?is)(urlForApplication\\s*\\(|fileExists\\s*\\([\\s\\S]{0,512}(?:ffmpeg|ffprobe|whisper|ollama|seminartext|homebrew|(?:usr/)?s?bin|executable|binary|cli)|(?:ffmpeg|ffprobe|whisper|ollama|seminartext|homebrew|(?:usr/)?s?bin|executable|binary|cli)[\\s\\S]{0,512}fileExists\\s*\\()"
+    },
+    {
+      "code": "native-architecture-marker",
+      "pattern": "(?i)(arm64|x86_64|lipo|Mach-O|install_name_tool|otool)"
+    }
+  ]
+}

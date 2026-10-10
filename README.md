@@ -95,6 +95,23 @@ scripts/release_gate.sh <короткое-видео> <модель-whisper> --p
 `scripts/build_app.sh` собирает только временный app в `/private/tmp` и не
 перезаписывает пользовательскую стабильную версию.
 
+## CI cost policy
+
+Diff классифицируется локально как `LEVEL_A` (application change) или
+`LEVEL_B` (build/platform/distribution infrastructure):
+
+```bash
+python3 scripts/ci_risk_classifier.py --base <full-base-sha> --head <full-head-sha>
+```
+
+Оба уровня сохраняют применимые local tests, QA/review, два real E2E, Candidate
+identity, codesign/lifecycle и Owner Test. Для `LEVEL_A` этого governed local
+evidence достаточно; GitHub-hosted macOS не требуется. Для `LEVEL_B` после
+локальных gates выполняется одна explicit exact-SHA clean macOS build/toolchain
+validation. Workflow не запускается автоматически на push или PR. Правила
+dispatch, controlled infrastructure retry и billing hard stop описаны в
+[`docs/CI_COST_POLICY.md`](docs/CI_COST_POLICY.md).
+
 ## Разработка с агентами
 
 Проектный [`AGENTS.md`](AGENTS.md) подключает девять специализированных ролей

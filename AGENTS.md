@@ -114,6 +114,45 @@ Whisper/Ollama/ffmpeg, два финальных E2E и замена одной 
 Обычная задача должна иметь проверки, соразмерные риску. Изменение только
 агентских инструкций или документации не требует сборки приложения и E2E.
 
+### CI risk и hosted-расходы
+
+Каждый diff до CI/CD verdict детерминированно классифицируется командой
+`scripts/ci_risk_classifier.py` по правилам `.ci/ci-risk-policy.json`:
+
+- `LEVEL_A` — UI, application workflow/orchestration, Core/Services business
+  logic, text/timing processing, обычные исправления и изменения содержимого
+  bundled dependency без изменения packaging, discovery, native architecture,
+  signing или toolchain. Применимые local focused/regression/real scenarios,
+  независимые QA/review, CORE E2E, Candidate identity, codesign/lifecycle и
+  Owner Test остаются обязательными; GitHub-hosted macOS не требуется.
+- `LEVEL_B` — build/platform/distribution infrastructure: Xcode/build settings,
+  packaging, runtime discovery, signing/notarization, native architecture,
+  toolchain и native dependency loading. Помимо применимых локальных gates
+  требуется одна независимая clean GitHub-hosted macOS build/toolchain проверка
+  exact SHA.
+
+Release не является третьим risk class: применяется уровень фактического diff
+и отдельные promotion checks. Неизвестный или неоднозначный infrastructure-
+sensitive diff классифицируется fail-closed как `LEVEL_B`; LLM не может в
+одиночку понизить класс.
+
+Paid macOS workflow не запускается на `push`, `pull_request`, `schedule` или
+`workflow_call`. Governed entry point — `scripts/dispatch_paid_macos_gate.py`;
+он допускает только exact-SHA `LEVEL_B` после machine-readable подтверждения
+всех применимых локальных gates. Норма — одна попытка. Единственный
+повтор на том же SHA разрешен только для документированной infrastructure
+failure по контракту `docs/CI_COST_POLICY.md`. Product/test failure не дает
+основания для повтора. Billing/spending failure является hard stop: Codex и
+automation запрещено менять budget/spending limits, обходить ограничение или
+создавать повторный paid run.
+
+CI/CD verdict не означает автоматически GitHub-hosted CI. Для `LEVEL_A`
+machine-readable local release evidence является допустимым CI/CD evidence.
+Billing/capacity failure не инвалидирует уже полученные local product evidence.
+Governance-only изменения не инвалидируют Candidate, если content identity
+release inputs не изменился. Owner утверждает policy, а не каждый отдельный
+технический запуск. Полный контракт: `docs/CI_COST_POLICY.md`.
+
 Release inputs включают `Sources/**`, `Resources/**`, `scripts/build_app.sh`,
 `scripts/test_e2e.sh`, `Tests/EndToEnd.swift` и все файлы, включаемые в bundle.
 Их content hash фиксируется до candidate build и повторно проверяется после

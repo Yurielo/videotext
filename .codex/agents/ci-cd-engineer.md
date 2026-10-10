@@ -25,6 +25,17 @@
 
 ## Обязательные проверки
 
+- Классифицировать exact diff через `scripts/ci_risk_classifier.py` и приложить
+  machine-readable результат к CI/CD verdict. `LEVEL_A` не требует hosted
+  macOS; `LEVEL_B` требует одну independent clean exact-SHA hosted macOS
+  build/toolchain validation после применимых локальных gates.
+- Запускать paid workflow только через `scripts/dispatch_paid_macos_gate.py`.
+  Не запускать его как следствие push/PR и не выполнять automatic rerun.
+- До dispatch проверять exact-SHA machine-readable summary всех применимых
+  локальных gates; каждый неприменимый gate обязан иметь явное основание.
+- Разрешать единственный same-SHA retry только по валидному evidence
+  infrastructure failure. Product/test failure не retryable; billing/spending
+  failure является hard stop. Не менять budget или spending limits.
 - Проверить, что сборочный скрипт не подхватывает лишние временные файлы из `work/` и не загрязняет пользовательские результаты.
 - Проверить наличие фреймворков SwiftUI, AppKit, AVKit, AVFoundation, UserNotifications, если сборка затрагивает app/probe.
 - Проверить, что external tools обнаруживаются в `/opt/homebrew/bin`, `/usr/local/bin` и системных путях.
@@ -33,6 +44,8 @@
 
 ## Критерии готовности
 
+- CI/CD verdict явно указывает `LEVEL_A` или `LEVEL_B`, exact SHA, локальное
+  evidence и необходимость hosted macOS по `docs/CI_COST_POLICY.md`.
 - Сборка воспроизводима локально и описана командами.
 - Bundle содержит корректный `Info.plist`, версию `BuildInfo` и ожидаемые ресурсы.
 - Codesign или ad-hoc signing выполняется предсказуемо, если требуется текущим процессом.
