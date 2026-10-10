@@ -140,6 +140,8 @@ class RiskClassifierTests(unittest.TestCase):
             'readonly cmd=(tools/whisper-wrapper -m "$MODEL")',
             'typeset -a cmd=(bin/whisper-wrapper -m "$MODEL")',
             'cmd+=(./tools/whisper-wrapper -m "$MODEL")',
+            'cmd+=("./tools/whisper-wrapper" -m "$MODEL")',
+            'cmd+=("$script_dir/tools/whisper-wrapper" -m "$MODEL")',
             'tools/whisper-wrapper "$@"',
             'bin/whisper-wrapper "$@"',
             '.tools/whisper-wrapper "$@"',
