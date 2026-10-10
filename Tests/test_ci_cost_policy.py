@@ -77,14 +77,21 @@ class RiskClassifierTests(unittest.TestCase):
         )
 
     def test_bundled_dependency_runtime_discovery_marker_is_level_b(self):
-        self.assertLevel(
-            "LEVEL_B",
-            classifier.Change(
-                "M",
-                "Resources/SeminarText/seminartext_modules/tool_locator.py",
-                changed_text='ffmpeg = "/opt/homebrew/bin/ffmpeg"',
-            ),
-        )
+        for changed_text in (
+            'ffmpeg = "/opt/homebrew/bin/ffmpeg"',
+            'from shutil import which\nffmpeg = which("ffmpeg")',
+            'search_path = os.environ.get("PATH", "")',
+            'search_path = os.environ["PATH"]',
+        ):
+            with self.subTest(changed_text=changed_text):
+                self.assertLevel(
+                    "LEVEL_B",
+                    classifier.Change(
+                        "M",
+                        "Resources/SeminarText/seminartext_modules/tool_locator.py",
+                        changed_text=changed_text,
+                    ),
+                )
 
     def test_bundled_launcher_is_protected_level_b(self):
         self.assertLevel(
@@ -233,6 +240,14 @@ class RiskClassifierTests(unittest.TestCase):
             "LEVEL_B",
             classifier.Change("M", "Sources/videotext/UI/ContentView.swift", mode_changed=True),
         )
+
+    def test_unknown_git_status_fails_closed(self):
+        for status in ("B", "X"):
+            with self.subTest(status=status):
+                self.assertLevel(
+                    "LEVEL_B",
+                    classifier.Change(status, "Sources/videotext/UI/ContentView.swift"),
+                )
 
     def test_policy_cannot_unprotect_its_bootstrap_files(self):
         for protected_path in classifier.REQUIRED_LEVEL_B_EXACT_PATHS:

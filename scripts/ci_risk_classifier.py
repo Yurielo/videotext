@@ -238,7 +238,7 @@ def classify_changes(changes: Iterable[Change], policy: dict) -> dict:
                 {"code": "ambiguous-new-service-or-adapter", "level": "LEVEL_B", "path": change.path}
             )
         ambiguous_change_type = (
-            change.status in {"C", "D", "R", "T", "U"}
+            change.status not in {"A", "M"}
             or change.mode_changed
             or ambiguous_new_file
         )
