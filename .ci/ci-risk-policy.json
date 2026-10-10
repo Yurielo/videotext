@@ -110,7 +110,7 @@
     },
     {
       "code": "shell-direct-exec-marker",
-      "pattern": "(?m)(?:^|\\bthen\\s+|;\\s*)(?:exec\\s+)?(?:\\./|\\.\\./|[A-Za-z0-9_-]+/)"
+      "pattern": "(?m)(?:^|\\bthen\\s+|;\\s*)(?:exec\\s+)?(?:\\./|\\.\\./|\\.[A-Za-z0-9_-]+/|[A-Za-z0-9_-]+/)"
     },
     {
       "code": "runtime-discovery-api-marker",
@@ -122,7 +122,7 @@
     },
     {
       "code": "native-loading-api-marker",
-      "pattern": "(?is)Bundle\\s*\\([^)]*\\)[\\s\\S]{0,512}\\.load\\s*\\("
+      "pattern": "(?is)(Bundle\\s*\\([^)]*\\)[\\s\\S]{0,512}\\.load\\s*\\(|\\b(?:bundle|plugin|library|module)[A-Za-z0-9_]*\\s*\\.\\s*load\\s*\\()"
     },
     {
       "code": "native-architecture-marker",
