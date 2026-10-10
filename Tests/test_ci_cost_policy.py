@@ -142,6 +142,7 @@ class RiskClassifierTests(unittest.TestCase):
             'cmd+=(./tools/whisper-wrapper -m "$MODEL")',
             'cmd+=("./tools/whisper-wrapper" -m "$MODEL")',
             'cmd+=("$script_dir/tools/whisper-wrapper" -m "$MODEL")',
+            'cmd+=(".tools/whisper-wrapper" -m "$MODEL")',
             'tools/whisper-wrapper "$@"',
             'bin/whisper-wrapper "$@"',
             '.tools/whisper-wrapper "$@"',
@@ -179,7 +180,6 @@ class RiskClassifierTests(unittest.TestCase):
             '@rpath/libwhisper.dylib',
             'let loaded = Bundle(path: pluginPath)?.load()',
             'let bundle = Bundle(url: pluginURL)\nbundle.load()',
-            'bundle.load()',
         ):
             with self.subTest(changed_text=changed_text):
                 self.assertLevel(
@@ -190,6 +190,15 @@ class RiskClassifierTests(unittest.TestCase):
                         changed_text=changed_text,
                     ),
                 )
+        self.assertLevel(
+            "LEVEL_B",
+            classifier.Change(
+                "M",
+                "Sources/videotext/Services/SelectedTimingVerticalSlice.swift",
+                changed_text='framework.load()',
+                source_text='let framework = Bundle(url: pluginURL)\nframework.load()',
+            ),
+        )
 
     def test_runtime_launch_apis_are_level_b(self):
         for changed_text in ('Process.run(arguments)', 'posix_spawn(&pid, path, nil, nil, argv, environ)'):
