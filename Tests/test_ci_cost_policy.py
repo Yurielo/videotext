@@ -158,6 +158,37 @@ class RiskClassifierTests(unittest.TestCase):
             ),
         )
 
+    def test_constructed_runtime_discovery_is_level_b(self):
+        for changed_text in (
+            "\n".join(
+                (
+                    'let parts = ["/opt", "homebrew", "bin", "ffmpeg"]',
+                    "let candidate = parts.joined(separator: \"/\")",
+                    "FileManager.default.fileExists(atPath: candidate)",
+                )
+            ),
+            'NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)',
+        ):
+            with self.subTest(changed_text=changed_text):
+                self.assertLevel(
+                    "LEVEL_B",
+                    classifier.Change(
+                        "M",
+                        "Sources/videotext/Services/WorkflowEngine.swift",
+                        changed_text=changed_text,
+                    ),
+                )
+
+    def test_ordinary_project_file_exists_check_remains_level_a(self):
+        self.assertLevel(
+            "LEVEL_A",
+            classifier.Change(
+                "M",
+                "Sources/videotext/Services/WorkflowEngine.swift",
+                changed_text="FileManager.default.fileExists(atPath: project.manifestPath)",
+            ),
+        )
+
     def test_native_architecture_and_toolchain_are_level_b(self):
         self.assertLevel(
             "LEVEL_B", classifier.Change("M", "Resources/Runtime/libhelper.dylib", binary=True)
