@@ -138,8 +138,10 @@ class RiskClassifierTests(unittest.TestCase):
             'whisper_cli="$PROJECT_ROOT/tools/whisper-cli"\n"$whisper_cli" "$@"',
             'declare -a cmd=(tools/whisper-wrapper -m "$MODEL")',
             'readonly cmd=(tools/whisper-wrapper -m "$MODEL")',
+            'typeset -a cmd=(bin/whisper-wrapper -m "$MODEL")',
             'cmd+=(./tools/whisper-wrapper -m "$MODEL")',
             'tools/whisper-wrapper "$@"',
+            'bin/whisper-wrapper "$@"',
             'if ready; then tools/whisper-wrapper "$@"; fi',
         ):
             with self.subTest(changed_text=changed_text):
@@ -173,6 +175,7 @@ class RiskClassifierTests(unittest.TestCase):
             'dlopen("@rpath/libwhisper.dylib", RTLD_NOW)',
             '@rpath/libwhisper.dylib',
             'let loaded = Bundle(path: pluginPath)?.load()',
+            'let bundle = Bundle(url: pluginURL)\nbundle.load()',
         ):
             with self.subTest(changed_text=changed_text):
                 self.assertLevel(

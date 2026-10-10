@@ -52,7 +52,7 @@ All other new Services and all new Adapters remain fail-closed `LEVEL_B`.
 Runtime-discovery markers include bundle lookup, executable APIs, system,
 home-relative (including parameter expansion), and Application Support/user-domain executable paths,
 `PATH`/environment resolution, dynamic-loader paths, `Process.run`/`posix_spawn`,
-command-array/direct relative launcher selection (including branch-local `tools/...` invocations), shell executable-variable assignment/invocation,
+command-array/direct relative launcher selection (including `tools/...`, `bin/...`, and other branch-local invocations), shell executable-variable assignment/invocation,
 and command lookup. Existing business-logic edits remain A unless
 another protected path, marker, native file, or ambiguous change rule applies.
 Five specialized discovery owners (`MediaAdapters`, `SpeechSynthesisAdapter`,
