@@ -337,10 +337,13 @@ struct SelectedTimingVerticalSlice {
         expectedLanguage: ArtifactLanguage
     ) throws -> TimedSourceDocument? {
         let packageRoot = manifestURL.deletingLastPathComponent()
-        let coreOutputDirectory = URL(fileURLWithPath: evidence.outputDirectory).standardizedFileURL
+        // `outputDirectory` is diagnostic evidence from the original run and can
+        // become stale when a whole project is copied. The candidate was already
+        // discovered beneath this project's SeminarText tree; validate its own
+        // package output and immutable artifacts before adopting it.
+        let candidateOutputDirectory = packageRoot.deletingLastPathComponent()
         let expectedMediaHash = SelectedTimingHash.file(expectedMediaURL)
-        guard packageRoot.deletingLastPathComponent().standardizedFileURL == coreOutputDirectory,
-              let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any],
+        guard let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any],
               let source = manifest["source"] as? [String: Any],
               let reference = source["reference"] as? String,
               reference.hasPrefix("/"),
@@ -355,24 +358,28 @@ struct SelectedTimingVerticalSlice {
               !expectedWhisperJSONHash.isEmpty else {
             return nil
         }
-        let coreSRTs = coreSRTs(in: coreOutputDirectory)
+        let coreSRTs = coreSRTs(in: candidateOutputDirectory)
         guard coreSRTs.count == 1,
               SelectedTimingHash.file(coreSRTs[0]) == evidence.sourceSRTSHA256 else {
             return nil
         }
-        let importedWhisperJSON = try SeminarTextCoreWhisperEvidenceImporter().importSelectedWhisperJSON(
-            packageRoot: packageRoot,
-            expectedMediaURL: expectedMediaURL,
-            expectedLanguage: expectedLanguage
-        )
-        guard SelectedTimingHash.data(importedWhisperJSON) == expectedWhisperJSONHash else {
+        do {
+            let importedWhisperJSON = try SeminarTextCoreWhisperEvidenceImporter().importSelectedWhisperJSON(
+                packageRoot: packageRoot,
+                expectedMediaURL: expectedMediaURL,
+                expectedLanguage: expectedLanguage
+            )
+            guard SelectedTimingHash.data(importedWhisperJSON) == expectedWhisperJSONHash else {
+                return nil
+            }
+            return try importer.importSelectedPackage(
+                packageRoot: packageRoot,
+                expectedMediaURL: expectedMediaURL,
+                expectedLanguage: expectedLanguage
+            )
+        } catch {
             return nil
         }
-        return try importer.importSelectedPackage(
-            packageRoot: packageRoot,
-            expectedMediaURL: expectedMediaURL,
-            expectedLanguage: expectedLanguage
-        )
     }
 
     private func coreSRTs(in outputDirectory: URL) -> [URL] {

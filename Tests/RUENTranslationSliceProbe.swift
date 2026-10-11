@@ -152,9 +152,20 @@ struct RUENTranslationSliceProbe {
         root: URL,
         sourceLanguage: ArtifactLanguage
     ) async throws {
-        let fixture = try makeFixture(root: root, sourceLanguage: sourceLanguage)
+        // A copied project retains original core evidence paths while its one
+        // package moves under the copied project's SeminarText tree.
+        let fixture = try copiedFixture(root: root, sourceLanguage: sourceLanguage)
         let manifestURL = try selectedTimingManifestURL(for: fixture)
-        let relocatedMedia = root.appendingPathComponent("relocated-source.mp4")
+        let evidenceBefore = try JSONDecoder().decode(
+            SeminarTextCoreTranscriptionEvidence.self,
+            from: Data(contentsOf: fixture.layout.seminarTextCoreEvidenceURL)
+        )
+        try require(
+            URL(fileURLWithPath: evidenceBefore.outputDirectory).standardizedFileURL
+                != manifestURL.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL,
+            "Copied fixture did not retain a stale original Core output directory"
+        )
+        let relocatedMedia = root.appendingPathComponent("copied/relocated-source.mp4")
         try FileManager.default.copyItem(at: fixture.media, to: relocatedMedia)
         try replaceSourceReference(in: manifestURL, with: relocatedMedia.path)
         let adoptedManifestHash = SelectedTimingHash.file(manifestURL)
@@ -184,8 +195,9 @@ struct RUENTranslationSliceProbe {
             SeminarTextCoreTranscriptionEvidence.self,
             from: Data(contentsOf: fixture.layout.seminarTextCoreEvidenceURL)
         )
-        try require(evidence.selectedTimingManifestSHA256 == adoptedManifestHash,
-                    "Relocated package recovery did not reconcile canonical evidence association")
+        try require(evidence.selectedTimingManifestSHA256 == adoptedManifestHash
+                    && evidence.outputDirectory == evidenceBefore.outputDirectory,
+                    "Relocated package recovery did not reconcile only the canonical evidence association")
 
         _ = try HumanReviewService(store: fixture.store).approve(projectURL: fixture.project)
         let reopened = try fixture.store.openProject(at: fixture.project).0
@@ -233,9 +245,11 @@ struct RUENTranslationSliceProbe {
                 language: .ru
             )
             throw ProbeFailure(message: "Incompatible relocated selected timing package was accepted")
-        } catch is ProbeFailure {
-            throw ProbeFailure(message: "Incompatible relocated selected timing package was accepted")
-        } catch {
+        } catch let error as ProbeFailure {
+            throw error
+        } catch WorkflowError.processFailed(let message) {
+            try require(message == missingSelectedTimingProvenanceMessage,
+                        "Incompatible relocated package did not fail with the declared provenance error")
             try require(!FileManager.default.fileExists(atPath: fixture.layout.selectedTimingSourceUnitsURL.path),
                         "Incompatible relocated package persisted selected timing source")
         }
@@ -465,6 +479,26 @@ struct RUENTranslationSliceProbe {
             sourceHumanReviewEnabled: true,
             translationHumanReviewEnabled: true,
             fillerAnalysisBeforeReview: true
+        )
+    }
+
+    private static let missingSelectedTimingProvenanceMessage =
+        "Не найден единственный selected timing package, связанный с принятой расшифровкой. Повторный ASR не выполнялся."
+
+    private static func copiedFixture(root: URL, sourceLanguage: ArtifactLanguage) throws -> Fixture {
+        let original = try makeFixture(root: root.appendingPathComponent("original", isDirectory: true), sourceLanguage: sourceLanguage)
+        let copiedRoot = root.appendingPathComponent("copied", isDirectory: true)
+        try FileManager.default.createDirectory(at: copiedRoot, withIntermediateDirectories: true)
+        let media = copiedRoot.appendingPathComponent("russian-source.mp4")
+        let project = copiedRoot.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.copyItem(at: original.media, to: media)
+        try FileManager.default.copyItem(at: original.project, to: project)
+        return Fixture(
+            media: media,
+            project: project,
+            layout: ProjectLayout(root: project),
+            store: ProjectStore(history: ProjectHistoryStore(indexURL: copiedRoot.appendingPathComponent("history.json"))),
+            sourceLanguage: sourceLanguage
         )
     }
 
