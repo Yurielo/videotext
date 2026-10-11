@@ -39,10 +39,27 @@ binaries, policy self-changes, and runtime-discovery markers are also
 fail-closed B inputs. The policy loader refuses a policy that removes protection
 from its classifier, dispatcher, tests, or paid workflow. An empty diff is
 fail-closed and not eligible for a hosted run.
-New files under `Sources/videotext/Services/` or `Adapters/` are conservatively
-B because a new integration boundary cannot be proven to be ordinary business
-logic from its path alone. Existing business-logic edits there remain A unless
+Classification uses the changed lines, not the identity of a file that happens
+to contain runtime code elsewhere. An ordinary bundled dependency content
+update, a timing-validation-only edit, or a presentation-only service is
+`LEVEL_A` when its changed lines do not alter packaging, runtime discovery,
+executable selection, bundle lookup, PATH/environment resolution, native
+dependency loading, architecture, signing, or toolchain behavior. Explicit
+machine-readable markers cover those mechanisms. A newly added Service is A
+only when its filename matches the explicit presentation-only allowlist
+(`*Presentation.swift`) and its changed lines have no infrastructure marker.
+All other new Services and all new Adapters remain fail-closed `LEVEL_B`.
+Runtime-discovery markers include bundle lookup, executable APIs, system,
+home-relative (including parameter expansion), and Application Support/user-domain executable paths,
+`PATH`/environment resolution, dynamic-loader paths, `Process.run`/`posix_spawn`,
+command-array/direct relative launcher selection (including `tools/...`, `bin/...`, and other branch-local invocations), shell executable-variable assignment/invocation,
+and command lookup. Existing business-logic edits remain A unless
 another protected path, marker, native file, or ambiguous change rule applies.
+Five specialized discovery owners (`MediaAdapters`, `SpeechSynthesisAdapter`,
+`Diagnostics`, `ToolRunner`, and `WhisperModelLocator`) remain exact-path B
+because their complete files define runtime resolution. Test-harness files
+under `scripts/test_*` are excluded from marker scanning: their temporary app
+or tool invocations do not alter production packaging or runtime discovery.
 
 The classifier is a policy input. LLM judgment may explain a result but cannot
 replace or downgrade it. Ambiguous infrastructure-sensitive changes stay B

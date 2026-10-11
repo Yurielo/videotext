@@ -31,17 +31,28 @@
     ".xcworkspace"
   ],
   "knownRuntimeDiscoveryPaths": [
-    "Resources/SeminarText/seminartext",
     "Sources/videotext/Adapters/MediaAdapters.swift",
     "Sources/videotext/Adapters/SpeechSynthesisAdapter.swift",
     "Sources/videotext/Services/Diagnostics.swift",
-    "Sources/videotext/Services/SelectedTimingVerticalSlice.swift",
     "Sources/videotext/Services/ToolRunner.swift",
     "Sources/videotext/Services/WhisperModelLocator.swift"
   ],
-  "ambiguousNewFileLevelBPrefixes": [
-    "Sources/videotext/Adapters/",
-    "Sources/videotext/Services/"
+  "ambiguousNewInfrastructureFileGlobs": [
+    "Sources/videotext/Adapters/*",
+    "Sources/videotext/Services/*Adapter*.swift",
+    "Sources/videotext/Services/*Binary*.swift",
+    "Sources/videotext/Services/*Executor*.swift",
+    "Sources/videotext/Services/*Launcher*.swift",
+    "Sources/videotext/Services/*Loader*.swift",
+    "Sources/videotext/Services/*Locator*.swift",
+    "Sources/videotext/Services/*Process*.swift",
+    "Sources/videotext/Services/*Resolver*.swift",
+    "Sources/videotext/Services/*Runner*.swift",
+    "Sources/videotext/Services/*Runtime*.swift",
+    "Sources/videotext/Services/*Tool*.swift"
+  ],
+  "newPresentationServiceGlobs": [
+    "Sources/videotext/Services/*Presentation.swift"
   ],
   "levelAExactPaths": [
     ".gitignore",
@@ -87,11 +98,31 @@
     },
     {
       "code": "runtime-discovery-marker",
-      "pattern": "(?i)(/opt/homebrew|/usr/local|/(?:usr/)?s?bin|command -v|(?:shutil\\.)?which\\s*\\(|isExecutableFile|processInfo\\.environment|os\\.environ(?:\\.get\\s*\\(\\s*[\"']PATH[\"']|\\s*\\[\\s*[\"']PATH[\"'])|environment\\s*\\[\\s*[\"']PATH[\"']|getenv\\s*\\(\\s*[\"']PATH[\"']|Bundle\\.main|launchPath|executableURL|DYLD_|@rpath|dlopen\\()"
+      "pattern": "(?i)(/opt/homebrew|/usr/local|/(?:usr/)?s?bin|\\$\\{?HOME(?=\\}|[:%+\\-]|\\b)|~/|command -v|(?:shutil\\.)?which\\s*\\(|isExecutableFile|processInfo\\.environment|os\\.environ(?:\\.get\\s*\\(\\s*[\"']PATH[\"']|\\s*\\[\\s*[\"']PATH[\"'])|environment\\s*\\[\\s*[\"']PATH[\"']|getenv\\s*\\(\\s*[\"']PATH[\"']|Bundle\\.main|launchPath|executableURL|DYLD_|@rpath|dlopen\\()"
+    },
+    {
+      "code": "shell-path-assignment-marker",
+      "pattern": "(?m)^\\s*(?:export\\s+)?PATH\\s*=|\\benv\\s+PATH\\s*="
+    },
+    {
+      "code": "shell-executable-selection-marker",
+      "pattern": "(?im)(?:^\\s*(?:(?:local|declare|readonly|typeset)(?:\\s+-[A-Za-z]+)?\\s+)?[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*\\(|^\\s*(?:(?:local|declare|readonly|typeset)(?:\\s+-[A-Za-z]+)?\\s+)?[A-Za-z_][A-Za-z0-9_]*\\s*\\+=\\s*\\(\\s*[\\\"']?(?:\\./|\\.\\./|\\.[A-Za-z0-9_-]+/|[A-Za-z0-9_-]+/|/|\\$)|^\\s*(?:local\\s+(?:-a\\s+)?)?[A-Za-z_][A-Za-z0-9_]*(?:cli|binary|executable|tool|runner|launcher|wrapper|command)[A-Za-z0-9_]*\\s*=\\s*[\\\"']?[^\\n]*(?:/|\\$)[^\\n]*|^\\s*(?:exec\\s+)?[\\\"']?\\$[A-Za-z_][A-Za-z0-9_]*[\\\"']?(?:\\s|$))"
+    },
+    {
+      "code": "shell-direct-exec-marker",
+      "pattern": "(?m)(?:^|\\bthen\\s+|;\\s*)(?:exec\\s+)?(?:\\./|\\.\\./|\\.[A-Za-z0-9_-]+/|[A-Za-z0-9_-]+/)"
     },
     {
       "code": "runtime-discovery-api-marker",
-      "pattern": "(?is)(urlForApplication\\s*\\(|fileExists\\s*\\([\\s\\S]{0,512}(?:ffmpeg|ffprobe|whisper|ollama|seminartext|homebrew|(?:usr/)?s?bin|executable|binary|cli)|(?:ffmpeg|ffprobe|whisper|ollama|seminartext|homebrew|(?:usr/)?s?bin|executable|binary|cli)[\\s\\S]{0,512}fileExists\\s*\\()"
+      "pattern": "(?is)(urlForApplication\\s*\\(|(?:applicationSupportDirectory|userDomainMask|NSHomeDirectory|homeDirectoryForCurrentUser)[\\s\\S]{0,512}(?:executable|binary|cli|tool|runner|launcher|wrapper)|(?:executable|binary|cli|tool|runner|launcher|wrapper)[\\s\\S]{0,512}(?:applicationSupportDirectory|userDomainMask|NSHomeDirectory|homeDirectoryForCurrentUser)|fileExists\\s*\\([\\s\\S]{0,512}(?:ffmpeg|ffprobe|whisper|ollama|seminartext|homebrew|(?:usr/)?s?bin|executable|binary|cli)|(?:ffmpeg|ffprobe|whisper|ollama|seminartext|homebrew|(?:usr/)?s?bin|executable|binary|cli)[\\s\\S]{0,512}fileExists\\s*\\()"
+    },
+    {
+      "code": "runtime-launch-api-marker",
+      "pattern": "(?i)(Process\\s*\\.\\s*(?:run|launch)|posix_spawn(?:p)?\\s*\\()"
+    },
+    {
+      "code": "native-loading-api-marker",
+      "pattern": "(?is)Bundle\\s*\\([^)]*\\)[\\s\\S]{0,512}\\.load\\s*\\("
     },
     {
       "code": "native-architecture-marker",

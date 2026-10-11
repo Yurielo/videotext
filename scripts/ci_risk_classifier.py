@@ -50,6 +50,7 @@ class Change:
     old_path: str | None = None
     binary: bool = False
     changed_text: str = ""
+    source_text: str = ""
     mode_changed: bool = False
 
 
@@ -121,6 +122,16 @@ def _changed_text(repo: pathlib.Path, base: str, head: str, path: str) -> str:
     return "\n".join(lines)
 
 
+def _source_text(repo: pathlib.Path, base: str, head: str, status: str, path: str) -> str:
+    revision = base if status == "D" else head
+    result = subprocess.run(
+        ["git", "show", f"{revision}:{path}"], cwd=repo, check=False, capture_output=True
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.decode("utf-8", "replace")
+
+
 def collect_changes(repo: pathlib.Path, base: str, head: str) -> list[Change]:
     raw = _git(
         repo,
@@ -161,6 +172,7 @@ def collect_changes(repo: pathlib.Path, base: str, head: str) -> list[Change]:
                 old_path=old_path,
                 binary=_is_native_binary(repo, base, head, short_status, path),
                 changed_text=_changed_text(repo, base, head, path),
+                source_text=_source_text(repo, base, head, short_status, path),
                 mode_changed=(
                     new_mode not in {"100644", "100755"}
                     if short_status == "A"
@@ -203,11 +215,17 @@ def _marker_reasons(change: Change, policy: dict) -> list[str]:
         return []
     if not any(change.path.startswith(prefix) for prefix in policy["markerScanPrefixes"]):
         return []
-    return [
+    reasons = [
         marker["code"]
         for marker in policy["infrastructureMarkers"]
         if re.search(marker["pattern"], change.changed_text)
     ]
+    for variable in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*load\s*\(", change.changed_text):
+        bundle_binding = rf"\b(?:let|var)\s+{re.escape(variable)}(?:\s*:[^=\n]+)?\s*=\s*Bundle\s*\("
+        if re.search(bundle_binding, change.source_text):
+            reasons.append("native-loading-api-marker")
+            break
+    return reasons
 
 
 def classify_changes(changes: Iterable[Change], policy: dict) -> dict:
@@ -229,13 +247,21 @@ def classify_changes(changes: Iterable[Change], policy: dict) -> dict:
             reasons.append({"code": code, "level": "LEVEL_B", "path": change.path})
         if change.binary:
             reasons.append({"code": "native-binary-content", "level": "LEVEL_B", "path": change.path})
-        ambiguous_new_file = change.status == "A" and any(
-            change.path.startswith(prefix)
-            for prefix in policy["ambiguousNewFileLevelBPrefixes"]
+        new_service = change.status == "A" and change.path.startswith("Sources/videotext/Services/")
+        presentation_service = new_service and any(
+            fnmatch.fnmatch(change.path, pattern)
+            for pattern in policy["newPresentationServiceGlobs"]
+        )
+        ambiguous_new_file = change.status == "A" and (
+            any(
+                fnmatch.fnmatch(change.path, pattern)
+                for pattern in policy["ambiguousNewInfrastructureFileGlobs"]
+            )
+            or (new_service and not presentation_service)
         )
         if ambiguous_new_file:
             reasons.append(
-                {"code": "ambiguous-new-service-or-adapter", "level": "LEVEL_B", "path": change.path}
+                {"code": "ambiguous-new-infrastructure-file", "level": "LEVEL_B", "path": change.path}
             )
         ambiguous_change_type = (
             change.status not in {"A", "M"}
