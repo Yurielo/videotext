@@ -1529,6 +1529,17 @@ final class WorkflowEngine: @unchecked Sendable {
         }
         let projectURL = try settings.projectURL ?? store.createAutomaticProject(for: mediaURL)
         let layout = ProjectLayout(root: projectURL)
+        if settings.selectedOperations.contains(.translateTranscript),
+           !settings.translationHumanReviewEnabled {
+            let sourceLanguage = try? store.load(from: projectURL).languageProfile?.effective
+            let isStandaloneLegacyTranslation = settings.selectedOperations == [.translateTranscript]
+                && sourceLanguage.map {
+                    !FileManager.default.fileExists(atPath: layout.subtitlesURL(language: $0).path)
+                } == true
+            guard isStandaloneLegacyTranslation else {
+                throw WorkflowError.processFailed("Перевод требует обязательного Translation Human Review.")
+            }
+        }
         let operations = expanded(
             settings.selectedOperations,
             includeFillerAnalysisBeforeReview: settings.fillerAnalysisBeforeReview

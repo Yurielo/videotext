@@ -824,6 +824,37 @@ struct EndToEndTest {
             )
         }
 
+        func assertMixedCanonicalTranslationFailsBeforeWork() async throws {
+            guard materializesLegacySource else { return }
+            let probeProject = evidence.appendingPathComponent("mixed-canonical-translation-preflight", isDirectory: true)
+            try FileManager.default.copyItem(at: projectURL, to: probeProject)
+            defer { try? FileManager.default.removeItem(at: probeProject) }
+
+            let probeLayout = ProjectLayout(root: probeProject)
+            try SRTService().writePreservingIDs(source, to: probeLayout.subtitlesURL(language: sourceLanguage))
+            try? FileManager.default.removeItem(at: probeLayout.logURL)
+            try? FileManager.default.removeItem(at: probeLayout.diagnosticsURL)
+            var mixedSettings = settings
+            mixedSettings.projectURL = probeProject
+            mixedSettings.selectedOperations = [.translateTranscript, .topicTimecoding]
+            var logs: [String] = []
+            do {
+                _ = try await engine(ProcessController()).run(settings: mixedSettings, onLog: { logs.append($0) })
+                throw EndToEndError.failed("Mixed canonical translation bypassed the Human Review preflight")
+            } catch {
+                try require(
+                    error.localizedDescription.contains("Перевод требует обязательного Translation Human Review."),
+                    "Mixed canonical translation did not fail at the required Human Review preflight"
+                )
+            }
+            try require(
+                logs.isEmpty
+                    && !FileManager.default.fileExists(atPath: probeLayout.logURL.path)
+                    && !FileManager.default.fileExists(atPath: probeLayout.diagnosticsURL.path),
+                "Mixed canonical translation began workflow work before the Human Review preflight"
+            )
+        }
+
         let identity = TranslationModelIdentity(
             model: OllamaTranslationProvider.model,
             digest: E2ETranslationWire.digest,
@@ -845,6 +876,7 @@ struct EndToEndTest {
         ) != nil
         try await assertCanonicalSourceStillRequiresHumanReview()
         try await assertZeroByteCanonicalSourceStaysCanonical()
+        try await assertMixedCanonicalTranslationFailsBeforeWork()
         let executionController = ProcessController()
         let resumed: WorkflowResult
         do {
