@@ -51,6 +51,7 @@ struct ContentView: View {
     @State private var knownProjects: [SimpleProjectBrowserEntry] = []
     @State private var simpleReviewTarget: SimpleProjectHomeReviewTarget?
     @State private var showsSimpleTextContent = false
+    @State private var simpleTranscription = SimpleTranscriptionPresentation()
 
     var body: some View {
         Group {
@@ -61,7 +62,7 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 980, minHeight: 680)
-        .alert(item: $model.alert) { alert in
+        .alert(item: simpleDisplayedAlert) { alert in
             if model.projectURL != nil {
                 return Alert(
                     title: Text(alert.title),
@@ -130,6 +131,24 @@ struct ContentView: View {
         .onChange(of: model.humanReviewCheckpoint) { _, checkpoint in
             if checkpoint != nil { selectedResultsTab = 2 }
             if checkpoint == nil { simpleReviewTarget = nil }
+            updateSimpleTranscriptionReview()
+        }
+        .onChange(of: model.isRunning) { _, _ in
+            updateSimpleTranscriptionReview()
+        }
+        .onChange(of: model.alert?.id) { _, _ in
+            updateSimpleTranscriptionReview()
+        }
+        .onChange(of: model.projectURL) { _, _ in
+            simpleTranscription.reset()
+            simpleReviewTarget = nil
+            editingReviewCue = nil
+            reviewSearch = ""
+            reviewIssuesOnly = false
+            showsSimpleTextContent = false
+        }
+        .onChange(of: presentationMode) { _, mode in
+            if mode != .simple { simpleTranscription.reset() }
         }
         .onChange(of: model.topicReviewCheckpoint) { _, checkpoint in
             if checkpoint != nil { selectedResultsTab = 1 }
@@ -276,12 +295,14 @@ struct ContentView: View {
     }
 
     private var simpleProgressPanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let fraction = SimpleTranscriptionPresentation.fraction(model.progress.overallFraction)
+        return VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Обработка выполняется")
+                Text(SimpleTranscriptionPresentation.stage(operation: model.progress.operation, isStopping: model.isStopping))
                     .font(.subheadline.bold())
+                    .accessibilityIdentifier("simple.progress.stage")
                 Spacer()
-                Text("Готово: \(percent(model.progress.overallFraction))")
+                Text("Выполнено: \(percent(fraction))")
                     .monospacedDigit()
                 Button(role: .destructive) {
                     model.stop()
@@ -289,12 +310,16 @@ struct ContentView: View {
                     Label(model.isStopping ? "Остановка..." : "Остановить обработку", systemImage: "stop.fill")
                 }
                 .disabled(model.isStopping)
+                .accessibilityIdentifier("simple.progress.stop")
             }
-            ProgressView(value: model.progress.overallFraction, total: 1)
+            ProgressView(value: fraction, total: 1)
+                .accessibilityIdentifier("simple.progress.fraction")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(Color(nsColor: .controlBackgroundColor))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("simple.progress.panel")
     }
 
     private var simpleEmptyState: some View {
@@ -569,12 +594,13 @@ struct ContentView: View {
                     }
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    Label(state.currentState, systemImage: simpleStateIcon(state))
+                    Label(simpleCurrentState(state), systemImage: simpleStateIcon(state))
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(simpleStateColor(state))
+                        .accessibilityIdentifier("simple.project.status")
                 }
 
-                simpleSectionTitle("Готово")
+                simpleSectionTitle(state.artifact(.transcription).readiness == .ready ? "Готово" : "Результаты")
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(state.artifacts) { artifact in
                         simpleArtifactRow(artifact, section: "ready")
@@ -701,6 +727,32 @@ struct ContentView: View {
                 .disabled(!model.canOpenHumanReview(language: language))
                 .accessibilityIdentifier("simple.\(section).\(artifact.kind.rawValue).correct")
             }
+            if artifact.kind == .transcription,
+               artifact.readiness == .missing || artifact.readiness == .failed {
+                if let language = model.simpleTranscriptionLockedLanguage {
+                    Label("Язык проекта: \(language.russianTitle)", systemImage: "lock")
+                        .font(.subheadline)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("simple.\(section).transcription.projectLanguage")
+                } else {
+                    Picker("Язык", selection: $model.whisperLanguage) {
+                        Text("RU").tag("ru")
+                        Text("EN").tag("en")
+                        Text("Авто").tag("auto")
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 210)
+                    .disabled(model.isRunning || model.humanReviewCheckpoint != nil || model.topicReviewCheckpoint != nil)
+                    .accessibilityLabel("Язык расшифровки")
+                    .accessibilityIdentifier("simple.\(section).transcription.language")
+                }
+                Button("Создать расшифровку") {
+                    startSimpleTranscription()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!model.canStartSimpleTranscription)
+                .accessibilityIdentifier("simple.\(section).transcription.create")
+            }
         }
         .padding(.vertical, 3)
         .accessibilityElement(children: .contain)
@@ -775,8 +827,66 @@ struct ContentView: View {
               checkpoint.kind == kind, checkpoint.language == language else {
             return
         }
+        presentSimpleReview(target)
+    }
+
+    private func presentSimpleReview(_ target: SimpleProjectHomeReviewTarget) {
+        reviewSearch = ""
+        reviewIssuesOnly = false
         showsSimpleTextContent = true
         simpleReviewTarget = target
+    }
+
+    private var simpleDisplayedAlert: Binding<AppAlert?> {
+        Binding(
+            get: {
+                guard let alert = model.alert else { return nil }
+                if presentationMode == .simple,
+                   simpleTranscription.suppressesReviewAlert(
+                       title: alert.title,
+                       projectURL: model.projectURL,
+                       checkpoint: model.humanReviewCheckpoint
+                   ) { return nil }
+                if presentationMode == .simple {
+                    return simpleTranscription.sourceRunAlert(alert, projectURL: model.projectURL)
+                }
+                return alert
+            },
+            set: { model.alert = $0 }
+        )
+    }
+
+    private func startSimpleTranscription() {
+        guard presentationMode == .simple, model.canStartSimpleTranscription,
+              let projectURL = model.projectURL else { return }
+        simpleTranscription.begin(projectURL: projectURL, language: model.simpleTranscriptionLanguage)
+        if model.startSimpleTranscription() {
+            showsSimpleTextContent = true
+            updateSimpleTranscriptionReview()
+        } else {
+            simpleTranscription.cancelPendingReview()
+        }
+    }
+
+    private func updateSimpleTranscriptionReview() {
+        guard presentationMode == .simple else { return }
+        if let alert = model.alert,
+           simpleTranscription.suppressesReviewAlert(
+               title: alert.title,
+               projectURL: model.projectURL,
+               checkpoint: model.humanReviewCheckpoint
+           ) {
+            model.alert = nil
+        }
+        if simpleTranscription.observe(
+            projectURL: model.projectURL,
+            mode: presentationMode,
+            isRunning: model.isRunning,
+            checkpoint: model.humanReviewCheckpoint,
+            failedOrStopped: model.status == "Ошибка" || model.status == "Остановлено"
+        ) != nil {
+            presentSimpleReview(.source)
+        }
     }
 
     private func simpleHumanReviewSheet(_ target: SimpleProjectHomeReviewTarget) -> some View {
@@ -817,14 +927,36 @@ struct ContentView: View {
         ))
     }
 
+    private func simpleCurrentState(_ state: SimpleProjectHomeState) -> String {
+        if model.isRunning {
+            return SimpleTranscriptionPresentation.stage(operation: model.progress.operation, isStopping: model.isStopping)
+        }
+        if model.status == "Остановлено" { return "Обработка остановлена" }
+        if model.status == "Ошибка" { return "Требуется внимание" }
+        switch state.artifact(.transcription).readiness {
+        case .missing: return "Расшифровка не создана"
+        case .failed: return "Расшифровка не завершена"
+        case .needsReview: return "Расшифровка ожидает проверки"
+        case .ready: return state.currentState
+        }
+    }
+
     private func simpleStateIcon(_ state: SimpleProjectHomeState) -> String {
+        if model.isRunning { return model.isStopping ? "stop.circle" : "waveform" }
+        if model.status == "Остановлено" { return "stop.circle" }
+        if model.status == "Ошибка" { return "exclamationmark.circle.fill" }
         if state.artifacts.contains(where: { $0.readiness == .failed }) { return "xmark.circle.fill" }
         if state.artifacts.contains(where: { $0.readiness == .needsReview }) { return "exclamationmark.circle.fill" }
+        if state.artifact(.transcription).readiness == .missing { return "minus.circle" }
         return "checkmark.circle.fill"
     }
 
     private func simpleStateColor(_ state: SimpleProjectHomeState) -> Color {
+        if model.isRunning { return model.isStopping ? .orange : .accentColor }
+        if model.status == "Остановлено" { return .orange }
+        if model.status == "Ошибка" { return .red }
         if state.artifacts.contains(where: { $0.readiness == .failed }) { return .red }
+        if state.artifact(.transcription).readiness == .missing { return .secondary }
         return state.artifacts.contains(where: { $0.readiness == .needsReview }) ? .orange : .green
     }
 

@@ -12,7 +12,7 @@ import Darwin
             let workspace = try OwnedTemporaryWorkspace()
             let child = Process()
             child.executableURL = URL(fileURLWithPath: "/bin/sleep")
-            child.arguments = ["20"]
+            child.arguments = ["120"]
             child.standardOutput = FileHandle.nullDevice
             child.standardError = FileHandle.nullDevice
             try workspace.prepareLaunch()

@@ -55,9 +55,13 @@ private struct RenderedAXElement {
     }
 
     func accessibilityLabel() -> String? {
-        if let modern { return modern.accessibilityLabel() }
-        let label = objectValue("accessibilityLabel") as? String
-        return label?.isEmpty == false ? label : objectValue("accessibilityTitle") as? String
+        let label = modern?.accessibilityLabel() ?? objectValue("accessibilityLabel") as? String
+        return label?.isEmpty == false ? label : accessibilityTitle()
+    }
+
+    func accessibilityTitle() -> String? {
+        if let modern { return modern.accessibilityTitle() }
+        return objectValue("accessibilityTitle") as? String
     }
 
     func accessibilityValue() -> Any? {
@@ -148,6 +152,7 @@ struct SimpleRenderedControlsProbe {
             try require(retainedRoot != nil, "--prepare-fixture requires VIDEOTEXT_UI_FIXTURE_ROOT")
             return
         }
+        try verifyTranscriptionPresentation()
         _ = NSApplication.shared
         NSApplication.shared.setActivationPolicy(.accessory)
         NSApplication.shared.finishLaunching()
@@ -155,6 +160,7 @@ struct SimpleRenderedControlsProbe {
             NSNumber(value: true),
             forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface")
         )
+        try verifyCreationControls(project: scratch.appendingPathComponent("new-source"), media: media)
         // Each Source/Translation scenario has its own project. Source review can
         // legitimately invalidate downstream artifacts; the retained fixture is untouched.
         for source in [ArtifactLanguage.ru, .en] {
@@ -284,6 +290,33 @@ struct SimpleRenderedControlsProbe {
         settle(window)
     }
 
+    private static func clickRenderedSegment(_ segment: RenderedAXElement, in window: NSWindow) throws {
+        let frame = segment.accessibilityFrame()
+        let screenPoint = NSPoint(x: frame.midX, y: frame.midY)
+        try require(segment.isAccessibilityEnabled() && frame.width > 0 && frame.height > 0
+            && window.frame.contains(screenPoint), "Rendered segment has no enabled in-window mouse target")
+        let location = window.convertPoint(fromScreen: screenPoint)
+        let timestamp = ProcessInfo.processInfo.systemUptime
+        guard let down = NSEvent.mouseEvent(with: .leftMouseDown, location: location, modifierFlags: [],
+                  timestamp: timestamp, windowNumber: window.windowNumber, context: nil,
+                  eventNumber: 1, clickCount: 1, pressure: 1),
+              let up = NSEvent.mouseEvent(with: .leftMouseUp, location: location, modifierFlags: [],
+                  timestamp: timestamp + 0.01, windowNumber: window.windowNumber, context: nil,
+                  eventNumber: 2, clickCount: 1, pressure: 0) else {
+            throw RenderedProbeFailure(message: "Could not construct native segment mouse events")
+        }
+        print("NATIVE_LANGUAGE_CLICK screen=\(screenPoint) window=\(location) key=\(window.isKeyWindow)")
+        // Native controls can synchronously track until mouse-up inside mouseDown.
+        // Queue the release first so dispatch cannot block waiting for the test.
+        NSApplication.shared.postEvent(up, atStart: true)
+        NSApplication.shared.sendEvent(down)
+        if let release = NSApplication.shared.nextEvent(matching: .leftMouseUp, until: .distantPast,
+                                                        inMode: .default, dequeue: true) {
+            NSApplication.shared.sendEvent(release)
+        }
+        settle(window)
+    }
+
     private static func assertSimple(_ window: NSWindow) throws {
         let picker = try element("simple.modePicker", in: window)
         let simpleSelected = tree(picker).contains {
@@ -291,6 +324,235 @@ struct SimpleRenderedControlsProbe {
         }
         let value = picker.accessibilityValue() as? String
         try require(simpleSelected || value == "Простой" || value == "simple", "Global mode is not rendered as selected Simple")
+    }
+
+    private static func verifyTranscriptionPresentation() throws {
+        let project = URL(fileURLWithPath: "/private/tmp/simple-transcription-presentation")
+        let other = project.appendingPathComponent("other")
+        let start = Date(timeIntervalSince1970: 100)
+        let source = HumanReviewCheckpoint(kind: .sourceTranscript, language: .ru, revisionID: "new-source",
+            pendingOperations: [.validateTimeline], createdAt: start.addingTimeInterval(1))
+        var flow = SimpleTranscriptionPresentation()
+        flow.begin(projectURL: project, language: "ru", now: start)
+        try require(flow.observe(projectURL: project, mode: .simple, isRunning: false, checkpoint: source) == nil,
+            "A checkpoint without the explicit run's running edge must not open review")
+        try require(flow.observe(projectURL: project, mode: .simple, isRunning: true, checkpoint: source) == nil,
+            "Review must wait until processing finishes")
+        try require(flow.suppressesReviewAlert(title: "Требуется Human Review", projectURL: project, checkpoint: source),
+            "The competing source review alert must be suppressed before running becomes false")
+        try require(!flow.suppressesReviewAlert(title: "Ошибка обработки", projectURL: project, checkpoint: source),
+            "A real failure alert must remain visible")
+        var translated = source
+        translated.kind = .translatedTranscript
+        try require(!flow.suppressesReviewAlert(title: "Требуется Human Review", projectURL: project, checkpoint: translated),
+            "Translation review must not be suppressed by source intent")
+        try require(flow.observe(projectURL: project, mode: .simple, isRunning: false, checkpoint: source) == source,
+            "Checkpoint-before-finish sequence did not open the exact source review")
+        try require(flow.observe(projectURL: project, mode: .simple, isRunning: false, checkpoint: source) == nil,
+            "Closing review must not cause an automatic reopen")
+
+        flow.begin(projectURL: project, language: "auto", now: start)
+        _ = flow.observe(projectURL: project, mode: .simple, isRunning: true, checkpoint: nil)
+        try require(flow.observe(projectURL: project, mode: .simple, isRunning: false, checkpoint: nil) == nil,
+            "Finishing without a checkpoint must not invent review readiness")
+        var english = source
+        english.language = .en
+        try require(flow.observe(projectURL: project, mode: .simple, isRunning: false, checkpoint: english) == english,
+            "Finish-before-checkpoint sequence or Auto language failed")
+
+        flow.begin(projectURL: project, language: "ru", now: start)
+        _ = flow.observe(projectURL: project, mode: .simple, isRunning: true, checkpoint: nil)
+        try require(flow.observe(projectURL: project, mode: .simple, isRunning: false, checkpoint: english) == nil,
+            "A different-language checkpoint satisfied explicit RU intent")
+        var stale = source
+        stale.createdAt = start.addingTimeInterval(-1)
+        try require(flow.observe(projectURL: project, mode: .simple, isRunning: false, checkpoint: stale) == nil,
+            "A previous run's checkpoint satisfied new source intent")
+        _ = flow.observe(projectURL: project, mode: .simple, isRunning: true, checkpoint: nil)
+        try require(flow.observe(projectURL: project, mode: .simple, isRunning: false, checkpoint: source) == nil,
+            "An unrelated later run inherited the previous intent")
+
+        for mode in [ProjectPresentationMode.simple, .advanced] {
+            flow.begin(projectURL: project, language: "ru", now: start)
+            _ = flow.observe(projectURL: project, mode: .simple, isRunning: true, checkpoint: nil)
+            let destination = mode == .simple ? other : project
+            _ = flow.observe(projectURL: destination, mode: mode, isRunning: false, checkpoint: source)
+            try require(flow.observe(projectURL: project, mode: .simple, isRunning: false, checkpoint: source) == nil,
+                "Project/mode switch must invalidate auto-review intent")
+        }
+        flow.begin(projectURL: project, language: "ru", now: start)
+        _ = flow.observe(projectURL: project, mode: .simple, isRunning: true, checkpoint: nil)
+        _ = flow.observe(projectURL: project, mode: .simple, isRunning: false, checkpoint: nil, failedOrStopped: true)
+        try require(flow.observe(projectURL: project, mode: .simple, isRunning: false, checkpoint: source) == nil,
+            "An error/cancellation must not later auto-open review")
+        let raw = AppAlert(title: "Ошибка обработки", message: "/internal/manifest.json: CLI runtime failure")
+        let readable = flow.sourceRunAlert(raw, projectURL: project)
+        try require(readable.id == raw.id && readable.title == "Не удалось создать расшифровку"
+            && !readable.message.contains("manifest") && !readable.message.contains("CLI")
+            && raw.message.contains("/internal/manifest.json"), "Simple error rendering lost diagnostics or leaked internal details")
+        try require(flow.sourceRunAlert(raw, projectURL: other).message == raw.message,
+            "Source error rendering changed another project's alert")
+        let stopped = flow.sourceRunAlert(AppAlert(title: "Обработка остановлена", message: "internal details"), projectURL: project)
+        try require(stopped.message.contains("не завершена"), "Cancellation was represented as successful transcription")
+        try require(SimpleTranscriptionPresentation.stage(operation: .createManifest, isStopping: false) == "Проверяем исходный файл",
+            "A technical stage name leaked into Simple progress")
+        try require(SimpleTranscriptionPresentation.fraction(.nan) == 0
+            && SimpleTranscriptionPresentation.fraction(2) == 1
+            && SimpleTranscriptionPresentation.fraction(-1) == 0, "Simple progress must remain finite and within 0...1")
+        print("SIMPLE_TRANSCRIPTION_PRESENTATION_CONTRACT_PASS")
+    }
+
+    private static func renderedText(_ node: RenderedAXElement) -> String {
+        tree(node).flatMap { [$0.accessibilityLabel(), $0.accessibilityValue() as? String].compactMap { $0 } }
+            .joined(separator: " ")
+    }
+
+    private static func assertSourceRowFits(_ section: String, window: NSWindow) throws {
+        let row = try element("simple.\(section).transcription.row", in: window).accessibilityFrame()
+        try require(row.minX >= window.frame.minX && row.maxX <= window.frame.maxX,
+            "Rendered source row exceeds the 980-point window")
+        for action in ["create", "language", "projectLanguage", "open", "correct"] {
+            for control in nodes(window).filter({ $0.accessibilityIdentifier() == "simple.\(section).transcription.\(action)" }) {
+                let frame = control.accessibilityFrame()
+                try require(frame.width > 0 && frame.height > 0 && frame.minX >= row.minX - 2 && frame.maxX <= row.maxX + 2,
+                    "Rendered source \(action) is clipped or outside its row")
+            }
+        }
+    }
+
+    private static func verifyCreationControls(project: URL, media: URL) throws {
+        _ = try ProjectStore().ensureProject(at: project, mediaURL: media, mode: .newProject)
+        let model = WorkflowViewModel()
+        model.projectURL = project
+        model.mediaURL = media
+        model.sourceHumanReviewEnabled = false
+        model.loadDetectedResults()
+        let advancedOperations = model.selectedOperations
+        let host = NSHostingView(rootView: ContentView(model: model))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        settle(window)
+        try assertSimple(window)
+        try require(!model.isRunning && model.whisperLanguage == "ru", "Opening new media must not start processing or change default RU")
+        let create = try element("simple.ready.transcription.create", in: window)
+        try require(create.accessibilityRole() == .button && create.accessibilityLabel() == "Создать расшифровку"
+            && create.isAccessibilityEnabled() == model.canStartSimpleTranscription, "Missing transcript has no truthful rendered creation action")
+        try require(!nodes(window).contains { ["simple.ready.transcription.open", "simple.ready.transcription.correct"].contains($0.accessibilityIdentifier() ?? "") },
+            "Missing transcript exposes Open/Correct alongside creation")
+        try assertSourceRowFits("ready", window: window)
+        for (label, language) in [("EN", "en"), ("Авто", "auto")] {
+            let picker = try element("simple.ready.transcription.language", in: window)
+            let descendants = tree(picker)
+            print("AX_LANGUAGE_PICKER option=\(label) binding=\(model.whisperLanguage) nodes=\(descendants.count) running=\(model.isRunning) sourcePending=\(model.humanReviewCheckpoint != nil) topicsPending=\(model.topicReviewCheckpoint != nil)")
+            for node in descendants.prefix(16) {
+                print("AX_LANGUAGE_NODE type=\(type(of: node.object)) protocol=\(node.object is NSAccessibilityProtocol) role=\(node.accessibilityRole()?.rawValue ?? "nil") label=\(node.accessibilityLabel() ?? "nil") title=\(node.accessibilityTitle() ?? "nil") value=\(String(describing: node.accessibilityValue())) enabled=\(node.isAccessibilityEnabled()) frame=\(node.accessibilityFrame()) responds={\(node.selectorDiagnostics)}")
+            }
+            let options = descendants.filter { $0.accessibilityRole() == .radioButton && $0.accessibilityLabel() == label }
+            try require(options.count == 1, "Rendered language option \(label): expected one AX radio button, found \(options.count)")
+            let option = options[0]
+            try require(picker.isAccessibilityEnabled() && option.isAccessibilityEnabled(), "Rendered language option \(label) is disabled")
+            let frame = option.accessibilityFrame()
+            try require(frame.width > 0 && frame.height > 0, "Rendered language option \(label) has an empty hit target")
+            let performed = option.accessibilityPerformPress()
+            print("AX_LANGUAGE_PRESS option=\(label) performed=\(performed)")
+            if !performed {
+                // NSAccessibilitySegment may expose press without forwarding it
+                // to its NSSegmentedControl. Exercise the actual mouse hit target.
+                try clickRenderedSegment(option, in: window)
+            }
+            settle(window)
+            print("AX_LANGUAGE_BINDING option=\(label) expected=\(language) actual=\(model.whisperLanguage)")
+            try require(model.whisperLanguage == language, "Simple picker did not update the existing language binding")
+            let updatedPicker = try element("simple.ready.transcription.language", in: window)
+            let selected = tree(updatedPicker).filter {
+                $0.accessibilityRole() == .radioButton && $0.accessibilityLabel() == label
+            }
+            try require(selected.count == 1 && (selected[0].accessibilityValue() as? NSNumber)?.intValue == 1,
+                "Rendered language option \(label) was not selected after the UI action")
+        }
+        try press("simple.goal.textContent", in: window)
+        _ = try element("simple.textContent.transcription.create", in: window)
+        try assertSourceRowFits("textContent", window: window)
+        try assertSimple(window)
+        model.progress = WorkflowProgress(operation: .transcribe, operationFraction: 0.2, overallFraction: 0.1,
+            elapsed: 1, estimatedTotal: nil, remaining: nil, isIndeterminate: true)
+        model.isRunning = true
+        settle(window)
+        try require(!element("simple.ready.transcription.create", in: window).isAccessibilityEnabled()
+            && !element("simple.ready.transcription.language", in: window).isAccessibilityEnabled(), "Running source controls allow a second start/language change")
+        try require(renderedText(element("simple.progress.stage", in: window)).contains("Создаём расшифровку"), "Actual Simple progress did not render the transcription stage")
+        try require(element("simple.progress.stop", in: window).isAccessibilityEnabled(), "Simple stop is missing during processing")
+        model.isStopping = true
+        settle(window)
+        try require(!element("simple.progress.stop", in: window).isAccessibilityEnabled()
+            && renderedText(element("simple.progress.stage", in: window)).contains("Останавливаем"), "Simple stopping state is incorrect")
+        model.isRunning = false
+        model.isStopping = false
+        model.status = "Остановлено"
+        settle(window)
+        try require(renderedText(element("simple.project.status", in: window)).contains("остановлена")
+            && element("simple.ready.transcription.create", in: window).isAccessibilityEnabled() == model.canStartSimpleTranscription,
+            "Cancellation must retain an honest status and retry action")
+        model.status = "Ошибка"
+        settle(window)
+        try require(renderedText(element("simple.project.status", in: window)).contains("Требуется внимание"), "Error was rendered as a ready project")
+        _ = try element("simple.ready.transcription.create", in: window)
+        try require(model.selectedOperations == advancedOperations && !model.sourceHumanReviewEnabled,
+            "Simple presentation rewrote Advanced settings")
+        try assertSimple(window)
+
+        // A cancelled new-project run may already have reusable SRT and a fixed
+        // language. A stale Advanced picker value must not become the retry intent.
+        let store = ProjectStore()
+        var manifest = try store.load(from: project)
+        manifest.languageProfile = LanguageProfile(
+            detected: .ru, effective: .ru, confidence: 1, method: "fixture",
+            model: nil, modelVersion: nil, sampleRanges: [], manuallyOverridden: false, detectedAt: Date()
+        )
+        try store.save(manifest, to: project)
+        try SRTService().writePreservingIDs(
+            [SubtitleCue(id: 1, start: 0, end: 2, text: "Persisted source cue.")],
+            to: ProjectLayout(root: project).fullSRTURL
+        )
+        for reopened in [false, true] {
+            if reopened { model.openProject(project) }
+            model.status = "Остановлено"
+            model.whisperLanguage = "en"
+            model.loadDetectedResults()
+            settle(window)
+            if reopened {
+                try press("simple.goal.textContent", in: window)
+            }
+            _ = try element("simple.textContent.panel", in: window)
+            try assertSimple(window)
+            try require(model.simpleTranscriptionLockedLanguage == .ru && model.simpleTranscriptionLanguage == "ru",
+                "Persisted RU did not override stale EN for same-session/reopened retry")
+            for section in ["ready", "textContent"] {
+                try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.\(section).transcription.language" },
+                    "Locked project rendered an editable language picker")
+                let language = try element("simple.\(section).transcription.projectLanguage", in: window)
+                try require(renderedText(language).contains("Язык проекта: Русский"),
+                    "Locked project did not render its actual language in friendly terms")
+                try require(element("simple.\(section).transcription.create", in: window).isAccessibilityEnabled()
+                    == model.canStartSimpleTranscription, "Locked retry lost its rendered creation action")
+                try assertSourceRowFits(section, window: window)
+            }
+            let start = Date(timeIntervalSince1970: 100)
+            let checkpoint = HumanReviewCheckpoint(kind: .sourceTranscript, language: .ru, revisionID: "resumed-source",
+                pendingOperations: [.validateTimeline], createdAt: start.addingTimeInterval(1))
+            var flow = SimpleTranscriptionPresentation()
+            flow.begin(projectURL: project, language: model.simpleTranscriptionLanguage, now: start)
+            _ = flow.observe(projectURL: project, mode: .simple, isRunning: true, checkpoint: nil)
+            try require(flow.observe(projectURL: project, mode: .simple, isRunning: false, checkpoint: checkpoint) == checkpoint,
+                "Effective retry language rejected the persisted source checkpoint")
+            try require(!model.isRunning && model.whisperLanguage == "en", "Language presentation started work or rewrote Advanced binding")
+            try assertSimple(window)
+        }
+        print("SIMPLE_TRANSCRIPTION_RENDERED_CONTROLS_PASS: creation/language/progress/stop/retry/locked-resume; 980x680; no processing invoked")
     }
 
     private static func verify(project: URL, source: ArtifactLanguage, translation: Bool, evidence: URL?, name: String) throws {
@@ -310,10 +572,14 @@ struct SimpleRenderedControlsProbe {
         settle(window)
         try assertSimple(window)
         try assertControls("ready", window: window)
+        try assertSourceRowFits("ready", window: window)
+        try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.ready.transcription.create" },
+            "Approved source must offer Open/Correct instead of creation")
         try press("simple.goal.textContent", in: window)
         _ = try element("simple.textContent.panel", in: window)
         try assertSimple(window)
         try assertControls("textContent", window: window)
+        try assertSourceRowFits("textContent", window: window)
         if let evidence {
             let directory = evidence.appendingPathComponent("rendered-\(name)-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -345,6 +611,9 @@ struct SimpleRenderedControlsProbe {
         try require(model.reviewCues.count == 2 && model.reviewCues[0].start == 0 && model.reviewCues[0].end == 2
             && model.reviewCues[0].text.hasPrefix(language.rawValue.uppercased()), "Wrong language/timed cues inside rendered review")
         try assertSimple(window)
+        try press("humanReview.issuesOnly", in: window)
+        try require((element("humanReview.issuesOnly", in: window).accessibilityValue() as? NSNumber)?.intValue == 1,
+            "Rendered review filter was not enabled by its actual control")
         try press("simple.review.\(target).close", in: window)
         _ = try element("simple.textContent.panel", in: window)
         try assertSimple(window)
@@ -352,6 +621,8 @@ struct SimpleRenderedControlsProbe {
         try require(!element("simple.textContent.\(unrelated).correct", in: window).isAccessibilityEnabled(), "Unrelated language Correct must be disabled during pending review")
         try press("simple.textContent.\(artifact).correct", in: window)
         _ = try element("simple.review.\(target).sheet", in: window)
+        try require((element("humanReview.issuesOnly", in: window).accessibilityValue() as? NSNumber)?.intValue == 0,
+            "Reopening rendered review retained the previous issues-only filter")
         try require(try ProjectStore().load(from: project).humanReviewState?.pendingCheckpoint == checkpoint, "Reopen changed persisted pending checkpoint")
         try press("simple.review.\(target).close", in: window)
         _ = try element("simple.textContent.panel", in: window)

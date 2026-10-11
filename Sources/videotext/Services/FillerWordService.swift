@@ -18,14 +18,16 @@ struct FillerWordService {
         whisperJSONURL: URL,
         cues: [SubtitleCue],
         language: ArtifactLanguage,
-        transcriptRevisionID: String
+        transcriptRevisionID: String,
+        mediaDuration: TimeInterval? = nil
     ) throws -> FillerAnalysisReport {
         let words = try wordTimeline(
             whisperJSONURL: whisperJSONURL,
             cues: cues,
             transcriptRevisionID: transcriptRevisionID
         )
-        return report(words: words, language: language, transcriptRevisionID: transcriptRevisionID)
+        return report(words: words, cues: cues, language: language,
+                      transcriptRevisionID: transcriptRevisionID, mediaDuration: mediaDuration)
     }
 
     /// Uses the selected Whisper attempt's token evidence for native
@@ -35,10 +37,12 @@ struct FillerWordService {
         selectedTiming: TimedSourceDocument,
         cues: [SubtitleCue],
         language: ArtifactLanguage,
-        transcriptRevisionID: String
+        transcriptRevisionID: String,
+        mediaDuration: TimeInterval? = nil
     ) throws -> FillerAnalysisReport {
         try selectedTiming.validateCoverage()
         let words = selectedTiming.tokenTimeline.compactMap { token -> WordTimelineEntry? in
+            guard !(token.text.hasPrefix("[_") && token.text.hasSuffix("]")) else { return nil }
             let normalized = normalize(token.text)
             guard !normalized.isEmpty, normalized.rangeOfCharacter(from: .letters) != nil else { return nil }
             let cueID = cues.max { lhs, rhs in
@@ -58,13 +62,16 @@ struct FillerWordService {
         guard !words.isEmpty else {
             throw WorkflowError.processFailed("Selected timing не содержит слов с временными границами для анализа слов-паразитов.")
         }
-        return report(words: words, language: language, transcriptRevisionID: transcriptRevisionID)
+        return report(words: words, cues: cues, language: language,
+                      transcriptRevisionID: transcriptRevisionID, mediaDuration: mediaDuration)
     }
 
     private func report(
         words: [WordTimelineEntry],
+        cues: [SubtitleCue],
         language: ArtifactLanguage,
-        transcriptRevisionID: String
+        transcriptRevisionID: String,
+        mediaDuration: TimeInterval?
     ) -> FillerAnalysisReport {
         let definitions = (phrases[language] ?? []).sorted { $0.count > $1.count }
         var matches: [(range: Range<Int>, phrase: [String])] = []
@@ -79,8 +86,34 @@ struct FillerWordService {
                 break
             }
         }
-        let counts = Dictionary(grouping: matches, by: { $0.phrase.joined(separator: " ") }).mapValues(\.count)
-        let candidates = matches.enumerated().map { matchIndex, match -> FillerWordCandidate in
+        // Word entries retain raw Whisper boundaries, including reverse
+        // intervals. Candidates are actionable preview/mute ranges, so only
+        // their derived envelope must be ordered and usable for media.
+        let validCueTimeline = !cues.isEmpty && cues.allSatisfy {
+            $0.id > 0 && $0.start.isFinite && $0.end.isFinite
+                && $0.start >= 0 && $0.end > $0.start
+        }
+        let playableStart = validCueTimeline ? cues.map(\.start).min() : nil
+        let cueEnd = validCueTimeline ? cues.map(\.end).max() : nil
+        let playableEnd = cueEnd.flatMap { end -> TimeInterval? in
+            guard let mediaDuration else { return end }
+            guard mediaDuration.isFinite, mediaDuration > 0 else { return nil }
+            return min(end, mediaDuration)
+        }
+        let actionableMatches = matches.compactMap { match -> (range: Range<Int>, phrase: [String], start: TimeInterval, end: TimeInterval, cueID: Int)? in
+            let boundaries = words[match.range].flatMap { [$0.start, $0.end] }
+            guard let start = boundaries.min(), let end = boundaries.max(),
+                  let playableStart, let playableEnd,
+                  start.isFinite, end.isFinite, start >= playableStart, end <= playableEnd,
+                  end > start,
+                  let cue = cues.max(by: {
+                      overlap($0, (start: start, end: end)) < overlap($1, (start: start, end: end))
+                  }),
+                  overlap(cue, (start: start, end: end)) > 0 else { return nil }
+            return (match.range, match.phrase, start, end, cue.id)
+        }
+        let counts = Dictionary(grouping: actionableMatches, by: { $0.phrase.joined(separator: " ") }).mapValues(\.count)
+        let candidates = actionableMatches.enumerated().map { matchIndex, match -> FillerWordCandidate in
             let matchedWords = Array(words[match.range])
             let normalized = match.phrase.joined(separator: " ")
             let confidenceValues = matchedWords.compactMap(\.confidence)
@@ -100,9 +133,9 @@ struct FillerWordService {
                 id: "filler-\(transcriptRevisionID)-\(matchIndex)-\(matchedWords.first?.id ?? "word")",
                 text: matchedWords.map(\.text).joined(separator: " "),
                 normalized: normalized,
-                start: matchedWords.first?.start ?? 0,
-                end: matchedWords.last?.end ?? 0,
-                cueID: matchedWords.first?.cueID ?? 0,
+                start: match.start,
+                end: match.end,
+                cueID: match.cueID,
                 transcriptRevisionID: transcriptRevisionID,
                 language: language,
                 confidence: confidence,
@@ -143,6 +176,9 @@ struct FillerWordService {
             guard let tokens = segment["tokens"] as? [[String: Any]] else { continue }
             for token in tokens {
                 guard let raw = (token["text"] as? String) ?? (token["token"] as? String) else { continue }
+                // Core whisper.json retains Whisper control markers as raw
+                // provenance; they are not speech words for filler analysis.
+                guard !(raw.hasPrefix("[_") && raw.hasSuffix("]")) else { continue }
                 let normalized = normalize(raw)
                 guard !normalized.isEmpty, normalized.rangeOfCharacter(from: .letters) != nil,
                       let range = timeRange(from: token) else { continue }
@@ -164,16 +200,16 @@ struct FillerWordService {
         guard !words.isEmpty else {
             throw WorkflowError.processFailed("whisper.json не содержит слов с временными границами; требуется повторная расшифровка с token timestamps.")
         }
-        return words.sorted { $0.start == $1.start ? $0.end < $1.end : $0.start < $1.start }
+        return words
     }
 
     private func timeRange(from token: [String: Any]) -> (start: TimeInterval, end: TimeInterval)? {
         if let offsets = token["offsets"] as? [String: Any],
-           let from = number(offsets["from"]), let to = number(offsets["to"]), to > from {
+           let from = number(offsets["from"]), let to = number(offsets["to"]), from >= 0, to >= 0 {
             return (from / 1000, to / 1000)
         }
         if let timestamps = token["timestamps"] as? [String: Any],
-           let from = timestamp(timestamps["from"]), let to = timestamp(timestamps["to"]), to > from {
+           let from = timestamp(timestamps["from"]), let to = timestamp(timestamps["to"]), from >= 0, to >= 0 {
             return (from, to)
         }
         return nil
@@ -193,7 +229,11 @@ struct FillerWordService {
     }
 
     private func overlap(_ cue: SubtitleCue, _ range: (start: TimeInterval, end: TimeInterval)) -> TimeInterval {
-        max(0, min(cue.end, range.end) - max(cue.start, range.start))
+        // Cue association consumes a derived envelope; report.words retains
+        // the raw token start/end exactly as selected Whisper supplied them.
+        let start = min(range.start, range.end)
+        let end = max(range.start, range.end)
+        return max(0, min(cue.end, end) - max(cue.start, start))
     }
 
     private func normalize(_ text: String) -> String {

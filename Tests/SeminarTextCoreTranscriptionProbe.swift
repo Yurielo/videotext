@@ -6,6 +6,7 @@ struct SeminarTextCoreTranscriptionProbe {
         do {
             try await verifyCoreRunner()
             try verifyAbsoluteOffsetImport()
+            try verifyReverseRawImport()
             try await verifyReleaseBoundary()
             print("SEMINARTEXT_CORE_TRANSCRIPTION_PROBE_PASS")
         } catch {
@@ -71,6 +72,73 @@ struct SeminarTextCoreTranscriptionProbe {
                     "core whisper import did not preserve absolute timestamp semantics")
         try require(token?["p"] as? Double == 0.73,
                     "core whisper import invented or lost token confidence")
+    }
+
+    private static func verifyReverseRawImport() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("videotext-core-reverse-raw-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let parts = root.appendingPathComponent("parts", isDirectory: true)
+        try FileManager.default.createDirectory(at: parts, withIntermediateDirectories: true)
+        let media = root.appendingPathComponent("source.mp4")
+        try Data("reverse-raw-media".utf8).write(to: media)
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/ReverseRawTokens.json")
+        let jsonURL = parts.appendingPathComponent("part_0000.json")
+        try Data(contentsOf: fixture).write(to: jsonURL)
+        let manifest: [String: Any] = [
+            "schema_version": 1,
+            "artifact_type": "seminartext.selected_whisper_timing",
+            "source": ["media_sha256": SelectedTimingHash.file(media)],
+            "transcription": ["language": "en"],
+            "parts": [[
+                "id": "part_0000", "order": 0, "absolute_offset_seconds": 300.0,
+                "selected_timing_absolute_range": ["start_seconds": 300.0, "end_seconds": 301.2],
+                "artifacts": ["json_full": [
+                    "path": "parts/part_0000.json", "sha256": SelectedTimingHash.file(jsonURL)
+                ]]
+            ]]
+        ]
+        try JSONSerialization.data(withJSONObject: manifest).write(to: root.appendingPathComponent("manifest.json"))
+        let data = try SeminarTextCoreWhisperEvidenceImporter().importSelectedWhisperJSON(
+            packageRoot: root, expectedMediaURL: media, expectedLanguage: .en
+        )
+        let imported = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let tokens = ((imported?["transcription"] as? [[String: Any]])?.first?["tokens"] as? [[String: Any]]) ?? []
+        let expected: [(String, Int, Int)] = [
+            (" Um", 300_120, 300_080), (" I", 300_150, 300_250),
+            (" um", 300_340, 300_310), (" speak.", 300_400, 300_620)
+        ]
+        try require(tokens.count == expected.count, "core importer removed reverse raw tokens")
+        try require(zip(tokens, expected).allSatisfy { token, item in
+            let offsets = token["offsets"] as? [String: Any]
+            return token["text"] as? String == item.0
+                && (offsets?["from"] as? NSNumber)?.intValue == item.1
+                && (offsets?["to"] as? NSNumber)?.intValue == item.2
+        }, "core importer changed reverse raw endpoints or token order")
+        let firstTimestamps = tokens[0]["timestamps"] as? [String: Any]
+        try require(firstTimestamps?["from"] as? String == "00:05:00.120"
+                    && firstTimestamps?["to"] as? String == "00:05:00.080",
+                    "core importer changed reverse raw timestamp direction")
+        let importedURL = root.appendingPathComponent("whisper.json")
+        try data.write(to: importedURL)
+        try require(SeminarTextCoreWhisperEvidenceImporter().validateLegacyWhisperJSON(at: importedURL),
+                    "core whisper.json rejected reverse-only raw evidence")
+        let report = try FillerWordService().analyze(
+            whisperJSONURL: importedURL,
+            cues: [SubtitleCue(id: 1, start: 300, end: 301.2, text: "Um I um speak.")],
+            language: .en,
+            transcriptRevisionID: "core-reverse-raw"
+        )
+        try require(report.words.map(\.text) == ["Um", "I", "um", "speak."],
+                    "core filler analysis removed or reordered reverse raw words")
+        try require(report.words[0].start == 300.12 && report.words[0].end == 300.08
+                    && report.words[2].start == 300.34 && report.words[2].end == 300.31,
+                    "core filler analysis changed reverse raw endpoints")
+        try require(report.candidates.filter { $0.normalized == "um" }.count == 2
+                    && report.candidates.allSatisfy { $0.start >= 0 && $0.end > $0.start },
+                    "core filler analysis lost reverse words or emitted invalid executable candidates")
+        print("REVERSE_RAW_CORE_IMPORT_PRESERVATION_PASS")
     }
 
     private static func verifyCoreRunner() async throws {
@@ -209,7 +277,7 @@ struct SeminarTextCoreTranscriptionProbe {
             throw WorkflowError.processFailed("translation unexpectedly started without an approved EN project")
         } catch let error as WorkflowError {
             guard case .processFailed(let message) = error,
-                  message.contains("существующего проекта с утверждённой английской") else {
+                  message.contains("существующего проекта с утверждённой исходной расшифровкой") else {
                 throw error
             }
         }

@@ -1065,7 +1065,7 @@ run_whisper_piece() {
   [[ "$SOURCE_LANGUAGE" == "ru" && "$retry" -eq 0 ]] && cmd+=(--prompt "$PROMPT")
   cmd+=(--vad -vm "$VAD_MODEL" -vt "$threshold" -vspd 250 -vsd "$silence" -vp 200 -vo 0.10 -nth 0.60 -sns -ml 80 -sow -otxt -osrt)
   (( STRUCTURED_TIMING == 1 )) && cmd+=(-ojf)
-  cmd+=(-nt -pp -of "$prefix")
+  cmd+=(-pp -of "$prefix")
   set +e
   "${cmd[@]}" 2>&1 | tee -a "$log"
   local status=${PIPESTATUS[0]}

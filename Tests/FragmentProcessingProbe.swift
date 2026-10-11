@@ -103,6 +103,36 @@ struct FragmentProcessingProbe {
             fragmentApplyBlur: true
         )
 
+        var invalidPersistedReport = fillerReport
+        invalidPersistedReport.words = [WordTimelineEntry(
+            id: "raw-outside-media", text: "ээ", normalized: "ээ",
+            start: 3.3, end: 3.2, cueID: 1,
+            transcriptRevisionID: "revision-probe", confidence: 0.9
+        )]
+        invalidPersistedReport.candidates[0].start = 3.2
+        invalidPersistedReport.candidates[0].end = 3.3
+        try encoder.encode(invalidPersistedReport).write(to: layout.fillerWordsURL, options: .atomic)
+        do {
+            _ = try await WorkflowEngine(store: store).renderProcessedFragment(
+                fragment, projectURL: projectURL, settings: settings,
+                removeSourceAfterSuccess: false, onProgress: { _ in }, log: { _ in }
+            )
+            throw ProbeFailure(message: "fragment mute accepted a persisted candidate beyond source media")
+        } catch let error as ProbeFailure {
+            throw error
+        } catch let error as WorkflowError {
+            guard case .processFailed(let message) = error,
+                  message.contains("пределы исходного медиа") else { throw error }
+        }
+        let rejectedReport = try FillerWordService().load(from: layout.fillerWordsURL)
+        try require(rejectedReport.words.count == 1
+                    && rejectedReport.words[0].start == 3.3
+                    && rejectedReport.words[0].end == 3.2,
+                    "fragment mute rejection changed raw reverse word evidence")
+        try require(!fileManager.fileExists(atPath: layout.processedFragmentVideoURL(kind: fragmentID).path),
+                    "fragment mute rejection created processed media")
+        try encoder.encode(fillerReport).write(to: layout.fillerWordsURL, options: .atomic)
+
         let result = try await WorkflowEngine(store: store).renderProcessedFragment(
             fragment,
             projectURL: projectURL,
@@ -134,6 +164,7 @@ struct FragmentProcessingProbe {
                 && URL(fileURLWithPath: $0.path).lastPathComponent == URL(fileURLWithPath: outputPath).lastPathComponent
         }, "переобнаружение потеряло тип итогового файла")
         try require(rediscovered.contains { $0.kind == "processed-fragment-recipe" }, "переобнаружение потеряло JSON-рецепт")
+        print("FRAGMENT_INVALID_PERSISTED_FILLER_RANGE_REJECTED")
         print("FRAGMENT_PROCESSING_PROBE_PASS")
     }
 
