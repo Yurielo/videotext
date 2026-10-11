@@ -17,6 +17,9 @@ struct RUENTranslationSliceProbe {
         try await verifyTargetLanguagePromptContract()
         try await verifyDisabledHumanReviewPreflightDoesNotCreateProject(root: root.appendingPathComponent("preflight"))
         try await verifyLegacyFullSRTSuccessWithoutHumanReview(root: root.appendingPathComponent("legacy-success"))
+        try await verifyRelocatedSourceReferenceRecovery(root: root.appendingPathComponent("relocated-ru"), sourceLanguage: .ru)
+        try await verifyRelocatedSourceReferenceRecovery(root: root.appendingPathComponent("relocated-en"), sourceLanguage: .en)
+        try verifyRelocatedSourceReferenceFailures(root: root.appendingPathComponent("relocated-failures"))
         try await verifyApprovedSourceFlow(root: root.appendingPathComponent("success"))
         try await verifyRejectedResponseRetriesAndPersistsEvidence(root: root.appendingPathComponent("retry-success"))
         try await verifySourceFallbackFailsClosed(root: root.appendingPathComponent("source-fallback"))
@@ -143,6 +146,124 @@ struct RUENTranslationSliceProbe {
         try require(provider.calls == callsBeforeReopen
                     && reopened.activeTranscriptRevision(for: .en)?.reviewStatus == .approved,
                     "Reopen lost the ready legacy translation")
+    }
+
+    private static func verifyRelocatedSourceReferenceRecovery(
+        root: URL,
+        sourceLanguage: ArtifactLanguage
+    ) async throws {
+        let fixture = try makeFixture(root: root, sourceLanguage: sourceLanguage)
+        let manifestURL = try selectedTimingManifestURL(for: fixture)
+        let relocatedMedia = root.appendingPathComponent("relocated-source.mp4")
+        try FileManager.default.copyItem(at: fixture.media, to: relocatedMedia)
+        try replaceSourceReference(in: manifestURL, with: relocatedMedia.path)
+        let adoptedManifestHash = SelectedTimingHash.file(manifestURL)
+
+        let translator: SimpleTextTranslationProvider = sourceLanguage == .ru
+            ? RecordingRUENTranslator()
+            : RecordingENRUTranslator()
+        let selectedTiming = SelectedTimingVerticalSlice(translator: translator)
+        let engine = WorkflowEngine(store: fixture.store, selectedTimingTranslation: selectedTiming)
+        var log: [String] = []
+        let result = try await engine.run(settings: settings(fixture), onLog: { log.append($0) })
+        let targetLanguage = sourceLanguage.translationTarget
+
+        try require(result.checkpoint?.kind == .translatedTranscript
+                    && result.checkpoint?.language == targetLanguage,
+                    "Relocated package did not reach Translation Human Review")
+        try require(!log.contains(where: { $0.contains("Расшифровка bundled SeminarText") || $0.contains("Тематический таймкодинг") }),
+                    "Relocated package recovery started ASR or topics")
+        let manifest = try fixture.store.load(from: fixture.project)
+        try require(manifest.workflow?.operations[WorkflowOperation.transcribe.rawValue] == nil
+                    && manifest.workflow?.operations[WorkflowOperation.topicTimecoding.rawValue] == nil,
+                    "Relocated package recovery recorded ASR or topics work")
+        let persisted = try selectedTiming.loadPersistedSource(projectURL: fixture.project, mediaURL: fixture.media)
+        try require(persisted?.upstreamManifestSHA256 == adoptedManifestHash,
+                    "Relocated package recovery did not persist adopted selected timing source")
+        let evidence = try JSONDecoder().decode(
+            SeminarTextCoreTranscriptionEvidence.self,
+            from: Data(contentsOf: fixture.layout.seminarTextCoreEvidenceURL)
+        )
+        try require(evidence.selectedTimingManifestSHA256 == adoptedManifestHash,
+                    "Relocated package recovery did not reconcile canonical evidence association")
+
+        _ = try HumanReviewService(store: fixture.store).approve(projectURL: fixture.project)
+        let reopened = try fixture.store.openProject(at: fixture.project).0
+        try require(reopened.activeTranscriptRevision(for: sourceLanguage)?.reviewStatus == .approved
+                    && reopened.activeTranscriptRevision(for: targetLanguage)?.reviewStatus == .approved
+                    && FileManager.default.fileExists(atPath: fixture.layout.transcriptURL(language: targetLanguage).path),
+                    "Reopen lost the accepted translation after relocated package recovery")
+    }
+
+    private static func verifyRelocatedSourceReferenceFailures(root: URL) throws {
+        try verifyRelocatedSourceReferenceFailure(root: root.appendingPathComponent("zero")) { fixture in
+            try FileManager.default.removeItem(at: selectedTimingManifestURL(for: fixture))
+        }
+        try verifyRelocatedSourceReferenceFailure(root: root.appendingPathComponent("multiple")) { fixture in
+            let manifestURL = try selectedTimingManifestURL(for: fixture)
+            try replaceSourceReference(in: manifestURL, with: fixture.project.appendingPathComponent("relocated.mp4").path)
+            let package = manifestURL.deletingLastPathComponent()
+            let duplicate = package.deletingLastPathComponent().appendingPathComponent("structured_timing_duplicate", isDirectory: true)
+            try FileManager.default.copyItem(at: package, to: duplicate)
+        }
+        try verifyRelocatedSourceReferenceFailure(root: root.appendingPathComponent("tampered")) { fixture in
+            let manifestURL = try selectedTimingManifestURL(for: fixture)
+            try replaceSourceReference(in: manifestURL, with: fixture.project.appendingPathComponent("relocated.mp4").path)
+            let json = manifestURL.deletingLastPathComponent().appendingPathComponent("parts/part_0000.json")
+            try Data("tampered".utf8).write(to: json, options: .atomic)
+        }
+        try verifyRelocatedSourceReferenceFailure(root: root.appendingPathComponent("incompatible")) { fixture in
+            let manifestURL = try selectedTimingManifestURL(for: fixture)
+            try replaceSourceReference(in: manifestURL, with: fixture.project.appendingPathComponent("relocated.mp4").path)
+            try replaceManifestLanguage(in: manifestURL, with: .en)
+        }
+    }
+
+    private static func verifyRelocatedSourceReferenceFailure(
+        root: URL,
+        mutate: (Fixture) throws -> Void
+    ) throws {
+        let fixture = try makeFixture(root: root)
+        try mutate(fixture)
+        let selectedTiming = SelectedTimingVerticalSlice(translator: RecordingRUENTranslator())
+        do {
+            _ = try selectedTiming.loadOrImportCoreSource(
+                projectURL: fixture.project,
+                mediaURL: fixture.media,
+                language: .ru
+            )
+            throw ProbeFailure(message: "Incompatible relocated selected timing package was accepted")
+        } catch is ProbeFailure {
+            throw ProbeFailure(message: "Incompatible relocated selected timing package was accepted")
+        } catch {
+            try require(!FileManager.default.fileExists(atPath: fixture.layout.selectedTimingSourceUnitsURL.path),
+                        "Incompatible relocated package persisted selected timing source")
+        }
+    }
+
+    private static func selectedTimingManifestURL(for fixture: Fixture) throws -> URL {
+        let manifests = SeminarTextSelectedTimingRunner.findManifests(in: fixture.layout.seminarTextCoreDirectory)
+        guard manifests.count == 1, let manifestURL = manifests.first else {
+            throw ProbeFailure(message: "Fixture does not contain exactly one selected timing manifest")
+        }
+        return manifestURL
+    }
+
+    private static func replaceSourceReference(in manifestURL: URL, with reference: String) throws {
+        var manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as! [String: Any]
+        var source = manifest["source"] as! [String: Any]
+        source["reference"] = reference
+        source["reference_sha256"] = SelectedTimingHash.string(reference)
+        manifest["source"] = source
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: manifestURL, options: .atomic)
+    }
+
+    private static func replaceManifestLanguage(in manifestURL: URL, with language: ArtifactLanguage) throws {
+        var manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as! [String: Any]
+        var transcription = manifest["transcription"] as! [String: Any]
+        transcription["language"] = language.rawValue
+        manifest["transcription"] = transcription
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: manifestURL, options: .atomic)
     }
 
     private static func verifyApprovedSourceFlow(root: URL) async throws {
@@ -340,14 +461,14 @@ struct RUENTranslationSliceProbe {
             subtitleStyle: .standard,
             selectedTopicID: nil,
             whisperModelPath: "/must-not-be-used/whisper.bin",
-            whisperLanguage: "ru",
+            whisperLanguage: fixture.sourceLanguage.rawValue,
             sourceHumanReviewEnabled: true,
             translationHumanReviewEnabled: true,
             fillerAnalysisBeforeReview: true
         )
     }
 
-    private static func makeFixture(root: URL) throws -> Fixture {
+    private static func makeFixture(root: URL, sourceLanguage: ArtifactLanguage = .ru) throws -> Fixture {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let media = root.appendingPathComponent("russian-source.mp4")
         let project = root.appendingPathComponent("project", isDirectory: true)
@@ -355,42 +476,56 @@ struct RUENTranslationSliceProbe {
         let store = ProjectStore(history: ProjectHistoryStore(indexURL: root.appendingPathComponent("history.json")))
         var manifest = try store.ensureProject(at: project, mediaURL: media, mode: .newProject)
         let layout = ProjectLayout(root: project)
-        let cues = [
-            SubtitleCue(id: 1, start: 0, end: 0.8, text: "Юрий не отменил встречу в 7 часов."),
-            SubtitleCue(id: 3, start: 0.8, end: 1.6, text: "В отчёте указано 12 участников.")
-        ]
+        let cues: [SubtitleCue]
+        switch sourceLanguage {
+        case .ru:
+            cues = [
+                SubtitleCue(id: 1, start: 0, end: 0.8, text: "Юрий не отменил встречу в 7 часов."),
+                SubtitleCue(id: 3, start: 0.8, end: 1.6, text: "В отчёте указано 12 участников.")
+            ]
+        case .en:
+            cues = [
+                SubtitleCue(id: 1, start: 0, end: 0.8, text: "Yuri did not cancel the meeting at 7 o'clock."),
+                SubtitleCue(id: 3, start: 0.8, end: 1.6, text: "The report lists 12 participants.")
+            ]
+        }
         try SRTService().writePreservingIDs(cues, to: layout.fullSRTURL)
-        try SRTService().writePreservingIDs(cues, to: layout.subtitlesURL(language: .ru))
+        try SRTService().writePreservingIDs(cues, to: layout.subtitlesURL(language: sourceLanguage))
         let transcript = cues.map(\.text).joined(separator: "\n\n") + "\n"
         try transcript.write(to: layout.transcriptURL, atomically: true, encoding: .utf8)
-        try transcript.write(to: layout.transcriptURL(language: .ru), atomically: true, encoding: .utf8)
-        try makeCorePackage(layout: layout, media: media)
+        try transcript.write(to: layout.transcriptURL(language: sourceLanguage), atomically: true, encoding: .utf8)
+        try makeCorePackage(layout: layout, media: media, language: sourceLanguage)
 
-        let sourceID = "approved-ru-source"
+        let sourceID = "approved-\(sourceLanguage.rawValue)-source"
         let sourceSRT = try Data(contentsOf: layout.fullSRTURL)
-        try sourceSRT.write(to: layout.subtitleRevisionURL(id: sourceID, language: .ru))
-        try Data(contentsOf: layout.transcriptURL).write(to: layout.transcriptRevisionURL(id: sourceID, language: .ru))
+        try sourceSRT.write(to: layout.subtitleRevisionURL(id: sourceID, language: sourceLanguage))
+        try Data(contentsOf: layout.transcriptURL).write(to: layout.transcriptRevisionURL(id: sourceID, language: sourceLanguage))
         manifest.languageProfile = LanguageProfile(
-            detected: .ru, effective: .ru, confidence: 1, method: "fixture", model: nil, modelVersion: nil,
+            detected: sourceLanguage == .ru ? .ru : .en,
+            effective: sourceLanguage,
+            confidence: 1,
+            method: "fixture",
+            model: nil,
+            modelVersion: nil,
             sampleRanges: [], manuallyOverridden: false, detectedAt: Date()
         )
         manifest.transcriptRevisions = [TranscriptRevision(
-            id: sourceID, language: .ru, origin: .userEdited, parentRevisionID: "machine-ru-source",
-            transcriptArtifactID: "source-ru-txt", subtitleArtifactID: "source-ru-srt",
+            id: sourceID, language: sourceLanguage, origin: .userEdited, parentRevisionID: "machine-\(sourceLanguage.rawValue)-source",
+            transcriptArtifactID: "source-\(sourceLanguage.rawValue)-txt", subtitleArtifactID: "source-\(sourceLanguage.rawValue)-srt",
             contentHash: StableTopicHash.string(try String(contentsOf: layout.fullSRTURL, encoding: .utf8)),
             createdAt: Date(), reviewStatus: .approved
         )]
         var review = HumanReviewState.newProjectDefault
         review.sourceReviewEnabled = true
         review.translationReviewEnabled = true
-        review.activeRevisionIDs[ArtifactLanguage.ru.rawValue] = sourceID
+        review.activeRevisionIDs[sourceLanguage.rawValue] = sourceID
         manifest.humanReviewState = review
         manifest.workflow?.status = .completed
         try store.save(manifest, to: project)
-        return Fixture(media: media, project: project, layout: layout, store: store)
+        return Fixture(media: media, project: project, layout: layout, store: store, sourceLanguage: sourceLanguage)
     }
 
-    private static func makeCorePackage(layout: ProjectLayout, media: URL) throws {
+    private static func makeCorePackage(layout: ProjectLayout, media: URL, language: ArtifactLanguage) throws {
         let package = layout.seminarTextCoreDirectory
             .appendingPathComponent("core-transcription-fixture/run/structured_timing", isDirectory: true)
         let parts = package.appendingPathComponent("parts", isDirectory: true)
@@ -398,6 +533,7 @@ struct RUENTranslationSliceProbe {
         let jsonURL = parts.appendingPathComponent("part_0000.json")
         let txtURL = parts.appendingPathComponent("part_0000.txt")
         let srtURL = parts.appendingPathComponent("part_0000.srt")
+        let coreSRTURL = package.deletingLastPathComponent().appendingPathComponent("transcript4.srt")
         let text = " Юрий не отменил встречу в 7 часов. В отчёте указано 12 участников."
         let tokens: [[String: Any]] = [
             token(" Юрий", 0, 100), token(" не", 100, 180), token(" отменил", 180, 300), token(" встречу", 300, 420),
@@ -411,14 +547,19 @@ struct RUENTranslationSliceProbe {
         try JSONSerialization.data(withJSONObject: json).write(to: jsonURL)
         try Data(text.utf8).write(to: txtURL)
         try Data("1\n00:00:00,000 --> 00:00:01,600\n\(text)\n".utf8).write(to: srtURL)
+        try Data("00:00:00,000 --> 00:00:01,600\n\(text)\n".utf8).write(to: coreSRTURL)
         func artifact(_ url: URL) -> [String: String] {
             ["path": "parts/\(url.lastPathComponent)", "sha256": SelectedTimingHash.file(url)]
         }
         let selectedManifest: [String: Any] = [
             "schema_version": 1,
             "artifact_type": "seminartext.selected_whisper_timing",
-            "source": ["media_sha256": SelectedTimingHash.file(media)],
-            "transcription": ["language": "ru"],
+            "source": [
+                "media_sha256": SelectedTimingHash.file(media),
+                "reference": media.path,
+                "reference_sha256": SelectedTimingHash.string(media.path)
+            ],
+            "transcription": ["language": language.rawValue],
             "parts": [[
                 "id": "part_0000", "order": 0, "absolute_offset_seconds": 0.0,
                 "absolute_range": ["start_seconds": 0.0, "end_seconds": 1.6],
@@ -432,9 +573,15 @@ struct RUENTranslationSliceProbe {
         let evidence = SeminarTextCoreTranscriptionEvidence(
             schemaVersion: 1,
             runtimeIdentity: "fixture",
-            sourceSRTSHA256: SelectedTimingHash.file(srtURL),
+            sourceSRTSHA256: SelectedTimingHash.file(coreSRTURL),
             selectedTimingManifestSHA256: SelectedTimingHash.file(manifestURL),
-            selectedWhisperJSONSHA256: SelectedTimingHash.file(jsonURL),
+            selectedWhisperJSONSHA256: SelectedTimingHash.data(
+                try SeminarTextCoreWhisperEvidenceImporter().importSelectedWhisperJSON(
+                    packageRoot: package,
+                    expectedMediaURL: media,
+                    expectedLanguage: language
+                )
+            ),
             outputDirectory: package.deletingLastPathComponent().path
         )
         let encoder = JSONEncoder()
@@ -482,6 +629,7 @@ struct RUENTranslationSliceProbe {
         let project: URL
         let layout: ProjectLayout
         let store: ProjectStore
+        let sourceLanguage: ArtifactLanguage
     }
 }
 
@@ -518,6 +666,24 @@ private final class RecordingRUENTranslator: RUENTranslator {
     func translate(text: String, source: ArtifactLanguage, target: ArtifactLanguage) async throws -> String {
         requests.append(Request(source: source, target: target))
         return requests.count == 1 ? "Yuri did not cancel the meeting at 7 o'clock." : "The report lists 12 participants."
+    }
+}
+
+private final class RecordingENRUTranslator: RUENTranslator {
+    private(set) var calls = 0
+
+    func identity() async throws -> TranslationModelIdentity {
+        TranslationModelIdentity(model: "translategemma:4b", digest: "fixture-digest", protocolVersion: "translategemma-simple-text-v1")
+    }
+
+    func translate(text: String, source: ArtifactLanguage, target: ArtifactLanguage) async throws -> String {
+        calls += 1
+        guard source == .en && target == .ru else {
+            throw ProbeFailure(message: "EN→RU fixture received the wrong translation direction")
+        }
+        return calls == 1
+            ? "Юрий не отменил встречу в 7 часов."
+            : "В отчёте указано 12 участников."
     }
 }
 

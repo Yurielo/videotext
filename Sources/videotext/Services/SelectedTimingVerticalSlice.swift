@@ -283,31 +283,131 @@ struct SelectedTimingVerticalSlice {
                 "Canonical SeminarText evidence не содержит selected timing manifest; повторный ASR запрещён."
             )
         }
-        if let persisted = try loadPersistedSource(projectURL: projectURL, mediaURL: mediaURL) {
-            guard persisted.upstreamManifestSHA256 == expectedManifestHash else {
+        let persisted = try loadPersistedSource(projectURL: projectURL, mediaURL: mediaURL)
+        if let persisted, persisted.upstreamManifestSHA256 == expectedManifestHash {
+            return persisted
+        }
+        let discoveredManifests = SeminarTextSelectedTimingRunner.findManifests(in: layout.seminarTextCoreDirectory)
+        let matchingManifests = discoveredManifests.filter {
+            SelectedTimingHash.file($0) == expectedManifestHash
+        }
+        if matchingManifests.count == 1, let manifestURL = matchingManifests.first {
+            guard persisted == nil else {
                 throw WorkflowError.processFailed(
                     "Сохранённые source units не принадлежат canonical SeminarText attempt этого проекта."
                 )
             }
-            return persisted
+            let document = try importer.importSelectedPackage(
+                packageRoot: manifestURL.deletingLastPathComponent(),
+                expectedMediaURL: mediaURL,
+                expectedLanguage: language
+            )
+            guard document.upstreamManifestSHA256 == expectedManifestHash else {
+                throw WorkflowError.processFailed("Selected timing source units не совпадают с canonical Core evidence.")
+            }
+            try persistSource(document, to: projectURL)
+            return document
         }
-        let manifests = SeminarTextSelectedTimingRunner.findManifests(in: layout.seminarTextCoreDirectory)
-            .filter { SelectedTimingHash.file($0) == expectedManifestHash }
-        guard manifests.count == 1, let manifestURL = manifests.first else {
+        guard matchingManifests.isEmpty,
+              discoveredManifests.count == 1,
+              let manifestURL = discoveredManifests.first,
+              let document = try compatibleRelocatedSourceReference(
+                  manifestURL: manifestURL,
+                  evidence: evidence,
+                  expectedMediaURL: mediaURL,
+                  expectedLanguage: language
+              ) else {
             throw WorkflowError.processFailed(
                 "Не найден единственный selected timing package, связанный с принятой расшифровкой. Повторный ASR не выполнялся."
             )
         }
-        let document = try importer.importSelectedPackage(
-            packageRoot: manifestURL.deletingLastPathComponent(),
-            expectedMediaURL: mediaURL,
-            expectedLanguage: language
-        )
-        guard document.upstreamManifestSHA256 == expectedManifestHash else {
-            throw WorkflowError.processFailed("Selected timing source units не совпадают с canonical Core evidence.")
-        }
         try persistSource(document, to: projectURL)
+        try persistEvidence(
+            evidence,
+            selectedTimingManifestSHA256: document.upstreamManifestSHA256,
+            at: layout.seminarTextCoreEvidenceURL
+        )
         return document
+    }
+
+    private func compatibleRelocatedSourceReference(
+        manifestURL: URL,
+        evidence: SeminarTextCoreTranscriptionEvidence,
+        expectedMediaURL: URL,
+        expectedLanguage: ArtifactLanguage
+    ) throws -> TimedSourceDocument? {
+        let packageRoot = manifestURL.deletingLastPathComponent()
+        let coreOutputDirectory = URL(fileURLWithPath: evidence.outputDirectory).standardizedFileURL
+        let expectedMediaHash = SelectedTimingHash.file(expectedMediaURL)
+        guard packageRoot.deletingLastPathComponent().standardizedFileURL == coreOutputDirectory,
+              let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any],
+              let source = manifest["source"] as? [String: Any],
+              let reference = source["reference"] as? String,
+              reference.hasPrefix("/"),
+              let referenceSHA256 = source["reference_sha256"] as? String,
+              referenceSHA256 == SelectedTimingHash.string(reference),
+              FileManager.default.fileExists(atPath: reference),
+              SelectedTimingHash.file(URL(fileURLWithPath: reference)) == expectedMediaHash,
+              source["media_sha256"] as? String == expectedMediaHash,
+              let transcription = manifest["transcription"] as? [String: Any],
+              transcription["language"] as? String == expectedLanguage.rawValue,
+              let expectedWhisperJSONHash = evidence.selectedWhisperJSONSHA256,
+              !expectedWhisperJSONHash.isEmpty else {
+            return nil
+        }
+        let coreSRTs = coreSRTs(in: coreOutputDirectory)
+        guard coreSRTs.count == 1,
+              SelectedTimingHash.file(coreSRTs[0]) == evidence.sourceSRTSHA256 else {
+            return nil
+        }
+        let importedWhisperJSON = try SeminarTextCoreWhisperEvidenceImporter().importSelectedWhisperJSON(
+            packageRoot: packageRoot,
+            expectedMediaURL: expectedMediaURL,
+            expectedLanguage: expectedLanguage
+        )
+        guard SelectedTimingHash.data(importedWhisperJSON) == expectedWhisperJSONHash else {
+            return nil
+        }
+        return try importer.importSelectedPackage(
+            packageRoot: packageRoot,
+            expectedMediaURL: expectedMediaURL,
+            expectedLanguage: expectedLanguage
+        )
+    }
+
+    private func coreSRTs(in outputDirectory: URL) -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: outputDirectory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+        return enumerator.compactMap { item in
+            guard let url = item as? URL,
+                  url.pathExtension.lowercased() == "srt",
+                  url.lastPathComponent.lowercased().hasPrefix("transcript"),
+                  (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else {
+                return nil
+            }
+            return url
+        }.sorted { $0.path < $1.path }
+    }
+
+    private func persistEvidence(
+        _ evidence: SeminarTextCoreTranscriptionEvidence,
+        selectedTimingManifestSHA256: String,
+        at url: URL
+    ) throws {
+        let reconciled = SeminarTextCoreTranscriptionEvidence(
+            schemaVersion: evidence.schemaVersion,
+            runtimeIdentity: evidence.runtimeIdentity,
+            sourceSRTSHA256: evidence.sourceSRTSHA256,
+            selectedTimingManifestSHA256: selectedTimingManifestSHA256,
+            selectedWhisperJSONSHA256: evidence.selectedWhisperJSONSHA256,
+            outputDirectory: evidence.outputDirectory
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+        try encoder.encode(reconciled).write(to: url, options: .atomic)
     }
 
     func currentIdentity() async throws -> TranslationModelIdentity {
