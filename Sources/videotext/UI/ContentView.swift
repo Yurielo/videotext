@@ -677,7 +677,8 @@ struct ContentView: View {
             model.outputs,
             mediaDuration: manifest?.durationSeconds
         )
-        return SimpleProjectHomeStateService().make(
+        let service = SimpleProjectHomeStateService()
+        let selectedState = service.make(
             projectURL: projectURL,
             manifest: manifest,
             topicsDetail: model.resultSummary.artifact(.topics)?.detail,
@@ -685,6 +686,22 @@ struct ContentView: View {
             topicLanguage: model.artifactLanguage,
             topicGranularity: model.topicGranularity
         )
+        if selectedState.artifact(.topics).readiness == .ready { return selectedState }
+        // A reopened project may have a newer, unapproved legacy topic variant.
+        // Prefer an existing readable approved TXT in Simple without changing Advanced's selection.
+        for granularity in [TopicGranularity.normal, .coarse, .detailed]
+            where granularity != model.topicGranularity {
+            let candidate = service.make(
+                projectURL: projectURL,
+                manifest: manifest,
+                topicsDetail: nil,
+                discoveredOutputs: outputs,
+                topicLanguage: model.artifactLanguage,
+                topicGranularity: granularity
+            )
+            if candidate.artifact(.topics).readiness == .ready { return candidate }
+        }
+        return selectedState
     }
 
     private func simpleSectionTitle(_ title: String) -> some View {
@@ -753,10 +770,85 @@ struct ContentView: View {
                 .disabled(!model.canStartSimpleTranscription)
                 .accessibilityIdentifier("simple.\(section).transcription.create")
             }
+            simpleTopicsActions(artifact, section: section)
         }
         .padding(.vertical, 3)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("simple.\(section).\(artifact.kind.rawValue).row")
+    }
+
+    @ViewBuilder
+    private func simpleTopicsActions(_ artifact: SimpleProjectHomeArtifact, section: String) -> some View {
+        if artifact.kind == .topics, section == "textContent" {
+            if model.topicReviewCheckpoint != nil || artifact.readiness == .needsReview {
+                Label("Проверка тем доступна только в расширенном режиме", systemImage: "arrow.right.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("simple.\(section).topics.advancedHandoff")
+            } else if artifact.readiness == .missing || artifact.readiness == .failed {
+                if !simpleSourceTranscriptIsApproved {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Сначала утвердите расшифровку, затем можно создать темы.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("simple.\(section).topics.unavailable")
+                        Button("Создать темы") {}
+                            .buttonStyle(.borderedProminent)
+                            .disabled(true)
+                            .accessibilityIdentifier("simple.\(section).topics.create")
+                    }
+                } else {
+                    if simpleTopicGranularityNeedsChoice {
+                        Picker("Детализация", selection: Binding(
+                            get: { model.topicGranularity },
+                            set: { model.selectTopicVariant(language: model.artifactLanguage, granularity: $0) }
+                        )) {
+                            ForEach(TopicGranularity.allCases) { value in
+                                Text(value.title).tag(value)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 260)
+                        .disabled(model.isRunning)
+                        .accessibilityIdentifier("simple.\(section).topics.granularity")
+                    }
+                    if !model.canCreateTopicsFromAcceptedTranscript && !model.isRunning {
+                        Text("Сейчас создать темы нельзя. Проверьте состояние расшифровки и файлов проекта.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("simple.\(section).topics.unavailable")
+                    }
+                    Button("Создать темы") {
+                        startSimpleTopicsCreation()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!model.canCreateTopicsFromAcceptedTranscript)
+                    .accessibilityIdentifier("simple.\(section).topics.create")
+                }
+            }
+        }
+    }
+
+    private var simpleSourceTranscriptIsApproved: Bool {
+        guard let projectURL = model.projectURL,
+              let manifest = try? ProjectStore().load(from: projectURL),
+              let language = manifest.languageProfile?.effective else { return false }
+        return manifest.activeTranscriptRevision(for: language)?.reviewStatus == .approved
+    }
+
+    private var simpleTopicGranularityNeedsChoice: Bool {
+        guard let projectURL = model.projectURL,
+              let manifest = try? ProjectStore().load(from: projectURL),
+              let language = manifest.languageProfile?.effective else { return false }
+        let existingCanonicalVariants = Set<TopicGranularity>(
+            (manifest.topicReviewState?.activeRevisionIDs ?? [:]).keys.compactMap { key in
+                let parts = key.split(separator: ".")
+                guard parts.count == 2, parts[0] == language.rawValue else { return nil }
+                return TopicGranularity(rawValue: String(parts[1]))
+            }
+        )
+        return existingCanonicalVariants.count > 1
     }
 
     private func simpleGoalCard(_ goal: SimpleProjectHomeGoal, icon: String) -> some View {
@@ -866,6 +958,12 @@ struct ContentView: View {
         } else {
             simpleTranscription.cancelPendingReview()
         }
+    }
+
+    private func startSimpleTopicsCreation() {
+        guard presentationMode == .simple, model.canCreateTopicsFromAcceptedTranscript else { return }
+        model.startSimpleTopicsFromAcceptedTranscript()
+        showsSimpleTextContent = true
     }
 
     private func updateSimpleTranscriptionReview() {

@@ -18,6 +18,7 @@ struct TopicReviewService {
         projectURL: URL,
         pendingOperations: [WorkflowOperation] = [],
         enabled: Bool = true,
+        preserveEnabledPreference: Bool = false,
         force: Bool = false,
         language: ArtifactLanguage? = nil,
         granularity: TopicGranularity? = nil
@@ -25,7 +26,7 @@ struct TopicReviewService {
         let layout = ProjectLayout(root: projectURL)
         var manifest = try store.load(from: projectURL)
         var state = manifest.topicReviewState ?? .newProjectDefault
-        state.enabled = enabled
+        if !preserveEnabledPreference { state.enabled = enabled }
         guard state.pendingCheckpoint == nil else { return state.pendingCheckpoint }
 
         let variants = try availableVariants(
@@ -34,6 +35,17 @@ struct TopicReviewService {
             granularity: granularity
         )
         guard !variants.isEmpty else { throw WorkflowError.missingTopics }
+        if !enabled {
+            for variant in variants {
+                let file = try decodeTopics(variant.jsonURL)
+                try validate(
+                    file,
+                    language: variant.language,
+                    projectURL: projectURL,
+                    manifest: manifest
+                )
+            }
+        }
         if !force && variants.allSatisfy({ variant in
             guard let activeID = state.activeRevisionIDs[variant.key],
                   let revision = manifest.topicRevisions?.first(where: { $0.id == activeID }) else { return false }

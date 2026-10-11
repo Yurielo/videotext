@@ -108,6 +108,7 @@ struct SimpleTranscriptionPresentation {
         case .detectLanguage: return "Определяем язык"
         case .transcribe: return "Создаём расшифровку"
         case .assessTranscriptionQuality, .validateTimeline: return "Проверяем расшифровку"
+        case .topicTimecoding: return "Создаём темы"
         case .detectFillerWords: return "Проверяем речь"
         case .discoverResults: return "Подготавливаем результаты"
         default: return "Обработка выполняется"
