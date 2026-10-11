@@ -37,35 +37,32 @@ struct CandidateLifecycleProbe {
 
     private static func launchAndQuit(_ candidate: URL) throws -> pid_t {
         let launchStarted = Date()
-        let open = Process()
-        open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        open.arguments = ["-n", candidate.path]
-        try open.run()
-        open.waitUntilExit()
-        guard open.terminationStatus == 0 else {
-            throw CandidateLifecycleProbeError.failed("Не удалось штатно запустить Candidate")
+        guard let executable = Bundle(url: candidate)?.executableURL else {
+            throw CandidateLifecycleProbeError.failed("Candidate bundle has no executable")
         }
+        let process = Process()
+        process.executableURL = executable
+        try process.run()
+        let pid = process.processIdentifier
 
-        let appearanceAllowance: TimeInterval = 10
-        let launchDeadline = Date().addingTimeInterval(appearanceAllowance)
+        let registrationAllowance: TimeInterval = 5
+        let registrationDeadline = Date().addingTimeInterval(registrationAllowance)
         var application: NSRunningApplication?
-        while Date() < launchDeadline {
-            application = NSWorkspace.shared.runningApplications.first {
-                $0.bundleURL?.standardizedFileURL == candidate
-            }
+        while Date() < registrationDeadline {
+            application = NSRunningApplication(processIdentifier: pid)
             if application != nil { break }
             Thread.sleep(forTimeInterval: 0.1)
         }
         guard let application else {
-            throw CandidateLifecycleProbeError.failed("Candidate не появился среди запущенных приложений за \(appearanceAllowance)s; elapsed=\(elapsed(since: launchStarted))s")
+            process.terminate()
+            throw CandidateLifecycleProbeError.failed("Candidate не зарегистрировался как запущенное macOS-приложение за \(registrationAllowance)s; pid=\(pid) elapsed=\(elapsed(since: launchStarted))s")
         }
-        let pid = application.processIdentifier
         print("CANDIDATE_LIFECYCLE_OBSERVED pid=\(pid) finished_launching=\(application.isFinishedLaunching) startup_elapsed=\(elapsed(since: launchStarted))s timestamp=\(timestamp())")
 
-        // The candidate's first AppKit window can stall for about 24 seconds.
-        // isFinishedLaunching remained false even after 60 seconds in a diagnostic
-        // run, so allow 30 seconds for startup before measuring normal Quit.
-        let startupStabilization: TimeInterval = 30
+        // LaunchServices can report isFinishedLaunching as false indefinitely for
+        // an app opened from the release runner. The owned PID is the readiness
+        // target, so give its event loop a brief startup interval instead.
+        let startupStabilization: TimeInterval = 2
         let stabilizationDeadline = Date().addingTimeInterval(startupStabilization)
         while Date() < stabilizationDeadline {
             guard kill(pid, 0) == 0 else {
