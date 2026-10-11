@@ -2,6 +2,26 @@ import Foundation
 import AVFoundation
 import AppKit
 
+struct SimpleTopicsWorkflowRequest: Equatable {
+    let operations: Set<WorkflowOperation>
+    let language: ArtifactLanguage
+    let granularity: TopicGranularity
+    let approvedRevisionID: String
+}
+
+struct ApprovedTranscriptReuseRequirement: Equatable {
+    let language: ArtifactLanguage
+    let revisionID: String
+}
+
+struct WorkflowExecutionPolicy {
+    var requireReusableTranscription = false
+    var preserveReviewPreferences = false
+    var approvedTranscript: ApprovedTranscriptReuseRequirement? = nil
+
+    static let standard = WorkflowExecutionPolicy()
+}
+
 @MainActor
 final class WorkflowViewModel: ObservableObject {
     @Published var mediaURL: URL?
@@ -81,9 +101,9 @@ final class WorkflowViewModel: ObservableObject {
     @Published var alert: AppAlert?
     @Published var log = AppLog()
 
-    private let engine = WorkflowEngine()
-    private let store = ProjectStore()
-    private let historyStore = ProjectHistoryStore()
+    private let engine: WorkflowEngine
+    private let store: ProjectStore
+    private let historyStore: ProjectHistoryStore
     private let notifications = NotificationService()
     private let finder = FinderService()
     private let resultsDetector = ResultsDetector()
@@ -101,7 +121,14 @@ final class WorkflowViewModel: ObservableObject {
     private var fillerPreviewPlayer: AVPlayer?
     private var fillerPreviewStopTask: Task<Void, Never>?
 
-    init() {
+    init(
+        engine: WorkflowEngine? = nil,
+        store: ProjectStore = ProjectStore(),
+        historyStore: ProjectHistoryStore = ProjectHistoryStore()
+    ) {
+        self.store = store
+        self.engine = engine ?? WorkflowEngine(store: store)
+        self.historyStore = historyStore
         whisperModelPath = WhisperModelLocator().bestModelPath() ?? ""
         reloadHistory()
     }
@@ -250,6 +277,77 @@ final class WorkflowViewModel: ObservableObject {
             operations: [.validateTimeline],
             sourceHumanReviewOverride: true,
             whisperLanguageOverride: simpleTranscriptionLanguage
+        )
+    }
+
+    var simpleTopicsWorkflowRequest: SimpleTopicsWorkflowRequest? {
+        guard !isRunning, !isStopping, mediaURL != nil,
+              humanReviewCheckpoint == nil, topicReviewCheckpoint == nil,
+              let projectURL,
+              let manifest = try? store.load(from: projectURL),
+              manifest.humanReviewState?.pendingCheckpoint == nil,
+              manifest.topicReviewState?.pendingCheckpoint == nil,
+              let language = manifest.languageProfile?.effective,
+              let revision = manifest.activeTranscriptRevision(for: language),
+              revision.reviewStatus == .approved else { return nil }
+
+        let layout = ProjectLayout(root: projectURL)
+        let immutableURL = layout.subtitleRevisionURL(id: revision.id, language: language)
+        guard let fullSRT = try? Data(contentsOf: layout.fullSRTURL), !fullSRT.isEmpty,
+              let localizedSRT = try? Data(contentsOf: layout.subtitlesURL(language: language)),
+              let immutableSRT = try? Data(contentsOf: immutableURL),
+              fullSRT == localizedSRT, localizedSRT == immutableSRT,
+              SeminarTextCoreWhisperEvidenceImporter().validateLegacyWhisperJSON(at: layout.whisperJSONURL),
+              let parsed = try? SRTService().loadWithReport(from: layout.fullSRTURL),
+              SRTService().validateTimeline(
+                parsed.cues,
+                mediaDuration: SelectedTimingTimeline.permittedEnd(
+                    projectURL: projectURL,
+                    measuredDuration: manifest.durationSeconds
+                )
+              ).isEmpty,
+              TranscriptionQualityService().recoveryIssue(cues: parsed.cues) == nil else { return nil }
+
+        let state = SimpleProjectHomeStateService().make(
+            projectURL: projectURL,
+            manifest: manifest,
+            topicsDetail: nil,
+            discoveredOutputs: [],
+            topicLanguage: language,
+            topicGranularity: topicGranularity
+        )
+        switch state.artifact(.topics).readiness {
+        case .missing, .failed:
+            return SimpleTopicsWorkflowRequest(
+                operations: [.topicTimecoding],
+                language: language,
+                granularity: topicGranularity,
+                approvedRevisionID: revision.id
+            )
+        case .ready, .needsReview:
+            return nil
+        }
+    }
+
+    var canCreateTopicsFromAcceptedTranscript: Bool {
+        simpleTopicsWorkflowRequest != nil
+    }
+
+    @discardableResult
+    func startSimpleTopicsFromAcceptedTranscript() -> Bool {
+        guard let request = simpleTopicsWorkflowRequest else { return false }
+        artifactLanguage = request.language
+        topicGranularity = request.granularity
+        return startRun(
+            operations: request.operations,
+            fillerAnalysisBeforeReviewOverride: false,
+            topicHumanReviewOverride: false,
+            requireReusableTranscription: true,
+            preserveReviewPreferences: true,
+            approvedTranscript: ApprovedTranscriptReuseRequirement(
+                language: request.language,
+                revisionID: request.approvedRevisionID
+            )
         )
     }
 
@@ -1009,7 +1107,12 @@ final class WorkflowViewModel: ObservableObject {
     private func startRun(
         operations requestedOperations: Set<WorkflowOperation>,
         sourceHumanReviewOverride: Bool? = nil,
-        whisperLanguageOverride: String? = nil
+        whisperLanguageOverride: String? = nil,
+        fillerAnalysisBeforeReviewOverride: Bool? = nil,
+        topicHumanReviewOverride: Bool? = nil,
+        requireReusableTranscription: Bool = false,
+        preserveReviewPreferences: Bool = false,
+        approvedTranscript: ApprovedTranscriptReuseRequirement? = nil
     ) -> Bool {
         var operations = requestedOperations
         if operations.contains(.renderFragment), fragmentMuteFillerWords {
@@ -1138,15 +1241,24 @@ final class WorkflowViewModel: ObservableObject {
             dubbingMixMode: dubbingMixMode,
             sourceHumanReviewEnabled: sourceHumanReviewOverride ?? sourceHumanReviewEnabled,
             translationHumanReviewEnabled: translationHumanReviewEnabled,
-            fillerAnalysisBeforeReview: fillerAnalysisBeforeReview,
-            topicHumanReviewEnabled: topicHumanReviewEnabled,
+            fillerAnalysisBeforeReview: fillerAnalysisBeforeReviewOverride ?? fillerAnalysisBeforeReview,
+            topicHumanReviewEnabled: topicHumanReviewOverride ?? topicHumanReviewEnabled,
             fragmentMuteFillerWords: fragmentMuteFillerWords,
             fragmentAdjustSpeed: fragmentAdjustSpeed,
             fragmentApplyBlur: fragmentApplyBlur
         )
+        let policy = WorkflowExecutionPolicy(
+            requireReusableTranscription: requireReusableTranscription,
+            preserveReviewPreferences: preserveReviewPreferences,
+            approvedTranscript: approvedTranscript
+        )
 
         let sourceReviewPreferenceToRestore: Bool? = sourceHumanReviewOverride == nil ? nil : sourceHumanReviewEnabled
-        if sourceReviewPreferenceToRestore != nil {
+        let fillerPreferenceToRestore: Bool? = fillerAnalysisBeforeReviewOverride == nil || preserveReviewPreferences
+            ? nil : fillerAnalysisBeforeReview
+        let topicReviewPreferenceToRestore: Bool? = topicHumanReviewOverride == nil || preserveReviewPreferences
+            ? nil : topicHumanReviewEnabled
+        if sourceReviewPreferenceToRestore != nil || fillerPreferenceToRestore != nil || topicReviewPreferenceToRestore != nil {
             simpleRunNeedsPreferenceRestoration = true
         }
         runTask = Task { [weak self] in
@@ -1155,6 +1267,7 @@ final class WorkflowViewModel: ObservableObject {
             do {
                 let result = try await engine.run(
                     settings: settings,
+                    policy: policy,
                     onLog: { [weak self] message in
                         Task { @MainActor in self?.log.append(message) }
                     },
@@ -1170,10 +1283,15 @@ final class WorkflowViewModel: ObservableObject {
                 outcome = .failure(error)
             }
             do {
-                if let sourceReviewPreferenceToRestore {
+                if sourceReviewPreferenceToRestore != nil || fillerPreferenceToRestore != nil || topicReviewPreferenceToRestore != nil {
                     defer { self.simpleRunNeedsPreferenceRestoration = false }
                     do {
-                        try self.restoreSourceHumanReviewPreference(sourceReviewPreferenceToRestore, projectURL: projectURL)
+                        try self.restoreReviewPreferences(
+                            sourceEnabled: sourceReviewPreferenceToRestore,
+                            fillerAnalysisBeforeReview: fillerPreferenceToRestore,
+                            topicEnabled: topicReviewPreferenceToRestore,
+                            projectURL: projectURL
+                        )
                     } catch {
                         if case .failure(let runError) = outcome {
                             self.log.append(runError.localizedDescription)
@@ -1252,18 +1370,40 @@ final class WorkflowViewModel: ObservableObject {
     }
 
     func restoreSourceHumanReviewPreference(_ enabled: Bool, projectURL: URL) throws {
+        try restoreReviewPreferences(
+            sourceEnabled: enabled,
+            fillerAnalysisBeforeReview: nil,
+            topicEnabled: nil,
+            projectURL: projectURL
+        )
+    }
+
+    private func restoreReviewPreferences(
+        sourceEnabled: Bool?,
+        fillerAnalysisBeforeReview: Bool?,
+        topicEnabled: Bool?,
+        projectURL: URL
+    ) throws {
         do {
             var manifest = try store.load(from: projectURL)
-            guard manifest.humanReviewState?.sourceReviewEnabled != enabled else { return }
-            var state = manifest.humanReviewState ?? .newProjectDefault
-            state.sourceReviewEnabled = enabled
-            manifest.humanReviewState = state
+            var humanState = manifest.humanReviewState ?? .newProjectDefault
+            if let sourceEnabled { humanState.sourceReviewEnabled = sourceEnabled }
+            if let fillerAnalysisBeforeReview {
+                humanState.fillerAnalysisBeforeReview = fillerAnalysisBeforeReview
+            }
+            manifest.humanReviewState = humanState
+            var topicState = manifest.topicReviewState ?? .newProjectDefault
+            if let topicEnabled { topicState.enabled = topicEnabled }
+            manifest.topicReviewState = topicState
             try store.save(manifest, to: projectURL)
-            guard try store.load(from: projectURL).humanReviewState?.sourceReviewEnabled == enabled else {
-                throw WorkflowError.processFailed("Сохранённая настройка Source Human Review не совпадает с исходной.")
+            let restored = try store.load(from: projectURL)
+            guard sourceEnabled.map({ restored.humanReviewState?.sourceReviewEnabled == $0 }) ?? true,
+                  fillerAnalysisBeforeReview.map({ restored.humanReviewState?.fillerAnalysisBeforeReview == $0 }) ?? true,
+                  topicEnabled.map({ restored.topicReviewState?.enabled == $0 }) ?? true else {
+                throw WorkflowError.processFailed("Сохранённые настройки Human Review не совпадают с исходными.")
             }
         } catch {
-            throw WorkflowError.processFailed("Не удалось восстановить исходную настройку Source Human Review. Завершение задания не подтверждено: \(error.localizedDescription)")
+            throw WorkflowError.processFailed("Не удалось восстановить исходные настройки Human Review. Завершение задания не подтверждено: \(error.localizedDescription)")
         }
     }
 
@@ -1377,6 +1517,7 @@ final class WorkflowEngine: @unchecked Sendable {
 
     func run(
         settings: WorkflowSettings,
+        policy: WorkflowExecutionPolicy = .standard,
         onLog: @escaping (String) -> Void,
         onProgress: @escaping (WorkflowProgress) -> Void = { _ in }
     ) async throws -> WorkflowResult {
@@ -1419,6 +1560,13 @@ final class WorkflowEngine: @unchecked Sendable {
         log("Исходный файл: \(mediaURL.path)")
         log("Папка проекта: \(projectURL.path)")
         var manifest = try store.ensureProject(at: projectURL, mediaURL: mediaURL, mode: settings.mode)
+        if let requirement = policy.approvedTranscript {
+            try validateApprovedTranscriptReuse(
+                requirement,
+                manifest: manifest,
+                projectURL: projectURL
+            )
+        }
         let workflowBeforeTranslation = settings.selectedOperations == [.translateTranscript]
             ? manifest.workflow
             : nil
@@ -1461,11 +1609,15 @@ final class WorkflowEngine: @unchecked Sendable {
             var state = manifest.humanReviewState ?? .newProjectDefault
             state.sourceReviewEnabled = settings.sourceHumanReviewEnabled
             state.translationReviewEnabled = settings.translationHumanReviewEnabled
-            state.fillerAnalysisBeforeReview = settings.fillerAnalysisBeforeReview
+            if !policy.preserveReviewPreferences {
+                state.fillerAnalysisBeforeReview = settings.fillerAnalysisBeforeReview
+            }
             manifest.humanReviewState = state
-            var topicState = manifest.topicReviewState ?? .newProjectDefault
-            topicState.enabled = settings.topicHumanReviewEnabled
-            manifest.topicReviewState = topicState
+            if !policy.preserveReviewPreferences {
+                var topicState = manifest.topicReviewState ?? .newProjectDefault
+                topicState.enabled = settings.topicHumanReviewEnabled
+                manifest.topicReviewState = topicState
+            }
         }
         try updateWorkflow(projectURL, status: .running, progress: 0, mode: settings.mode, error: nil)
 
@@ -1508,9 +1660,11 @@ final class WorkflowEngine: @unchecked Sendable {
                             checkpoint: checkpoint
                         )
                     }
+                    try Task.checkCancellation()
                     if let topicCheckpoint = try topicCheckpointAfter(
                         operation,
                         settings: settings,
+                        policy: policy,
                         projectURL: projectURL,
                         pendingOperations: Array(operations.dropFirst(index + 1))
                     ) {
@@ -1527,6 +1681,12 @@ final class WorkflowEngine: @unchecked Sendable {
                         )
                     }
                     continue
+                }
+
+                if operation == .transcribe, policy.requireReusableTranscription {
+                    throw WorkflowError.processFailed(
+                        "Создание тем остановлено: утверждённая расшифровка больше не пригодна для безопасного повторного использования. Повторный Whisper не запускался."
+                    )
                 }
 
                 log("Запуск: \(operation.title)")
@@ -1817,6 +1977,13 @@ final class WorkflowEngine: @unchecked Sendable {
                     try await validateTimeline(mediaURL: mediaURL, layout: layout, projectURL: projectURL, log: log)
 
                 case .topicTimecoding:
+                    if let requirement = policy.approvedTranscript {
+                        try validateApprovedTranscriptReuse(
+                            requirement,
+                            manifest: try store.load(from: projectURL),
+                            projectURL: projectURL
+                        )
+                    }
                     if nonemptyFile(layout.transcriptionQualityURL),
                        let report = try? store.decoder.decode(
                         TranscriptionQualityReport.self,
@@ -1861,6 +2028,14 @@ final class WorkflowEngine: @unchecked Sendable {
                             onProgress: progress,
                             onLog: log
                         )
+                        try Task.checkCancellation()
+                        if let requirement = policy.approvedTranscript {
+                            try validateApprovedTranscriptReuse(
+                                requirement,
+                                manifest: try store.load(from: projectURL),
+                                projectURL: projectURL
+                            )
+                        }
                         try TopicFileService().save(
                             topics,
                             projectURL: projectURL,
@@ -2371,6 +2546,7 @@ final class WorkflowEngine: @unchecked Sendable {
                     try await validateAllVideos(projectURL: projectURL, operation: operation, tracker: tracker, log: log)
                 }
 
+                try Task.checkCancellation()
                 try markOperation(operation, status: .completed, projectURL: projectURL, settings: settings, error: nil)
                 tracker.finish(operation)
                 try updateWorkflow(projectURL, status: .running, progress: Double(index + 1) / Double(max(operations.count, 1)), mode: settings.mode, error: nil)
@@ -2394,9 +2570,11 @@ final class WorkflowEngine: @unchecked Sendable {
                         checkpoint: checkpoint
                     )
                 }
+                try Task.checkCancellation()
                 if let topicCheckpoint = try topicCheckpointAfter(
                     operation,
                     settings: settings,
+                    policy: policy,
                     projectURL: projectURL,
                     pendingOperations: Array(operations.dropFirst(index + 1))
                 ) {
@@ -2545,6 +2723,7 @@ final class WorkflowEngine: @unchecked Sendable {
     private func topicCheckpointAfter(
         _ operation: WorkflowOperation,
         settings: WorkflowSettings,
+        policy: WorkflowExecutionPolicy,
         projectURL: URL,
         pendingOperations: [WorkflowOperation]
     ) throws -> TopicReviewCheckpoint? {
@@ -2555,9 +2734,33 @@ final class WorkflowEngine: @unchecked Sendable {
             projectURL: projectURL,
             pendingOperations: pendingOperations,
             enabled: settings.topicHumanReviewEnabled,
+            preserveEnabledPreference: policy.preserveReviewPreferences,
             language: selectedTopicLanguage(settings: settings, manifest: manifest, layout: layout),
             granularity: settings.topicGranularity
         )
+    }
+
+    private func validateApprovedTranscriptReuse(
+        _ requirement: ApprovedTranscriptReuseRequirement,
+        manifest: ProjectManifest,
+        projectURL: URL
+    ) throws {
+        let layout = ProjectLayout(root: projectURL)
+        guard manifest.languageProfile?.effective == requirement.language,
+              let active = manifest.activeTranscriptRevision(for: requirement.language),
+              active.id == requirement.revisionID,
+              active.reviewStatus == .approved,
+              let full = try? Data(contentsOf: layout.fullSRTURL), !full.isEmpty,
+              let localized = try? Data(contentsOf: layout.subtitlesURL(language: requirement.language)),
+              let immutable = try? Data(contentsOf: layout.subtitleRevisionURL(
+                id: requirement.revisionID,
+                language: requirement.language
+              )),
+              full == localized, localized == immutable else {
+            throw WorkflowError.processFailed(
+                "Создание тем остановлено: принятая расшифровка изменилась или больше не утверждена. Темы и повторный Whisper не запускались."
+            )
+        }
     }
 
     private func revisionMatchingWorkingSubtitle(

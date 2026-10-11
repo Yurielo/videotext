@@ -161,6 +161,8 @@ struct SimpleRenderedControlsProbe {
             forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface")
         )
         try verifyCreationControls(project: scratch.appendingPathComponent("new-source"), media: media)
+        try verifyTopicControls(project: scratch.appendingPathComponent("topics"), media: media)
+        try verifyMixedTopicVariantReopen(project: scratch.appendingPathComponent("mixed-topics"), media: media)
         // Each Source/Translation scenario has its own project. Source review can
         // legitimately invalidate downstream artifacts; the retained fixture is untouched.
         for source in [ArtifactLanguage.ru, .en] {
@@ -396,6 +398,8 @@ struct SimpleRenderedControlsProbe {
         try require(stopped.message.contains("не завершена"), "Cancellation was represented as successful transcription")
         try require(SimpleTranscriptionPresentation.stage(operation: .createManifest, isStopping: false) == "Проверяем исходный файл",
             "A technical stage name leaked into Simple progress")
+        try require(SimpleTranscriptionPresentation.stage(operation: .topicTimecoding, isStopping: false) == "Создаём темы",
+            "Topic timecoding did not render its actual Simple progress stage")
         try require(SimpleTranscriptionPresentation.fraction(.nan) == 0
             && SimpleTranscriptionPresentation.fraction(2) == 1
             && SimpleTranscriptionPresentation.fraction(-1) == 0, "Simple progress must remain finite and within 0...1")
@@ -443,6 +447,12 @@ struct SimpleRenderedControlsProbe {
             && create.isAccessibilityEnabled() == model.canStartSimpleTranscription, "Missing transcript has no truthful rendered creation action")
         try require(!nodes(window).contains { ["simple.ready.transcription.open", "simple.ready.transcription.correct"].contains($0.accessibilityIdentifier() ?? "") },
             "Missing transcript exposes Open/Correct alongside creation")
+        try press("simple.goal.textContent", in: window)
+        let topicsUnavailable = try element("simple.textContent.topics.unavailable", in: window)
+        try require(renderedText(topicsUnavailable).contains("утвердите расшифровку"),
+            "Topics without an approved transcript did not explain why they are unavailable")
+        try require(!element("simple.textContent.topics.create", in: window).isAccessibilityEnabled(),
+            "Topics without an approved transcript exposed an enabled creation action")
         try assertSourceRowFits("ready", window: window)
         for (label, language) in [("EN", "en"), ("Авто", "auto")] {
             let picker = try element("simple.ready.transcription.language", in: window)
@@ -474,7 +484,6 @@ struct SimpleRenderedControlsProbe {
             try require(selected.count == 1 && (selected[0].accessibilityValue() as? NSNumber)?.intValue == 1,
                 "Rendered language option \(label) was not selected after the UI action")
         }
-        try press("simple.goal.textContent", in: window)
         _ = try element("simple.textContent.transcription.create", in: window)
         try assertSourceRowFits("textContent", window: window)
         try assertSimple(window)
@@ -553,6 +562,175 @@ struct SimpleRenderedControlsProbe {
             try assertSimple(window)
         }
         print("SIMPLE_TRANSCRIPTION_RENDERED_CONTROLS_PASS: creation/language/progress/stop/retry/locked-resume; 980x680; no processing invoked")
+    }
+
+    private static func verifyTopicControls(project: URL, media: URL) throws {
+        _ = try makeProject(project, media: media, source: .ru)
+        let model = WorkflowViewModel()
+        model.projectURL = project
+        model.mediaURL = media
+        model.loadDetectedResults()
+        let host = NSHostingView(rootView: ContentView(model: model))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        settle(window)
+
+        try assertSimple(window)
+        try press("simple.goal.textContent", in: window)
+        _ = try element("simple.textContent.topics.open", in: window)
+        try require(!nodes(window).contains {
+            ["simple.textContent.topics.create", "simple.textContent.topics.correct"].contains($0.accessibilityIdentifier() ?? "")
+        }, "Existing ready topics must only offer opening their TXT result in Simple")
+        let readyText = nodes(window)
+            .flatMap { [$0.accessibilityLabel(), $0.accessibilityValue() as? String].compactMap { $0 } }
+            .joined(separator: " ")
+        try require(!readyText.contains("topics.ru.normal.txt"),
+            "Simple rendered a technical topics filename instead of user-facing text")
+
+        let reopened = WorkflowViewModel()
+        reopened.openProject(project)
+        let reopenedWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        reopenedWindow.isReleasedWhenClosed = false
+        reopenedWindow.contentView = NSHostingView(rootView: ContentView(model: reopened))
+        reopenedWindow.makeKeyAndOrderFront(nil)
+        settle(reopenedWindow)
+        try press("simple.goal.textContent", in: reopenedWindow)
+        _ = try element("simple.textContent.topics.open", in: reopenedWindow)
+        try require(!reopened.isRunning && !nodes(reopenedWindow).contains {
+            $0.accessibilityIdentifier() == "simple.textContent.topics.create"
+        }, "Reopening ready topics exposed regeneration in Simple")
+        reopenedWindow.close()
+
+        try removeTopics(from: project, media: media)
+        model.loadDetectedResults()
+        settle(window)
+
+        let create = try element("simple.textContent.topics.create", in: window)
+        try require(create.accessibilityRole() == .button && create.accessibilityLabel() == "Создать темы"
+            && create.isAccessibilityEnabled() == model.canCreateTopicsFromAcceptedTranscript,
+            "Approved transcript with missing topics has no truthful rendered creation action")
+        try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.topics.granularity" },
+            "Simple rendered an unnecessary topic granularity choice")
+        try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.topics.correct" },
+            "Simple must not render topic correction controls")
+
+        model.progress = WorkflowProgress(operation: .topicTimecoding, operationFraction: 0.2, overallFraction: 0.1,
+            elapsed: 1, estimatedTotal: nil, remaining: nil, isIndeterminate: true)
+        model.isRunning = true
+        settle(window)
+        try require(renderedText(element("simple.progress.stage", in: window)).contains("Создаём темы"),
+            "Simple progress did not render the active topic timecoding stage")
+        try require(element("simple.progress.stop", in: window).isAccessibilityEnabled(),
+            "Simple topics processing did not reuse the existing stop action")
+        try require(!element("simple.textContent.topics.create", in: window).isAccessibilityEnabled(),
+            "Simple exposed duplicate topic creation while processing")
+        model.isStopping = true
+        settle(window)
+        try require(renderedText(element("simple.progress.stage", in: window)).contains("Останавливаем обработку")
+            && !element("simple.progress.stop", in: window).isAccessibilityEnabled(),
+            "Simple topics stop state did not disable repeated cancellation")
+        model.isStopping = false
+        model.isRunning = false
+        model.progress = .idle
+        settle(window)
+
+        var manifest = try ProjectStore().load(from: project)
+        let pendingID = "pending-topics"
+        let layout = ProjectLayout(root: project)
+        let pending = TopicRevision(
+            id: pendingID, language: .ru, granularity: .normal, parentRevisionID: nil,
+            jsonPath: layout.topicsURL(language: .ru, granularity: .normal).path,
+            textPath: layout.topicsTextURL(language: .ru, granularity: .normal).path,
+            contentHash: StableTopicHash.string("pending-topics"), status: .pending, createdAt: Date()
+        )
+        manifest.topicRevisions = [pending]
+        manifest.topicReviewState = TopicReviewState(
+            enabled: true,
+            activeRevisionIDs: [:],
+            pendingCheckpoint: TopicReviewCheckpoint(
+                revisionIDs: [pending.variantKey: pendingID], pendingOperations: [], createdAt: Date()
+            )
+        )
+        try ProjectStore().save(manifest, to: project)
+        model.loadDetectedResults()
+        settle(window)
+
+        let handoff = try element("simple.textContent.topics.advancedHandoff", in: window)
+        try require(renderedText(handoff).contains("расширенном режиме"),
+            "Pending topic review did not render the Advanced-only handoff")
+        try require(!nodes(window).contains { ["simple.textContent.topics.create", "simple.textContent.topics.correct"].contains($0.accessibilityIdentifier() ?? "") },
+            "Pending topic review exposed a Simple creation or correction control")
+        let topicRow = try element("simple.textContent.topics.row", in: window)
+        try require(!tree(topicRow).contains { $0.accessibilityRole() == .button && $0.accessibilityLabel() == "Исправить" },
+            "Pending topic review exposed an unidentified Simple correction control")
+        try assertSimple(window)
+        print("RENDERED_TOPIC_CONTROLS_PASS: create CTA, no unnecessary choice, no Simple correction, Advanced handoff")
+    }
+
+    private static func removeTopics(from project: URL, media: URL) throws {
+        _ = try makeProject(project, media: media, source: .ru)
+        let store = ProjectStore()
+        var manifest = try store.load(from: project)
+        manifest.topicRevisions = []
+        manifest.topicReviewState = .newProjectDefault
+        manifest.artifacts = manifest.artifacts?.filter { $0.kind != .topics }
+        try store.save(manifest, to: project)
+        let topicsDirectory = ProjectLayout(root: project).topicsDirectory
+        if FileManager.default.fileExists(atPath: topicsDirectory.path) {
+            try FileManager.default.removeItem(at: topicsDirectory)
+        }
+    }
+
+    private static func verifyMixedTopicVariantReopen(project: URL, media: URL) throws {
+        var manifest = try makeProject(project, media: media, source: .ru)
+        let layout = ProjectLayout(root: project)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var coarseFile = try decoder.decode(TopicsFile.self,
+            from: Data(contentsOf: layout.topicsURL(language: .ru, granularity: .normal)))
+        coarseFile.granularity = .coarse
+        try TopicFileService().save(coarseFile, projectURL: project, language: .ru,
+            granularity: .coarse, updateLegacyFiles: false)
+        let coarseRevision = TopicRevision(
+            id: "approved-coarse", language: .ru, granularity: .coarse, parentRevisionID: nil,
+            jsonPath: layout.topicsURL(language: .ru, granularity: .coarse).path,
+            textPath: layout.topicsTextURL(language: .ru, granularity: .coarse).path,
+            contentHash: StableTopicHash.string("fixture-coarse"), status: .approved, createdAt: Date()
+        )
+        var revisions = manifest.topicRevisions ?? []
+        try require(!revisions.isEmpty, "Mixed topic fixture has no normal revision")
+        revisions[0].status = .pending
+        revisions.append(coarseRevision)
+        manifest.topicRevisions = revisions
+        manifest.topicReviewState?.activeRevisionIDs = [coarseRevision.variantKey: coarseRevision.id]
+        try ProjectStore().save(manifest, to: project)
+
+        let model = WorkflowViewModel()
+        model.openProject(project)
+        try require(model.topicGranularity == .normal,
+            "Mixed fixture did not reopen on the legacy normal topic variant")
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: ContentView(model: model))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        settle(window)
+        try assertSimple(window)
+        try press("simple.goal.textContent", in: window)
+        let title = try element("simple.textContent.topics.title", in: window)
+        try require(renderedText(title).contains("Крупный"),
+            "Simple did not select the approved coarse topic variant on reopen")
+        _ = try element("simple.textContent.topics.open", in: window)
+        try require(!model.isRunning && model.topicGranularity == .normal && !nodes(window).contains {
+            ["simple.textContent.topics.create", "simple.textContent.topics.correct"].contains($0.accessibilityIdentifier() ?? "")
+        }, "Mixed-variant reopen offered regeneration or changed Advanced topic selection")
+        print("MIXED_TOPIC_VARIANT_REOPEN_PASS: ready coarse TXT, no regeneration, Advanced selection preserved")
     }
 
     private static func verify(project: URL, source: ArtifactLanguage, translation: Bool, evidence: URL?, name: String) throws {
