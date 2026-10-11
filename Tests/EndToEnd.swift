@@ -764,12 +764,32 @@ struct EndToEndTest {
             let targetArtifacts = (failedManifest.artifacts ?? []).filter {
                 $0.sourceRevision == targetRevision?.id
             }
+            let reviewTasks = (failedManifest.reviewTasks ?? []).filter {
+                report.reviewTaskIDs.contains($0.id)
+            }
+            let sourceByID = Dictionary(uniqueKeysWithValues: source.map { ($0.id, $0) })
+            let fallbackByID = Dictionary(uniqueKeysWithValues: fallback.map { ($0.id, $0) })
             try require(
                 !targetArtifacts.isEmpty
                     && targetArtifacts.allSatisfy { $0.validationStatus == .needsReview }
                     && fallback.count == source.count
-                    && zip(fallback, source).allSatisfy { $0.id == $1.id && $0.text == $1.text },
-                "Legacy full.srt exposed source fallback as a ready translation"
+                    && zip(fallback, source).allSatisfy {
+                        $0.id == $1.id && $0.start == $1.start && $0.end == $1.end
+                    }
+                    && reviewTasks.map(\.cueIDs).flatMap { $0 }.sorted() == [2, 5]
+                    && Set(reviewTasks.map(\.id)) == Set(report.reviewTaskIDs)
+                    && reviewTasks.allSatisfy { task in
+                        task.status == .needsReview
+                            && task.cueIDs.allSatisfy { cueID in
+                                guard let sourceCue = sourceByID[cueID],
+                                      let fallbackCue = fallbackByID[cueID] else {
+                                    return false
+                                }
+                                return task.originalText == sourceCue.text
+                                    && task.suggestedText == fallbackCue.text
+                            }
+                    },
+                "Legacy full.srt did not preserve unresolved candidates as pending review tasks"
             )
             try require(
                 failedManifest.workflow?.status == .failed
@@ -1065,8 +1085,8 @@ struct EndToEndTest {
                 URL(fileURLWithPath: $0).lastPathComponent == "whisper-cli"
             }
             try require(
-                whisperLaunches.count == 1,
-                "Translation resume performed Whisper work beyond the mandatory diagnostics probe"
+                whisperLaunches.isEmpty,
+                "Translation-only resume unexpectedly launched Whisper"
             )
         }
         try assertSourceUnchanged()

@@ -1527,9 +1527,6 @@ final class WorkflowEngine: @unchecked Sendable {
             let titles = disabledOperations.map(\.title).sorted().joined(separator: ", ")
             throw WorkflowError.processFailed("Операции временно недоступны в текущей сборке VideoText: \(titles).")
         }
-        if settings.selectedOperations.contains(.translateTranscript), !settings.translationHumanReviewEnabled {
-            throw WorkflowError.processFailed("Перевод требует обязательного Translation Human Review.")
-        }
         let projectURL = try settings.projectURL ?? store.createAutomaticProject(for: mediaURL)
         let layout = ProjectLayout(root: projectURL)
         let operations = expanded(
@@ -1549,6 +1546,7 @@ final class WorkflowEngine: @unchecked Sendable {
         let fileLog = FileLog(projectURL: projectURL)
         var currentOperation: WorkflowOperation?
         var activeFragment: FragmentRecord?
+        var failClosedLegacyTranslation = false
 
         func log(_ message: String) {
             onLog(message)
@@ -1887,10 +1885,30 @@ final class WorkflowEngine: @unchecked Sendable {
                         throw WorkflowError.processFailed("Не определён язык утверждённой исходной расшифровки.")
                     }
                     let targetLanguage = sourceLanguage.translationTarget
-                    let activeSourceCues = try srt.load(from: manifestSourceSubtitleURL(language: sourceLanguage, layout: layout))
+                    let localizedSourceURL = layout.subtitlesURL(language: sourceLanguage)
+                    let materializesLegacyFullSRT = !nonemptyFile(localizedSourceURL)
+                    let sourceURL = materializesLegacyFullSRT
+                        ? layout.fullSRTURL
+                        : localizedSourceURL
+                    let activeSourceCues = try srt.load(from: sourceURL)
                     guard let sourceRevision = current.activeTranscriptRevision(for: sourceLanguage),
                           sourceRevision.reviewStatus == .approved else {
                         throw WorkflowError.processFailed("Сначала утвердите \(sourceLanguage.russianTitle.lowercased()) расшифровку в Human Review.")
+                    }
+                    if materializesLegacyFullSRT {
+                        try srt.writePreservingIDs(activeSourceCues, to: localizedSourceURL)
+                        try writeTranscript(from: activeSourceCues, to: layout.transcriptURL(language: sourceLanguage))
+                        try store.registerOutput(
+                            kind: "subtitles-\(sourceLanguage.rawValue)",
+                            url: localizedSourceURL,
+                            in: projectURL
+                        )
+                        try store.registerOutput(
+                            kind: "transcript-\(sourceLanguage.rawValue)",
+                            url: layout.transcriptURL(language: sourceLanguage),
+                            in: projectURL
+                        )
+                        log("Legacy full.srt materialized as the active \(sourceLanguage.rawValue.uppercased()) source without rerunning ASR.")
                     }
                     guard workingSubtitleMatchesRevision(
                         sourceRevision,
@@ -1902,51 +1920,65 @@ final class WorkflowEngine: @unchecked Sendable {
                     if current.activeTranscriptRevision(for: targetLanguage)?.origin == .userEdited {
                         throw WorkflowError.processFailed("Перевод содержит ручные правки. Новый профиль перевода не будет автоматически заменять принятую пользователем ревизию.")
                     }
-                    let selectedSource = try selectedTimingTranslation.loadOrImportCoreSource(
+                    let result: TranslationAdapterResult
+                    let usesLegacyFullSRTPath: Bool
+                    if let selectedSource = try selectedTimingTranslation.loadPersistedSource(
                         projectURL: projectURL,
-                        mediaURL: mediaURL,
-                        language: sourceLanguage
-                    )
-                    try store.registerOutput(
-                        kind: "selected-timing-source",
-                        url: layout.selectedTimingSourceUnitsURL,
-                        in: projectURL
-                    )
-                    let sourceDocument = try selectedTimingTranslation.sourceDocument(
-                        selectedSource,
-                        reconciledWith: activeSourceCues
-                    )
-                    log("Перевод \(sourceLanguage.rawValue.uppercased())→\(targetLanguage.rawValue.uppercased()) использует canonical selected timing; TranslateGemma получает только текст unit.")
-                    let translated = try await selectedTimingTranslation.translate(
-                        sourceDocument: sourceDocument,
-                        source: sourceLanguage,
-                        target: targetLanguage,
-                        cacheDirectory: layout.selectedTimingTranslationCacheDirectory,
-                        rejectedResponseEvidenceURL: layout.selectedTimingTranslationRejectedResponsesURL(
+                        mediaURL: mediaURL
+                    ) {
+                        let sourceDocument = try selectedTimingTranslation.sourceDocument(
+                            selectedSource,
+                            reconciledWith: activeSourceCues
+                        )
+                        log("Перевод \(sourceLanguage.rawValue.uppercased())→\(targetLanguage.rawValue.uppercased()) использует canonical selected timing; TranslateGemma получает только текст unit.")
+                        let translated = try await selectedTimingTranslation.translate(
+                            sourceDocument: sourceDocument,
+                            source: sourceLanguage,
+                            target: targetLanguage,
+                            cacheDirectory: layout.selectedTimingTranslationCacheDirectory,
+                            rejectedResponseEvidenceURL: layout.selectedTimingTranslationRejectedResponsesURL(
+                                source: sourceLanguage,
+                                target: targetLanguage
+                            ),
+                            onLog: log
+                        )
+                        let rejectedResponsesURL = layout.selectedTimingTranslationRejectedResponsesURL(
                             source: sourceLanguage,
                             target: targetLanguage
-                        ),
-                        onLog: log
-                    )
-                    let rejectedResponsesURL = layout.selectedTimingTranslationRejectedResponsesURL(
-                        source: sourceLanguage,
-                        target: targetLanguage
-                    )
-                    if FileManager.default.fileExists(atPath: rejectedResponsesURL.path) {
+                        )
+                        if FileManager.default.fileExists(atPath: rejectedResponsesURL.path) {
+                            try store.registerOutput(
+                                kind: "selected-timing-translation-rejections-\(sourceLanguage.rawValue)-\(targetLanguage.rawValue)",
+                                url: rejectedResponsesURL,
+                                in: projectURL
+                            )
+                        }
+                        try selectedTimingTranslation.persist(translated, to: projectURL)
                         try store.registerOutput(
-                            kind: "selected-timing-translation-rejections-\(sourceLanguage.rawValue)-\(targetLanguage.rawValue)",
-                            url: rejectedResponsesURL,
+                            kind: "selected-timing-translation-\(sourceLanguage.rawValue)-\(targetLanguage.rawValue)",
+                            url: layout.selectedTimingTranslationsURL(source: sourceLanguage, target: targetLanguage),
                             in: projectURL
                         )
+                        result = try translated.adapterResult()
+                        tracker.update(operation, fraction: 1)
+                        usesLegacyFullSRTPath = false
+                    } else {
+                        log("Legacy full.srt translation uses the established ownership adapter; ASR is not rerun.")
+                        result = try await translationAdapter.translate(
+                            cues: activeSourceCues,
+                            source: sourceLanguage,
+                            target: targetLanguage,
+                            documentTitle: TranslationContextPlan.documentTitle(for: mediaURL),
+                            sourceIdentity: sourceRevision.id,
+                            checkpointDirectory: layout.translationCacheDirectory(
+                                source: sourceLanguage,
+                                target: targetLanguage
+                            ),
+                            onProgress: { tracker.update(operation, fraction: $0) },
+                            onLog: log
+                        )
+                        usesLegacyFullSRTPath = true
                     }
-                    try selectedTimingTranslation.persist(translated, to: projectURL)
-                    try store.registerOutput(
-                        kind: "selected-timing-translation-\(sourceLanguage.rawValue)-\(targetLanguage.rawValue)",
-                        url: layout.selectedTimingTranslationsURL(source: sourceLanguage, target: targetLanguage),
-                        in: projectURL
-                    )
-                    let result = try translated.adapterResult()
-                    tracker.update(operation, fraction: 1)
                     try Task.checkCancellation()
                     let report = try registerTranslation(
                         result,
@@ -1955,7 +1987,7 @@ final class WorkflowEngine: @unchecked Sendable {
                         targetLanguage: targetLanguage,
                         projectURL: projectURL,
                         layout: layout,
-                        requiresReview: true
+                        requiresReview: settings.translationHumanReviewEnabled || !result.issues.isEmpty
                     )
                     let encoder = JSONEncoder()
                     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -1969,6 +2001,12 @@ final class WorkflowEngine: @unchecked Sendable {
                         url: layout.translationReportURL(source: sourceLanguage, target: targetLanguage),
                         in: projectURL
                     )
+                    if usesLegacyFullSRTPath, !report.reviewTaskIDs.isEmpty {
+                        failClosedLegacyTranslation = true
+                        throw WorkflowError.processFailed(
+                            "Перевод содержит непроверенные или неполученные реплики и не может быть автоматически утверждён. Включите Human Review либо повторите перевод."
+                        )
+                    }
                     log(report.reviewTaskIDs.isEmpty
                         ? "Перевод \(sourceLanguage.rawValue) → \(targetLanguage.rawValue) готов: \(report.cueCount) cue."
                         : "Перевод сохранён с заданиями ручной проверки: \(report.reviewTaskIDs.count). Pipeline продолжен.")
@@ -2611,7 +2649,7 @@ final class WorkflowEngine: @unchecked Sendable {
             if let currentOperation {
                 try? markOperation(currentOperation, status: .failed, projectURL: projectURL, settings: settings, error: error.localizedDescription)
             }
-            let optionalTranslationFailure = currentOperation == .translateTranscript
+            let optionalTranslationFailure = currentOperation == .translateTranscript && !failClosedLegacyTranslation
             if optionalTranslationFailure, let previous = workflowBeforeTranslation {
                 restoreCoreWorkflowAfterTranslation(projectURL: projectURL, previous: previous)
             } else {
