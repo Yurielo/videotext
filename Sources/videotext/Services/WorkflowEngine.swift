@@ -1886,8 +1886,11 @@ final class WorkflowEngine: @unchecked Sendable {
                     }
                     let targetLanguage = sourceLanguage.translationTarget
                     let localizedSourceURL = layout.subtitlesURL(language: sourceLanguage)
-                    let materializesLegacyFullSRT = !nonemptyFile(localizedSourceURL)
-                    let sourceURL = materializesLegacyFullSRT
+                    let isLegacyFullSRTAtEntry = !nonemptyFile(localizedSourceURL)
+                    guard settings.translationHumanReviewEnabled || isLegacyFullSRTAtEntry else {
+                        throw WorkflowError.processFailed("Перевод требует обязательного Translation Human Review.")
+                    }
+                    let sourceURL = isLegacyFullSRTAtEntry
                         ? layout.fullSRTURL
                         : localizedSourceURL
                     let activeSourceCues = try srt.load(from: sourceURL)
@@ -1895,7 +1898,7 @@ final class WorkflowEngine: @unchecked Sendable {
                           sourceRevision.reviewStatus == .approved else {
                         throw WorkflowError.processFailed("Сначала утвердите \(sourceLanguage.russianTitle.lowercased()) расшифровку в Human Review.")
                     }
-                    if materializesLegacyFullSRT {
+                    if isLegacyFullSRTAtEntry {
                         try srt.writePreservingIDs(activeSourceCues, to: localizedSourceURL)
                         try writeTranscript(from: activeSourceCues, to: layout.transcriptURL(language: sourceLanguage))
                         try store.registerOutput(
@@ -1922,10 +1925,33 @@ final class WorkflowEngine: @unchecked Sendable {
                     }
                     let result: TranslationAdapterResult
                     let usesLegacyFullSRTPath: Bool
-                    if let selectedSource = try selectedTimingTranslation.loadPersistedSource(
-                        projectURL: projectURL,
-                        mediaURL: mediaURL
-                    ) {
+                    if isLegacyFullSRTAtEntry {
+                        log("Legacy full.srt translation uses the established ownership adapter; ASR is not rerun.")
+                        result = try await translationAdapter.translate(
+                            cues: activeSourceCues,
+                            source: sourceLanguage,
+                            target: targetLanguage,
+                            documentTitle: TranslationContextPlan.documentTitle(for: mediaURL),
+                            sourceIdentity: sourceRevision.id,
+                            checkpointDirectory: layout.translationCacheDirectory(
+                                source: sourceLanguage,
+                                target: targetLanguage
+                            ),
+                            onProgress: { tracker.update(operation, fraction: $0) },
+                            onLog: log
+                        )
+                        usesLegacyFullSRTPath = true
+                    } else {
+                        let selectedSource = try selectedTimingTranslation.loadOrImportCoreSource(
+                            projectURL: projectURL,
+                            mediaURL: mediaURL,
+                            language: sourceLanguage
+                        )
+                        try store.registerOutput(
+                            kind: "selected-timing-source",
+                            url: layout.selectedTimingSourceUnitsURL,
+                            in: projectURL
+                        )
                         let sourceDocument = try selectedTimingTranslation.sourceDocument(
                             selectedSource,
                             reconciledWith: activeSourceCues
@@ -1962,22 +1988,6 @@ final class WorkflowEngine: @unchecked Sendable {
                         result = try translated.adapterResult()
                         tracker.update(operation, fraction: 1)
                         usesLegacyFullSRTPath = false
-                    } else {
-                        log("Legacy full.srt translation uses the established ownership adapter; ASR is not rerun.")
-                        result = try await translationAdapter.translate(
-                            cues: activeSourceCues,
-                            source: sourceLanguage,
-                            target: targetLanguage,
-                            documentTitle: TranslationContextPlan.documentTitle(for: mediaURL),
-                            sourceIdentity: sourceRevision.id,
-                            checkpointDirectory: layout.translationCacheDirectory(
-                                source: sourceLanguage,
-                                target: targetLanguage
-                            ),
-                            onProgress: { tracker.update(operation, fraction: $0) },
-                            onLog: log
-                        )
-                        usesLegacyFullSRTPath = true
                     }
                     try Task.checkCancellation()
                     let report = try registerTranslation(
