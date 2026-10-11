@@ -1527,10 +1527,12 @@ final class WorkflowEngine: @unchecked Sendable {
             let titles = disabledOperations.map(\.title).sorted().joined(separator: ", ")
             throw WorkflowError.processFailed("Операции временно недоступны в текущей сборке VideoText: \(titles).")
         }
-        let projectURL = try settings.projectURL ?? store.createAutomaticProject(for: mediaURL)
-        let layout = ProjectLayout(root: projectURL)
         if settings.selectedOperations.contains(.translateTranscript),
            !settings.translationHumanReviewEnabled {
+            guard let projectURL = settings.projectURL else {
+                throw WorkflowError.processFailed("Перевод требует обязательного Translation Human Review.")
+            }
+            let layout = ProjectLayout(root: projectURL)
             let sourceLanguage = try? store.load(from: projectURL).languageProfile?.effective
             let isStandaloneLegacyTranslation = settings.selectedOperations == [.translateTranscript]
                 && sourceLanguage.map {
@@ -1540,6 +1542,8 @@ final class WorkflowEngine: @unchecked Sendable {
                 throw WorkflowError.processFailed("Перевод требует обязательного Translation Human Review.")
             }
         }
+        let projectURL = try settings.projectURL ?? store.createAutomaticProject(for: mediaURL)
+        let layout = ProjectLayout(root: projectURL)
         let operations = expanded(
             settings.selectedOperations,
             includeFillerAnalysisBeforeReview: settings.fillerAnalysisBeforeReview

@@ -15,6 +15,8 @@ struct RUENTranslationSliceProbe {
                     "translation directions are not limited to the accepted RU↔EN pair")
 
         try await verifyTargetLanguagePromptContract()
+        try await verifyDisabledHumanReviewPreflightDoesNotCreateProject(root: root.appendingPathComponent("preflight"))
+        try await verifyLegacyFullSRTSuccessWithoutHumanReview(root: root.appendingPathComponent("legacy-success"))
         try await verifyApprovedSourceFlow(root: root.appendingPathComponent("success"))
         try await verifyRejectedResponseRetriesAndPersistsEvidence(root: root.appendingPathComponent("retry-success"))
         try await verifySourceFallbackFailsClosed(root: root.appendingPathComponent("source-fallback"))
@@ -58,6 +60,89 @@ struct RUENTranslationSliceProbe {
                     && enToRu.contains("The output must be in Russian. Do not return English text.")
                     && enToRu.hasSuffix("\n\n And I also wanted to add"),
                     "EN→RU prompt lost its semantic contract, target-language contract, or source text")
+    }
+
+    private static func verifyDisabledHumanReviewPreflightDoesNotCreateProject(root: URL) async throws {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let media = root.appendingPathComponent("source.mp4")
+        try Data("preflight media".utf8).write(to: media)
+        let store = ProjectStore(history: ProjectHistoryStore(indexURL: root.appendingPathComponent("history.json")))
+        let settings = WorkflowSettings(
+            mediaURL: media,
+            projectURL: nil,
+            selectedOperations: [.translateTranscript],
+            mode: .resumeProject,
+            rangeStart: 0,
+            rangeEnd: 1,
+            fragmentName: "",
+            burnFragmentSubtitles: false,
+            subtitleStyle: .standard,
+            selectedTopicID: nil,
+            whisperModelPath: "/must-not-be-used/whisper.bin",
+            whisperLanguage: "ru",
+            sourceHumanReviewEnabled: true,
+            translationHumanReviewEnabled: false,
+            fillerAnalysisBeforeReview: true
+        )
+        do {
+            _ = try await WorkflowEngine(store: store).run(settings: settings, onLog: { _ in })
+            throw ProbeFailure(message: "Translation without project URL bypassed Human Review preflight")
+        } catch WorkflowError.processFailed(let message) {
+            try require(message == "Перевод требует обязательного Translation Human Review.",
+                        "Translation without project URL returned the wrong preflight error")
+        }
+        let rootContents = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        try require(rootContents == [media.lastPathComponent],
+                    "Translation without project URL created a project before Human Review preflight")
+    }
+
+    private static func verifyLegacyFullSRTSuccessWithoutHumanReview(root: URL) async throws {
+        let fixture = try makeFixture(root: root)
+        try FileManager.default.removeItem(at: fixture.layout.subtitlesURL(language: .ru))
+        try FileManager.default.removeItem(at: fixture.layout.transcriptURL(language: .ru))
+        let provider = ScriptedLegacyTranslationProvider()
+        let engine = WorkflowEngine(
+            store: fixture.store,
+            translationAdapter: TranslationAdapter(provider: provider)
+        )
+        var legacySettings = settings(fixture)
+        legacySettings.translationHumanReviewEnabled = false
+        var log: [String] = []
+        let result = try await engine.run(settings: legacySettings, onLog: { log.append($0) })
+
+        try require(result.checkpoint == nil,
+                    "Valid legacy full.srt translation unexpectedly opened Human Review")
+        try require(provider.calls == 1,
+                    "Valid legacy full.srt translation did not use the scripted ownership adapter exactly once")
+        try require(!log.contains(where: { $0.contains("Расшифровка bundled SeminarText") }),
+                    "Valid legacy full.srt translation reran ASR")
+        let completed = try fixture.store.load(from: fixture.project)
+        try require(completed.activeTranscriptRevision(for: .en)?.reviewStatus == .approved,
+                    "Valid legacy full.srt translation did not activate the ready target revision")
+        try require(completed.workflow?.operations[WorkflowOperation.transcribe.rawValue] == nil,
+                    "Valid legacy full.srt translation recorded an ASR operation")
+        let reportDecoder = JSONDecoder()
+        reportDecoder.dateDecodingStrategy = .iso8601
+        let report = try reportDecoder.decode(
+            TranslationReport.self,
+            from: Data(contentsOf: fixture.layout.translationReportURL(source: .ru, target: .en))
+        )
+        try require(report.status == .ready && report.reviewTaskIDs.isEmpty,
+                    "Valid legacy full.srt translation retained review tasks")
+        try require(FileManager.default.fileExists(atPath: fixture.layout.subtitlesURL(language: .ru).path)
+                    && FileManager.default.fileExists(atPath: fixture.layout.transcriptURL(language: .ru).path)
+                    && FileManager.default.fileExists(atPath: fixture.layout.subtitlesURL(language: .en).path)
+                    && FileManager.default.fileExists(atPath: fixture.layout.transcriptURL(language: .en).path),
+                    "Valid legacy full.srt translation did not materialize source and target TXT/SRT")
+        try require(SubtitleSourceResolver.availableSelections(manifest: completed, projectURL: fixture.project)
+                    == [.source, .approvedTranslation(.en)],
+                    "Ready legacy target is unavailable through Text and Content")
+
+        let callsBeforeReopen = provider.calls
+        let reopened = try fixture.store.openProject(at: fixture.project).0
+        try require(provider.calls == callsBeforeReopen
+                    && reopened.activeTranscriptRevision(for: .en)?.reviewStatus == .approved,
+                    "Reopen lost the ready legacy translation")
     }
 
     private static func verifyApprovedSourceFlow(root: URL) async throws {
@@ -433,6 +518,42 @@ private final class RecordingRUENTranslator: RUENTranslator {
     func translate(text: String, source: ArtifactLanguage, target: ArtifactLanguage) async throws -> String {
         requests.append(Request(source: source, target: target))
         return requests.count == 1 ? "Yuri did not cancel the meeting at 7 o'clock." : "The report lists 12 participants."
+    }
+}
+
+private final class ScriptedLegacyTranslationProvider: TranslationAIProvider {
+    private(set) var calls = 0
+
+    func preferredModel() async throws -> String { "scripted-legacy-translation" }
+
+    func preferredIdentity() async throws -> TranslationModelIdentity {
+        TranslationModelIdentity(
+            model: "scripted-legacy-translation",
+            digest: "scripted-legacy-digest",
+            protocolVersion: "scripted-legacy-v1"
+        )
+    }
+
+    func translate(
+        cues: [TranslationRequestCue],
+        source: ArtifactLanguage,
+        target: ArtifactLanguage,
+        model: String,
+        correction: String?
+    ) async throws -> [Int: String] {
+        calls += 1
+        guard source == .ru && target == .en && model == "scripted-legacy-translation" && correction == nil else {
+            throw ProbeFailure(message: "Legacy provider received an unexpected translation request")
+        }
+        return Dictionary(uniqueKeysWithValues: cues.map { cue in
+            let text: String
+            switch cue.id {
+            case 1: text = "Yuri did not cancel the meeting at 7 o'clock."
+            case 3: text = "The report lists 12 participants."
+            default: text = "English translation \(cue.id)."
+            }
+            return (cue.id, text)
+        })
     }
 }
 

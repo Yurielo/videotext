@@ -1182,7 +1182,11 @@ struct EndToEndTest {
         let outputBytes = try outputs.map { try Data(contentsOf: $0) }
         let outputDates = outputs.map { modificationDate($0) }
         let reopenedController = ProcessController()
-        _ = try await engine(reopenedController).run(settings: settings, onLog: { print($0) })
+        var completedResumeSettings = settings
+        if materializesLegacySource {
+            completedResumeSettings.translationHumanReviewEnabled = true
+        }
+        _ = try await engine(reopenedController).run(settings: completedResumeSettings, onLog: { print($0) })
         let chatsAfterCompletedResume = await wire.chats
         try require(chatsAfterCompletedResume == chats, "Completed resume unnecessarily called chat")
         for (index, url) in outputs.enumerated() {
