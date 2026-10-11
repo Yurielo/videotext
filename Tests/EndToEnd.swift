@@ -780,6 +780,50 @@ struct EndToEndTest {
             )
         }
 
+        func assertZeroByteCanonicalSourceStaysCanonical() async throws {
+            guard materializesLegacySource else { return }
+            let probeProject = evidence.appendingPathComponent("zero-byte-canonical-source", isDirectory: true)
+            try FileManager.default.copyItem(at: projectURL, to: probeProject)
+            defer { try? FileManager.default.removeItem(at: probeProject) }
+
+            let probeLayout = ProjectLayout(root: probeProject)
+            let zeroByteSourceURL = probeLayout.subtitlesURL(language: sourceLanguage)
+            try Data().write(to: zeroByteSourceURL, options: .atomic)
+            try? FileManager.default.removeItem(at: probeLayout.selectedTimingSourceUnitsURL)
+            var canonicalSettings = settings
+            canonicalSettings.projectURL = probeProject
+            do {
+                _ = try await engine(ProcessController()).run(settings: canonicalSettings, onLog: { _ in })
+                throw EndToEndError.failed("Zero-byte canonical source bypassed Translation Human Review")
+            } catch {
+                try require(
+                    error.localizedDescription.contains("Перевод требует обязательного Translation Human Review."),
+                    "Zero-byte canonical source took the legacy full.srt translation route"
+                )
+            }
+            let sourceAfterHumanReviewGuard = try Data(contentsOf: zeroByteSourceURL)
+            try require(
+                sourceAfterHumanReviewGuard.isEmpty
+                    && !FileManager.default.fileExists(atPath: probeLayout.selectedTimingSourceUnitsURL.path),
+                "Zero-byte canonical source was materialized or imported before the Human Review guard"
+            )
+
+            canonicalSettings.translationHumanReviewEnabled = true
+            var baselineRejected = false
+            do {
+                _ = try await engine(ProcessController()).run(settings: canonicalSettings, onLog: { _ in })
+            } catch {
+                baselineRejected = true
+            }
+            let sourceAfterBaselineValidation = try Data(contentsOf: zeroByteSourceURL)
+            try require(
+                baselineRejected
+                    && sourceAfterBaselineValidation.isEmpty
+                    && !FileManager.default.fileExists(atPath: probeLayout.selectedTimingSourceUnitsURL.path),
+                "Zero-byte canonical source bypassed baseline validation through legacy full.srt fallback"
+            )
+        }
+
         let identity = TranslationModelIdentity(
             model: OllamaTranslationProvider.model,
             digest: E2ETranslationWire.digest,
@@ -800,6 +844,7 @@ struct EndToEndTest {
             mediaURL: mediaURL
         ) != nil
         try await assertCanonicalSourceStillRequiresHumanReview()
+        try await assertZeroByteCanonicalSourceStaysCanonical()
         let executionController = ProcessController()
         let resumed: WorkflowResult
         do {

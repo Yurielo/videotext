@@ -1886,7 +1886,7 @@ final class WorkflowEngine: @unchecked Sendable {
                     }
                     let targetLanguage = sourceLanguage.translationTarget
                     let localizedSourceURL = layout.subtitlesURL(language: sourceLanguage)
-                    let isLegacyFullSRTAtEntry = !nonemptyFile(localizedSourceURL)
+                    let isLegacyFullSRTAtEntry = !FileManager.default.fileExists(atPath: localizedSourceURL.path)
                     guard settings.translationHumanReviewEnabled || isLegacyFullSRTAtEntry else {
                         throw WorkflowError.processFailed("Перевод требует обязательного Translation Human Review.")
                     }
