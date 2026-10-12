@@ -96,6 +96,53 @@ struct SimpleCutRangeAvailability: Equatable {
     let message: String
 }
 
+/// A read-only topic choice exposed by Simple Mode. Its range comes from the
+/// active approved topic snapshot and is deliberately not editable here.
+struct SimpleApprovedTopicOption: Equatable, Identifiable {
+    let id: String
+    let title: String
+    let start: TimeInterval
+    let end: TimeInterval
+}
+
+/// The fixed source-only topic-cut request exposed to Simple Mode. It binds a
+/// single topic ID to the active approved snapshot so Advanced selections are
+/// neither consulted nor rewritten when the shared `.cutTopic` operation runs.
+struct SimpleTopicCutWorkflowRequest: Equatable {
+    let operations: Set<WorkflowOperation>
+    let topicID: String
+    let language: ArtifactLanguage
+    let granularity: TopicGranularity
+    let topicRevisionID: String
+    let approvedRevisionID: String
+    let subtitleSource: SubtitleSourceSelection
+    let subtitleStyle: SubtitleStyleSettings
+
+    static func standard(
+        topicID: String,
+        language: ArtifactLanguage,
+        granularity: TopicGranularity,
+        topicRevisionID: String,
+        approvedRevisionID: String
+    ) -> Self {
+        Self(
+            operations: [.cutTopic],
+            topicID: topicID,
+            language: language,
+            granularity: granularity,
+            topicRevisionID: topicRevisionID,
+            approvedRevisionID: approvedRevisionID,
+            subtitleSource: .source,
+            subtitleStyle: .standard
+        )
+    }
+}
+
+struct SimpleTopicCutAvailability: Equatable {
+    let canCreate: Bool
+    let message: String
+}
+
 struct ApprovedTranscriptReuseRequirement: Equatable {
     let language: ArtifactLanguage
     let revisionID: String
@@ -112,10 +159,26 @@ struct ApprovedTranscriptReuseRequirement: Equatable {
     }
 }
 
+/// Pins `.cutTopic` to the exact approved topic revision and its immutable
+/// snapshot. The engine re-resolves this requirement immediately before use,
+/// preventing a changed working topics file from changing the selected range.
+struct ApprovedTopicSelectionRequirement: Equatable {
+    let language: ArtifactLanguage
+    let granularity: TopicGranularity
+    let revisionID: String
+    let topicID: String
+}
+
+struct ApprovedTopicSnapshot {
+    let revision: TopicRevision
+    let file: TopicsFile
+}
+
 struct WorkflowExecutionPolicy {
     var requireReusableTranscription = false
     var preserveReviewPreferences = false
     var approvedTranscript: ApprovedTranscriptReuseRequirement? = nil
+    var approvedTopicSelection: ApprovedTopicSelectionRequirement? = nil
 
     static let standard = WorkflowExecutionPolicy()
 }
@@ -663,6 +726,115 @@ final class WorkflowViewModel: ObservableObject {
                 failureContext: "Создание фрагмента"
             )
         )
+    }
+
+    /// Simple always presents the canonical normal-granularity source variant.
+    /// The returned values are from the immutable active approved snapshot,
+    /// never from the mutable working topics file or Advanced selection state.
+    var simpleApprovedTopicOptions: [SimpleApprovedTopicOption] {
+        guard let context = simpleTopicCutContext(),
+              let snapshot = try? WorkflowEngine.approvedTopicSnapshot(
+                manifest: context.manifest,
+                projectURL: context.projectURL,
+                language: context.language,
+                granularity: context.granularity
+              ) else { return [] }
+        return snapshot.file.topics.map {
+            SimpleApprovedTopicOption(id: $0.id, title: $0.title, start: $0.start, end: $0.end)
+        }
+    }
+
+    func simpleTopicCutAvailability(topicID: String) -> SimpleTopicCutAvailability {
+        if isStopping {
+            return .init(canCreate: false, message: "Останавливаем обработку.")
+        }
+        if isRunning {
+            return .init(canCreate: false, message: "Дождитесь завершения текущей обработки.")
+        }
+        guard !topicID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .init(canCreate: false, message: "Выберите утверждённую тему.")
+        }
+        guard simpleTopicCutWorkflowRequest(topicID: topicID) != nil else {
+            return .init(
+                canCreate: false,
+                message: "Выбранная тема должна входить в утверждённый набор и иметь пригодную исходную расшифровку."
+            )
+        }
+        return .init(canCreate: true, message: "Будет создан фрагмент по утверждённой теме с исходными субтитрами.")
+    }
+
+    func simpleTopicCutWorkflowRequest(topicID: String) -> SimpleTopicCutWorkflowRequest? {
+        guard let context = simpleTopicCutContext(),
+              !topicID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let snapshot = try? WorkflowEngine.approvedTopicSnapshot(
+                manifest: context.manifest,
+                projectURL: context.projectURL,
+                language: context.language,
+                granularity: context.granularity
+              ),
+              snapshot.file.topics.contains(where: { $0.id == topicID }) else { return nil }
+        return .standard(
+            topicID: topicID,
+            language: context.language,
+            granularity: context.granularity,
+            topicRevisionID: snapshot.revision.id,
+            approvedRevisionID: context.sourceRevision.id
+        )
+    }
+
+    /// Starts exactly one shared topic-cut operation. The request pins both the
+    /// accepted transcript and active topic revision; current Advanced fields
+    /// are not used as transport and remain unmodified.
+    @discardableResult
+    func startSimpleTopicCutFromAcceptedTranscript(topicID: String) -> Bool {
+        guard let request = simpleTopicCutWorkflowRequest(topicID: topicID) else { return false }
+        return startRun(
+            operations: request.operations,
+            fillerAnalysisBeforeReviewOverride: false,
+            subtitleStyleOverride: request.subtitleStyle,
+            subtitleSourceOverride: request.subtitleSource,
+            artifactLanguageOverride: request.language,
+            topicGranularityOverride: request.granularity,
+            selectedTopicIDOverride: request.topicID,
+            requireReusableTranscription: true,
+            preserveReviewPreferences: true,
+            approvedTranscript: ApprovedTranscriptReuseRequirement(
+                language: request.language,
+                revisionID: request.approvedRevisionID,
+                failureContext: "Создание фрагмента по теме"
+            ),
+            approvedTopicSelection: ApprovedTopicSelectionRequirement(
+                language: request.language,
+                granularity: request.granularity,
+                revisionID: request.topicRevisionID,
+                topicID: request.topicID
+            )
+        )
+    }
+
+    private func simpleTopicCutContext() -> (
+        projectURL: URL,
+        manifest: ProjectManifest,
+        language: ArtifactLanguage,
+        granularity: TopicGranularity,
+        sourceRevision: TranscriptRevision
+    )? {
+        guard !isRunning, !isStopping, mediaURL != nil,
+              humanReviewCheckpoint == nil, topicReviewCheckpoint == nil,
+              let projectURL,
+              let manifest = try? store.load(from: projectURL),
+              manifest.humanReviewState?.pendingCheckpoint == nil,
+              manifest.topicReviewState?.pendingCheckpoint == nil,
+              let language = manifest.languageProfile?.effective,
+              let sourceRevision = manifest.activeTranscriptRevision(for: language),
+              sourceRevision.reviewStatus == .approved,
+              isSimpleApprovedSourceSubtitleReusable(
+                language: language,
+                revisionID: sourceRevision.id,
+                manifest: manifest,
+                projectURL: projectURL
+              ) else { return nil }
+        return (projectURL, manifest, language, .normal, sourceRevision)
     }
 
     private func isSimpleApprovedSourceSubtitleReusable(
@@ -1462,13 +1634,17 @@ final class WorkflowViewModel: ObservableObject {
         topicHumanReviewOverride: Bool? = nil,
         subtitleStyleOverride: SubtitleStyleSettings? = nil,
         subtitleSourceOverride: SubtitleSourceSelection? = nil,
+        artifactLanguageOverride: ArtifactLanguage? = nil,
+        topicGranularityOverride: TopicGranularity? = nil,
+        selectedTopicIDOverride: String? = nil,
         rangeStartOverride: TimeInterval? = nil,
         rangeEndOverride: TimeInterval? = nil,
         fragmentNameOverride: String? = nil,
         burnFragmentSubtitlesOverride: Bool? = nil,
         requireReusableTranscription: Bool = false,
         preserveReviewPreferences: Bool = false,
-        approvedTranscript: ApprovedTranscriptReuseRequirement? = nil
+        approvedTranscript: ApprovedTranscriptReuseRequirement? = nil,
+        approvedTopicSelection: ApprovedTopicSelectionRequirement? = nil
     ) -> Bool {
         var operations = requestedOperations
         if operations.contains(.renderFragment), fragmentMuteFillerWords {
@@ -1572,12 +1748,12 @@ final class WorkflowViewModel: ObservableObject {
             fragmentName: fragmentNameOverride ?? fragmentName,
             burnFragmentSubtitles: burnFragmentSubtitlesOverride ?? burnFragmentSubtitles,
             subtitleStyle: subtitleStyleOverride ?? subtitleStyle,
-            selectedTopicID: selectedTopicID.isEmpty ? nil : selectedTopicID,
+            selectedTopicID: selectedTopicIDOverride ?? (selectedTopicID.isEmpty ? nil : selectedTopicID),
             whisperModelPath: whisperModelPath,
             whisperLanguage: whisperLanguageOverride ?? (whisperLanguage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "auto" : whisperLanguage),
             transcriptionContext: WhisperTranscriptionContext.normalized(transcriptionContext),
-            topicGranularity: topicGranularity,
-            artifactLanguage: artifactLanguage,
+            topicGranularity: topicGranularityOverride ?? topicGranularity,
+            artifactLanguage: artifactLanguageOverride ?? artifactLanguage,
             subtitleSource: subtitleSourceOverride ?? subtitleSource,
             quoteStart: quoteProvenance ? quoteStartText : nil,
             quoteEnd: quoteProvenance ? quoteEndText : nil,
@@ -1616,7 +1792,8 @@ final class WorkflowViewModel: ObservableObject {
         let policy = WorkflowExecutionPolicy(
             requireReusableTranscription: requireReusableTranscription,
             preserveReviewPreferences: preserveReviewPreferences,
-            approvedTranscript: approvedTranscript
+            approvedTranscript: approvedTranscript,
+            approvedTopicSelection: approvedTopicSelection
         )
 
         let sourceReviewPreferenceToRestore: Bool? = sourceHumanReviewOverride == nil ? nil : sourceHumanReviewEnabled
@@ -2532,11 +2709,20 @@ final class WorkflowEngine: @unchecked Sendable {
                     let topicLanguage = settings.artifactLanguage
                         ?? manifest.languageProfile?.effective
                         ?? .ru
-                    let topic = try Self.selectTopic(
+                    if let requirement = policy.approvedTranscript {
+                        try validateApprovedTranscriptReuse(
+                            requirement,
+                            manifest: try store.load(from: projectURL),
+                            projectURL: projectURL
+                        )
+                    }
+                    let topic = try Self.approvedTopic(
+                        manifest: manifest,
                         projectURL: projectURL,
-                        id: settings.selectedTopicID,
+                        selectedTopicID: settings.selectedTopicID,
                         language: topicLanguage,
-                        granularity: settings.topicGranularity
+                        granularity: settings.topicGranularity,
+                        requirement: policy.approvedTopicSelection
                     )
                     let subtitleSource = try resolvedSubtitleSource(settings: settings, manifest: manifest, projectURL: projectURL)
                     activeFragment = try await createFragment(
@@ -4767,6 +4953,91 @@ final class WorkflowEngine: @unchecked Sendable {
             throw WorkflowError.missingTopics
         }
         return selected
+    }
+
+    /// Resolves the active approved snapshot for exactly one topic variant.
+    /// The mutable working topics file may be used only when it is byte-for-byte
+    /// identical; otherwise callers read the immutable approved snapshot.
+    static func approvedTopicSnapshot(
+        manifest: ProjectManifest,
+        projectURL: URL,
+        language: ArtifactLanguage,
+        granularity: TopicGranularity
+    ) throws -> ApprovedTopicSnapshot {
+        let key = "\(language.rawValue).\(granularity.rawValue)"
+        guard let activeID = manifest.topicReviewState?.activeRevisionIDs[key],
+              let revision = manifest.topicRevisions?.first(where: { $0.id == activeID }),
+              revision.id == activeID,
+              revision.language == language,
+              revision.granularity == granularity,
+              revision.status == .approved else {
+            throw WorkflowError.processFailed("Выбранная тема не входит в утверждённый набор.")
+        }
+
+        let layout = ProjectLayout(root: projectURL)
+        let immutableURL = URL(fileURLWithPath: revision.jsonPath)
+        guard immutableURL.standardizedFileURL.path == layout.topicRevisionJSONURL(id: revision.id).standardizedFileURL.path,
+              let immutableData = try? Data(contentsOf: immutableURL), !immutableData.isEmpty,
+              StableTopicHash.string(String(decoding: immutableData, as: UTF8.self)) == revision.contentHash else {
+            throw WorkflowError.processFailed("Утверждённый снимок темы отсутствует или изменён.")
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let file = try? decoder.decode(TopicsFile.self, from: immutableData),
+              file.status == .ready,
+              file.granularity == granularity else {
+            throw WorkflowError.processFailed("Утверждённый снимок темы не читается.")
+        }
+
+        // A matching working artifact is valid to retain for normal reopen;
+        // when it differs, the immutable snapshot below remains authoritative.
+        let workingURL = layout.topicsURL(language: language, granularity: granularity)
+        if let workingData = try? Data(contentsOf: workingURL), !workingData.isEmpty,
+           workingData == immutableData {
+            return ApprovedTopicSnapshot(revision: revision, file: file)
+        }
+        return ApprovedTopicSnapshot(revision: revision, file: file)
+    }
+
+    /// `.cutTopic` is fail-closed even for Advanced callers: no implicit first
+    /// topic fallback, no draft/current-file substitution, and no computed
+    /// range. The selected range is copied verbatim from the approved snapshot.
+    static func approvedTopic(
+        manifest: ProjectManifest,
+        projectURL: URL,
+        selectedTopicID: String?,
+        language: ArtifactLanguage,
+        granularity: TopicGranularity,
+        requirement: ApprovedTopicSelectionRequirement? = nil
+    ) throws -> TopicSegment {
+        guard let selectedTopicID = selectedTopicID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !selectedTopicID.isEmpty else {
+            throw WorkflowError.processFailed("Для создания фрагмента выберите утверждённую тему.")
+        }
+        if let requirement {
+            guard requirement.language == language,
+                  requirement.granularity == granularity,
+                  requirement.topicID == selectedTopicID else {
+                throw WorkflowError.processFailed("Выбранная тема изменилась до запуска и не будет использована.")
+            }
+        }
+        let snapshot = try approvedTopicSnapshot(
+            manifest: manifest,
+            projectURL: projectURL,
+            language: language,
+            granularity: granularity
+        )
+        if let requirement, requirement.revisionID != snapshot.revision.id {
+            throw WorkflowError.processFailed("Утверждённый набор тем изменился до запуска и не будет использован.")
+        }
+        let matches = snapshot.file.topics.filter { $0.id == selectedTopicID }
+        guard matches.count == 1, let topic = matches.first,
+              topic.start.isFinite, topic.end.isFinite,
+              topic.start >= 0, topic.end > topic.start else {
+            throw WorkflowError.processFailed("Утверждённая тема имеет недопустимый диапазон.")
+        }
+        return topic
     }
 
     private func requiredDuration(of mediaURL: URL, manifest: ProjectManifest) async throws -> TimeInterval {
