@@ -19,6 +19,11 @@ struct RUENTranslationSliceProbe {
         try await verifyLegacyFullSRTSuccessWithoutHumanReview(root: root.appendingPathComponent("legacy-success"))
         try await verifyRelocatedSourceReferenceRecovery(root: root.appendingPathComponent("relocated-ru"), sourceLanguage: .ru)
         try await verifyRelocatedSourceReferenceRecovery(root: root.appendingPathComponent("relocated-en"), sourceLanguage: .en)
+        try await verifyRelocatedSourceReferenceRecovery(
+            root: root.appendingPathComponent("relocated-malformed-reference-sha"),
+            sourceLanguage: .ru,
+            referenceSHAOverride: "stale-owner-reference-record"
+        )
         try verifyRelocatedSourceReferenceFailures(root: root.appendingPathComponent("relocated-failures"))
         try await verifyApprovedSourceFlow(root: root.appendingPathComponent("success"))
         try await verifyRejectedResponseRetriesAndPersistsEvidence(root: root.appendingPathComponent("retry-success"))
@@ -150,24 +155,33 @@ struct RUENTranslationSliceProbe {
 
     private static func verifyRelocatedSourceReferenceRecovery(
         root: URL,
-        sourceLanguage: ArtifactLanguage
+        sourceLanguage: ArtifactLanguage,
+        referenceSHAOverride: String? = nil
     ) async throws {
-        // A copied project retains original core evidence paths while its one
-        // package moves under the copied project's SeminarText tree.
-        let fixture = try copiedFixture(root: root, sourceLanguage: sourceLanguage)
+        // This mirrors the frozen Owner Retest: an accepted project was copied,
+        // retaining its old Core output path, manifest association, and a
+        // reference SHA from an earlier QA location.
+        let fixture = try ownerRetestStyleCopiedFixture(root: root, sourceLanguage: sourceLanguage)
         let manifestURL = try selectedTimingManifestURL(for: fixture)
         let evidenceBefore = try JSONDecoder().decode(
             SeminarTextCoreTranscriptionEvidence.self,
             from: Data(contentsOf: fixture.layout.seminarTextCoreEvidenceURL)
         )
+        if let referenceSHAOverride {
+            try replaceSourceReferenceSHA(in: manifestURL, with: referenceSHAOverride)
+        }
+        let candidateSource = try manifestSource(in: manifestURL)
+        let reference = try requiredString(candidateSource["reference"], "Owner-style fixture has no source reference")
+        let staleReferenceSHA = try requiredString(candidateSource["reference_sha256"], "Owner-style fixture has no reference SHA")
         try require(
             URL(fileURLWithPath: evidenceBefore.outputDirectory).standardizedFileURL
-                != manifestURL.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL,
-            "Copied fixture did not retain a stale original Core output directory"
+                != manifestURL.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL
+                && evidenceBefore.selectedTimingManifestSHA256 != SelectedTimingHash.file(manifestURL)
+                && reference == fixture.media.path
+                && staleReferenceSHA == (referenceSHAOverride ?? SelectedTimingHash.string(forensicLegacyReferencePath))
+                && staleReferenceSHA != SelectedTimingHash.string(reference),
+            "Owner-style copied fixture does not preserve stale Core location and reference provenance"
         )
-        let relocatedMedia = root.appendingPathComponent("copied/relocated-source.mp4")
-        try FileManager.default.copyItem(at: fixture.media, to: relocatedMedia)
-        try replaceSourceReference(in: manifestURL, with: relocatedMedia.path)
         let adoptedManifestHash = SelectedTimingHash.file(manifestURL)
 
         let translator: SimpleTextTranslationProvider = sourceLanguage == .ru
@@ -213,21 +227,36 @@ struct RUENTranslationSliceProbe {
         }
         try verifyRelocatedSourceReferenceFailure(root: root.appendingPathComponent("multiple")) { fixture in
             let manifestURL = try selectedTimingManifestURL(for: fixture)
-            try replaceSourceReference(in: manifestURL, with: fixture.project.appendingPathComponent("relocated.mp4").path)
             let package = manifestURL.deletingLastPathComponent()
             let duplicate = package.deletingLastPathComponent().appendingPathComponent("structured_timing_duplicate", isDirectory: true)
             try FileManager.default.copyItem(at: package, to: duplicate)
         }
         try verifyRelocatedSourceReferenceFailure(root: root.appendingPathComponent("tampered")) { fixture in
-            let manifestURL = try selectedTimingManifestURL(for: fixture)
-            try replaceSourceReference(in: manifestURL, with: fixture.project.appendingPathComponent("relocated.mp4").path)
-            let json = manifestURL.deletingLastPathComponent().appendingPathComponent("parts/part_0000.json")
+            let json = try selectedTimingManifestURL(for: fixture)
+                .deletingLastPathComponent()
+                .appendingPathComponent("parts/part_0000.json")
             try Data("tampered".utf8).write(to: json, options: .atomic)
         }
-        try verifyRelocatedSourceReferenceFailure(root: root.appendingPathComponent("incompatible")) { fixture in
-            let manifestURL = try selectedTimingManifestURL(for: fixture)
-            try replaceSourceReference(in: manifestURL, with: fixture.project.appendingPathComponent("relocated.mp4").path)
-            try replaceManifestLanguage(in: manifestURL, with: .en)
+        try verifyRelocatedSourceReferenceFailure(root: root.appendingPathComponent("current-media-mismatch")) { fixture in
+            let mismatchedMedia = fixture.project.appendingPathComponent("mismatched-media.mp4")
+            try Data("different media".utf8).write(to: mismatchedMedia, options: .atomic)
+            try replaceSourceReference(in: selectedTimingManifestURL(for: fixture), with: mismatchedMedia.path)
+        }
+        try verifyRelocatedSourceReferenceFailure(root: root.appendingPathComponent("manifest-media-mismatch")) { fixture in
+            try replaceSourceMediaSHA(in: selectedTimingManifestURL(for: fixture), with: String(repeating: "0", count: 64))
+        }
+        try verifyRelocatedSourceReferenceFailure(root: root.appendingPathComponent("srt-mismatch")) { fixture in
+            let srt = try selectedTimingManifestURL(for: fixture)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("transcript4.srt")
+            try Data("tampered SRT".utf8).write(to: srt, options: .atomic)
+        }
+        try verifyRelocatedSourceReferenceFailure(root: root.appendingPathComponent("whisper-mismatch")) { fixture in
+            try replaceEvidenceWhisperSHA(at: fixture.layout, with: String(repeating: "0", count: 64))
+        }
+        try verifyRelocatedSourceReferenceFailure(root: root.appendingPathComponent("language-mismatch")) { fixture in
+            try replaceManifestLanguage(in: selectedTimingManifestURL(for: fixture), with: .en)
         }
     }
 
@@ -235,7 +264,7 @@ struct RUENTranslationSliceProbe {
         root: URL,
         mutate: (Fixture) throws -> Void
     ) throws {
-        let fixture = try makeFixture(root: root)
+        let fixture = try ownerRetestStyleCopiedFixture(root: root, sourceLanguage: .ru)
         try mutate(fixture)
         let selectedTiming = SelectedTimingVerticalSlice(translator: RecordingRUENTranslator())
         do {
@@ -263,11 +292,40 @@ struct RUENTranslationSliceProbe {
         return manifestURL
     }
 
+    private static func manifestSource(in manifestURL: URL) throws -> [String: Any] {
+        let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any]
+        guard let source = manifest?["source"] as? [String: Any] else {
+            throw ProbeFailure(message: "Selected timing fixture has no source record")
+        }
+        return source
+    }
+
+    private static func requiredString(_ value: Any?, _ message: String) throws -> String {
+        guard let value = value as? String else { throw ProbeFailure(message: message) }
+        return value
+    }
+
     private static func replaceSourceReference(in manifestURL: URL, with reference: String) throws {
         var manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as! [String: Any]
         var source = manifest["source"] as! [String: Any]
         source["reference"] = reference
         source["reference_sha256"] = SelectedTimingHash.string(reference)
+        manifest["source"] = source
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: manifestURL, options: .atomic)
+    }
+
+    private static func replaceSourceMediaSHA(in manifestURL: URL, with hash: String) throws {
+        var manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as! [String: Any]
+        var source = manifest["source"] as! [String: Any]
+        source["media_sha256"] = hash
+        manifest["source"] = source
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: manifestURL, options: .atomic)
+    }
+
+    private static func replaceSourceReferenceSHA(in manifestURL: URL, with hash: String) throws {
+        var manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as! [String: Any]
+        var source = manifest["source"] as! [String: Any]
+        source["reference_sha256"] = hash
         manifest["source"] = source
         try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: manifestURL, options: .atomic)
     }
@@ -278,6 +336,30 @@ struct RUENTranslationSliceProbe {
         transcription["language"] = language.rawValue
         manifest["transcription"] = transcription
         try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: manifestURL, options: .atomic)
+    }
+
+    private static func replaceEvidenceWhisperSHA(at layout: ProjectLayout, with hash: String) throws {
+        let evidence = try JSONDecoder().decode(
+            SeminarTextCoreTranscriptionEvidence.self,
+            from: Data(contentsOf: layout.seminarTextCoreEvidenceURL)
+        )
+        try writeEvidence(
+            SeminarTextCoreTranscriptionEvidence(
+                schemaVersion: evidence.schemaVersion,
+                runtimeIdentity: evidence.runtimeIdentity,
+                sourceSRTSHA256: evidence.sourceSRTSHA256,
+                selectedTimingManifestSHA256: evidence.selectedTimingManifestSHA256,
+                selectedWhisperJSONSHA256: hash,
+                outputDirectory: evidence.outputDirectory
+            ),
+            to: layout.seminarTextCoreEvidenceURL
+        )
+    }
+
+    private static func writeEvidence(_ evidence: SeminarTextCoreTranscriptionEvidence, to url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+        try encoder.encode(evidence).write(to: url, options: .atomic)
     }
 
     private static func verifyApprovedSourceFlow(root: URL) async throws {
@@ -485,16 +567,54 @@ struct RUENTranslationSliceProbe {
     private static let missingSelectedTimingProvenanceMessage =
         "Не найден единственный selected timing package, связанный с принятой расшифровкой. Повторный ASR не выполнялся."
 
-    private static func copiedFixture(root: URL, sourceLanguage: ArtifactLanguage) throws -> Fixture {
+    // The Owner Retest package layout and stale provenance contract. The test
+    // creates it under a disposable directory; the frozen project is never
+    // opened for mutation by the probe.
+    private static let forensicLegacyReferencePath =
+        "/Users/yurielokhin/Documents/Codex/videotext-issue19-evidence-20261010/qa-simple-short-ru-final-3/input/Short-RU.mp4"
+
+    private static func ownerRetestStyleCopiedFixture(root: URL, sourceLanguage: ArtifactLanguage) throws -> Fixture {
         let original = try makeFixture(root: root.appendingPathComponent("original", isDirectory: true), sourceLanguage: sourceLanguage)
+        let originalManifest = try selectedTimingManifestURL(for: original)
+        let originalOutput = originalManifest.deletingLastPathComponent().deletingLastPathComponent()
+        let ownerOutput = original.layout.seminarTextCoreDirectory
+            .appendingPathComponent("core-transcription-4CDB0038-E2C1-4BCA-8A4E-ECBFC85EB3E8/Short-RU", isDirectory: true)
+        try FileManager.default.createDirectory(at: ownerOutput.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: originalOutput, to: ownerOutput)
+        try FileManager.default.moveItem(
+            at: ownerOutput.appendingPathComponent("structured_timing", isDirectory: true),
+            to: ownerOutput.appendingPathComponent("structured_timing4", isDirectory: true)
+        )
+        let ownerManifest = ownerOutput.appendingPathComponent("structured_timing4/manifest.json")
+        let originalEvidence = try JSONDecoder().decode(
+            SeminarTextCoreTranscriptionEvidence.self,
+            from: Data(contentsOf: original.layout.seminarTextCoreEvidenceURL)
+        )
+        try writeEvidence(
+            SeminarTextCoreTranscriptionEvidence(
+                schemaVersion: originalEvidence.schemaVersion,
+                runtimeIdentity: originalEvidence.runtimeIdentity,
+                sourceSRTSHA256: originalEvidence.sourceSRTSHA256,
+                selectedTimingManifestSHA256: originalEvidence.selectedTimingManifestSHA256,
+                selectedWhisperJSONSHA256: originalEvidence.selectedWhisperJSONSHA256,
+                outputDirectory: ownerOutput.path
+            ),
+            to: original.layout.seminarTextCoreEvidenceURL
+        )
+        // The field is stale in the Owner project. Its paired reference remains
+        // the actual caller-selected media, and all immutable content hashes are
+        // retained for compatibility validation.
+        try replaceSourceReferenceSHA(
+            in: ownerManifest,
+            with: SelectedTimingHash.string(forensicLegacyReferencePath)
+        )
+
         let copiedRoot = root.appendingPathComponent("copied", isDirectory: true)
         try FileManager.default.createDirectory(at: copiedRoot, withIntermediateDirectories: true)
-        let media = copiedRoot.appendingPathComponent("russian-source.mp4")
         let project = copiedRoot.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.copyItem(at: original.media, to: media)
         try FileManager.default.copyItem(at: original.project, to: project)
         return Fixture(
-            media: media,
+            media: original.media,
             project: project,
             layout: ProjectLayout(root: project),
             store: ProjectStore(history: ProjectHistoryStore(indexURL: copiedRoot.appendingPathComponent("history.json"))),

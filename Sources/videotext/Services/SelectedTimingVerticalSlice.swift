@@ -337,18 +337,17 @@ struct SelectedTimingVerticalSlice {
         expectedLanguage: ArtifactLanguage
     ) throws -> TimedSourceDocument? {
         let packageRoot = manifestURL.deletingLastPathComponent()
-        // `outputDirectory` is diagnostic evidence from the original run and can
-        // become stale when a whole project is copied. The candidate was already
-        // discovered beneath this project's SeminarText tree; validate its own
-        // package output and immutable artifacts before adopting it.
+        // `outputDirectory` and `reference_sha256` are diagnostic location
+        // evidence from the original run. A copied legacy project can retain
+        // either stale value. The candidate was already discovered beneath this
+        // project's SeminarText tree; validate its own immutable artifacts and
+        // its actual media binding before adopting it.
         let candidateOutputDirectory = packageRoot.deletingLastPathComponent()
         let expectedMediaHash = SelectedTimingHash.file(expectedMediaURL)
         guard let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any],
               let source = manifest["source"] as? [String: Any],
               let reference = source["reference"] as? String,
               reference.hasPrefix("/"),
-              let referenceSHA256 = source["reference_sha256"] as? String,
-              referenceSHA256 == SelectedTimingHash.string(reference),
               FileManager.default.fileExists(atPath: reference),
               SelectedTimingHash.file(URL(fileURLWithPath: reference)) == expectedMediaHash,
               source["media_sha256"] as? String == expectedMediaHash,
