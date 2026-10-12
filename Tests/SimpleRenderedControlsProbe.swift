@@ -221,6 +221,12 @@ struct SimpleRenderedControlsProbe {
             sourceReviewEnabled: true, translationReviewEnabled: true, fillerAnalysisBeforeReview: false,
             activeRevisionIDs: active, draftRevisionIDs: [:], pendingCheckpoint: nil
         )
+        let whisper: [String: Any] = [
+            "result": ["language": source.rawValue],
+            "transcription": [["tokens": [["text": " approved", "offsets": ["from": 0, "to": 500]]]]]
+        ]
+        try JSONSerialization.data(withJSONObject: whisper, options: [.sortedKeys])
+            .write(to: layout.whisperJSONURL, options: .atomic)
         let topics = TopicsFile(
             adapter: TopicAlgorithmIdentity.hybridAdapter, createdAt: Date(), sourceSRT: layout.fullSRTURL.path,
             sourceSignature: StableTopicHash.string(try String(contentsOf: layout.fullSRTURL, encoding: .utf8)),
@@ -900,10 +906,15 @@ struct SimpleRenderedControlsProbe {
         try require(renderedText(try element("simple.subtitledVideo.availability", in: window))
             .contains("утверждённые исходные субтитры"),
             "Simple subtitle render did not disclose the accepted source input")
-        try require(SimpleSourceSubtitleRenderRequest.standard.operations == [.burnSubtitles]
-            && SimpleSourceSubtitleRenderRequest.standard.subtitleSource == .source
-            && SimpleSourceSubtitleRenderRequest.standard.subtitleStyle == .standard,
-            "Simple subtitle render request is not exactly source-only burnSubtitles with standard style")
+        guard let request = model.simpleSourceSubtitleWorkflowRequest else {
+            throw RenderedProbeFailure(message: "Approved source did not expose the Simple subtitle workflow request")
+        }
+        try require(request.operations == [.burnSubtitles]
+            && request.subtitleSource == .source
+            && request.subtitleStyle == .standard
+            && request.language == .ru
+            && request.approvedRevisionID == "approved-ru",
+            "Simple subtitle adapter request is not exactly source-only burnSubtitles with standard style and approved provenance")
         try require(model.selectedOperations == advancedOperations
             && model.subtitleSource == advancedSubtitleSource
             && model.subtitleStyle == advancedSubtitleStyle,
@@ -959,6 +970,16 @@ struct SimpleRenderedControlsProbe {
         try require(activationOperations[WorkflowOperation.transcribe.rawValue] == nil
             && activationOperations[WorkflowOperation.topicTimecoding.rawValue] == nil,
             "Simple subtitle CTA started ASR or topics before cancellation")
+        // A Simple action can fail during an accepted-transcript prerequisite
+        // before burnSubtitles becomes the active progress operation. Its actual
+        // action error must remain visible without inferring success from progress.
+        activation.status = "Ошибка"
+        activation.progress = WorkflowProgress(operation: nil, operationFraction: 0, overallFraction: 0,
+            elapsed: 0, estimatedTotal: nil, remaining: nil, isIndeterminate: false)
+        settle(activationWindow)
+        _ = try element("simple.subtitledVideo.error", in: activationWindow)
+        try require(element("simple.subtitledVideo.create", in: activationWindow).isAccessibilityEnabled(),
+            "Simple prerequisite failure did not retain a truthful retry action")
 
         let layout = ProjectLayout(root: accepted)
         try "1\n00:00:00,000 --> 00:00:02,000\nПодменённые субтитры\n".write(
@@ -968,8 +989,15 @@ struct SimpleRenderedControlsProbe {
         settle(window)
         try require(!element("simple.subtitledVideo.create", in: window).isAccessibilityEnabled(),
             "A source SRT that diverges from the approved revision was accepted")
+        try require(!model.canCreateSourceSubtitledVideoFromAcceptedTranscript
+            && model.simpleSourceSubtitleWorkflowRequest == nil,
+            "Divergent source SRT still exposed a reusable accepted-transcript request")
         try require(renderedText(try element("simple.subtitledVideo.availability", in: window))
-            .contains("не совпадают"), "Divergent source SRT did not fail closed in Simple")
+            .contains("подготовьте исходные субтитры"), "Divergent source SRT did not fail closed in Simple")
+        let divergentOperations = (try store.load(from: accepted)).workflow?.operations ?? [:]
+        try require(divergentOperations[WorkflowOperation.transcribe.rawValue] == nil
+            && divergentOperations[WorkflowOperation.topicTimecoding.rawValue] == nil,
+            "Fail-closed source provenance validation started ASR or topics")
         let approvedBytes = try Data(contentsOf: layout.subtitleRevisionURL(id: "approved-ru", language: .ru))
         try approvedBytes.write(to: layout.subtitlesURL(language: .ru), options: .atomic)
         model.loadDetectedResults()
@@ -996,7 +1024,6 @@ struct SimpleRenderedControlsProbe {
         model.isRunning = false
         model.status = "Ошибка"
         settle(window)
-        _ = try element("simple.subtitledVideo.error", in: window)
         try require(element("simple.subtitledVideo.create", in: window).isAccessibilityEnabled(),
             "Subtitle render failure did not preserve an honest retry action")
 

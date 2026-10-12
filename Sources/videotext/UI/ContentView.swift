@@ -31,20 +31,6 @@ private enum SimpleProjectHomeGoal: String, CaseIterable, Identifiable {
     }
 }
 
-/// A fixed Simple-mode request that is captured by the existing shared
-/// workflow before the Advanced presentation settings are restored.
-struct SimpleSourceSubtitleRenderRequest: Equatable {
-    let operations: Set<WorkflowOperation>
-    let subtitleSource: SubtitleSourceSelection
-    let subtitleStyle: SubtitleStyleSettings
-
-    static let standard = Self(
-        operations: [.burnSubtitles],
-        subtitleSource: .source,
-        subtitleStyle: .standard
-    )
-}
-
 /// Presentation intent for one explicitly started Simple translation.
 /// It only opens the existing Human Review when that translation has actually
 /// completed and persisted its review checkpoint.
@@ -167,6 +153,7 @@ struct ContentView: View {
     @State private var simpleReviewTarget: SimpleProjectHomeReviewTarget?
     @State private var showsSimpleTextContent = false
     @State private var showsSimpleSubtitledVideo = false
+    @State private var simpleSourceSubtitledVideoActionStarted = false
     @State private var simpleTranscription = SimpleTranscriptionPresentation()
     @State private var simpleTranslation = SimpleTranslationPresentation()
 
@@ -265,6 +252,7 @@ struct ContentView: View {
             reviewIssuesOnly = false
             showsSimpleTextContent = false
             showsSimpleSubtitledVideo = false
+            simpleSourceSubtitledVideoActionStarted = false
         }
         .onChange(of: presentationMode) { _, mode in
             if mode != .simple {
@@ -1087,17 +1075,18 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("simple.subtitledVideo.availability")
-                if model.status == "Ошибка", model.progress.operation == .burnSubtitles {
-                    Text("Видео с субтитрами не создано. Исправьте проблему и повторите попытку.")
+                if simpleSourceSubtitledVideoActionStarted, model.status == "Ошибка" {
+                    Text(model.alert?.message ?? "Видео с субтитрами не создано. Исправьте проблему и повторите попытку.")
                         .font(.caption)
                         .foregroundStyle(.red)
                         .accessibilityIdentifier("simple.subtitledVideo.error")
                 }
                 Button("Создать видео с субтитрами") {
-                    startSimpleSourceSubtitledVideo()
+                    simpleSourceSubtitledVideoActionStarted =
+                        model.startSimpleSourceSubtitledVideoFromAcceptedTranscript()
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!availability.canCreate || model.isRunning)
+                .disabled(!availability.canCreate)
                 .accessibilityIdentifier("simple.subtitledVideo.create")
             }
         }
@@ -1108,35 +1097,20 @@ struct ContentView: View {
         var message: String
     }
 
+    /// The ViewModel is the single authority for accepted-transcript reuse.
+    /// Simple only renders its availability; it does not inspect SRT or timing
+    /// provenance, and it never transports settings through Advanced state.
     private var simpleSourceSubtitledVideoAvailability: SimpleSourceSubtitledVideoAvailability {
-        guard !model.isStopping,
-              let projectURL = model.projectURL,
-              let manifest = try? ProjectStore().load(from: projectURL),
-              let sourceLanguage = manifest.languageProfile?.effective,
-              let revision = manifest.activeTranscriptRevision(for: sourceLanguage),
-              revision.reviewStatus == .approved else {
-            return .init(
-                canCreate: false,
-                message: "Сначала утвердите исходную расшифровку, затем можно создать видео с субтитрами."
-            )
+        if model.canCreateSourceSubtitledVideoFromAcceptedTranscript {
+            return .init(canCreate: true, message: "Будут использованы утверждённые исходные субтитры.")
         }
-        guard model.mediaURL != nil else {
-            return .init(canCreate: false, message: "Исходное видео недоступно для создания результата.")
+        if model.isStopping {
+            return .init(canCreate: false, message: "Останавливаем обработку.")
         }
-        guard let source = try? SubtitleSourceResolver.resolve(.source, manifest: manifest, projectURL: projectURL),
-              let immutable = try? Data(contentsOf: ProjectLayout(root: projectURL).subtitleRevisionURL(
-                id: revision.id,
-                language: sourceLanguage
-              )),
-              let selected = try? Data(contentsOf: source.srtURL),
-              !selected.isEmpty,
-              selected == immutable else {
-            return .init(
-                canCreate: false,
-                message: "Утверждённые исходные субтитры недоступны или не совпадают с принятой расшифровкой. Видео не создавалось."
-            )
-        }
-        return .init(canCreate: true, message: "Будут использованы утверждённые исходные субтитры.")
+        return .init(
+            canCreate: false,
+            message: "Сначала утвердите исходную расшифровку и подготовьте исходные субтитры для этого видео."
+        )
     }
 
     private var simpleSourceSubtitledVideoOutput: ProjectOutput? {
@@ -1145,23 +1119,6 @@ struct ContentView: View {
                 && $0.isGeneratedMedia
                 && FileManager.default.fileExists(atPath: $0.path)
         }
-    }
-
-    private func startSimpleSourceSubtitledVideo() {
-        guard presentationMode == .simple, simpleSourceSubtitledVideoAvailability.canCreate else { return }
-        let request = SimpleSourceSubtitleRenderRequest.standard
-        let advancedOperations = model.selectedOperations
-        let advancedSubtitleSource = model.subtitleSource
-        let advancedSubtitleStyle = model.subtitleStyle
-        model.selectedOperations = request.operations
-        model.subtitleSource = request.subtitleSource
-        model.subtitleStyle = request.subtitleStyle
-        model.run()
-        // startRun copies its WorkflowSettings before returning. Restore Advanced
-        // presentation choices so this fixed Simple action has no lasting UI side effect.
-        model.selectedOperations = advancedOperations
-        model.subtitleSource = advancedSubtitleSource
-        model.subtitleStyle = advancedSubtitleStyle
     }
 
     private func simpleRecentResultRow(_ output: SimpleProjectHomeResult) -> some View {
