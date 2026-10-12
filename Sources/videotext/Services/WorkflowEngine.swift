@@ -57,6 +57,45 @@ struct SimpleTranslatedSubtitleWorkflowRequest: Equatable {
     }
 }
 
+/// The fixed, source-only range-cut request exposed to Simple Mode.  It keeps
+/// the entered range outside Advanced presentation state while delegating the
+/// actual cut and result registration to the shared `.cutRange` operation.
+struct SimpleCutRangeWorkflowRequest: Equatable {
+    let operations: Set<WorkflowOperation>
+    let start: TimeInterval
+    let end: TimeInterval
+    let fragmentName: String
+    let burnFragmentSubtitles: Bool
+    let subtitleSource: SubtitleSourceSelection
+    let subtitleStyle: SubtitleStyleSettings
+    let language: ArtifactLanguage
+    let approvedRevisionID: String
+
+    static func standard(
+        start: TimeInterval,
+        end: TimeInterval,
+        language: ArtifactLanguage,
+        approvedRevisionID: String
+    ) -> Self {
+        Self(
+            operations: [.cutRange],
+            start: start,
+            end: end,
+            fragmentName: "Фрагмент",
+            burnFragmentSubtitles: false,
+            subtitleSource: .source,
+            subtitleStyle: .standard,
+            language: language,
+            approvedRevisionID: approvedRevisionID
+        )
+    }
+}
+
+struct SimpleCutRangeAvailability: Equatable {
+    let canCreate: Bool
+    let message: String
+}
+
 struct ApprovedTranscriptReuseRequirement: Equatable {
     let language: ArtifactLanguage
     let revisionID: String
@@ -524,6 +563,104 @@ final class WorkflowViewModel: ObservableObject {
                 language: request.sourceLanguage,
                 revisionID: request.sourceApprovedRevisionID,
                 failureContext: "Создание видео с переведёнными субтитрами"
+            )
+        )
+    }
+
+    /// Validates the exact user-entered range against the accepted source
+    /// revision and recorded source duration.  It never rounds or corrects
+    /// values supplied by the Simple UI.
+    func simpleCutRangeAvailability(startText: String, endText: String) -> SimpleCutRangeAvailability {
+        if isStopping {
+            return .init(canCreate: false, message: "Останавливаем обработку.")
+        }
+        if isRunning {
+            return .init(canCreate: false, message: "Дождитесь завершения текущей обработки.")
+        }
+        guard let mediaURL, let projectURL else {
+            return .init(canCreate: false, message: "Откройте проект с исходным видео и утверждённой расшифровкой.")
+        }
+        guard humanReviewCheckpoint == nil, topicReviewCheckpoint == nil,
+              let manifest = try? store.load(from: projectURL),
+              manifest.humanReviewState?.pendingCheckpoint == nil,
+              manifest.topicReviewState?.pendingCheckpoint == nil,
+              let language = manifest.languageProfile?.effective,
+              let revision = manifest.activeTranscriptRevision(for: language),
+              revision.reviewStatus == .approved,
+              isSimpleApprovedSourceSubtitleReusable(
+                language: language,
+                revisionID: revision.id,
+                manifest: manifest,
+                projectURL: projectURL
+              ) else {
+            return .init(
+                canCreate: false,
+                message: "Сначала утвердите исходную расшифровку и подготовьте исходные субтитры для этого видео."
+            )
+        }
+        guard let start = try? TimecodeParser.parse(startText),
+              let end = try? TimecodeParser.parse(endText),
+              start.isFinite, end.isFinite else {
+            return .init(canCreate: false, message: "Введите начало и конец в формате ЧЧ:ММ:СС.")
+        }
+        guard start >= 0, end > start else {
+            return .init(canCreate: false, message: "Конец фрагмента должен быть позже начала.")
+        }
+        guard let duration = actualSourceMediaDuration(mediaURL) else {
+            return .init(canCreate: false, message: "Не удалось определить длительность исходного видео.")
+        }
+        guard end <= duration else {
+            return .init(
+                canCreate: false,
+                message: "Конец фрагмента не может быть позже длительности исходного видео (\(TimeTextFormatter.string(duration)))."
+            )
+        }
+        return .init(canCreate: true, message: "Будет создан фрагмент с утверждёнными исходными субтитрами.")
+    }
+
+    /// This preflight intentionally reads the currently selected local media,
+    /// rather than trusting a historical manifest value.  The shared engine
+    /// repeats its own duration check before cutting; Simple uses this guard so
+    /// an overestimated manifest cannot expose an action that is known to fail.
+    private func actualSourceMediaDuration(_ mediaURL: URL) -> TimeInterval? {
+        guard FileManager.default.fileExists(atPath: mediaURL.path) else { return nil }
+        let duration = AVURLAsset(url: mediaURL).duration.seconds
+        guard duration.isFinite, duration > 0 else { return nil }
+        return duration
+    }
+
+    func simpleCutRangeWorkflowRequest(startText: String, endText: String) -> SimpleCutRangeWorkflowRequest? {
+        guard simpleCutRangeAvailability(startText: startText, endText: endText).canCreate,
+              let projectURL,
+              let manifest = try? store.load(from: projectURL),
+              let language = manifest.languageProfile?.effective,
+              let revision = manifest.activeTranscriptRevision(for: language),
+              let start = try? TimecodeParser.parse(startText),
+              let end = try? TimecodeParser.parse(endText) else { return nil }
+        return .standard(start: start, end: end, language: language, approvedRevisionID: revision.id)
+    }
+
+    /// Starts only the shared range-cut operation.  The Simple fields are
+    /// copied into this request; Advanced range/name/style/toggle bindings are
+    /// neither read as input nor changed by the action.
+    @discardableResult
+    func startSimpleCutRangeFromAcceptedTranscript(startText: String, endText: String) -> Bool {
+        guard let request = simpleCutRangeWorkflowRequest(startText: startText, endText: endText) else { return false }
+        return startRun(
+            operations: request.operations,
+            fillerAnalysisBeforeReviewOverride: false,
+            subtitleStyleOverride: request.subtitleStyle,
+            subtitleSourceOverride: request.subtitleSource,
+            rangeStartOverride: request.start,
+            rangeEndOverride: request.end,
+            fragmentNameOverride: request.fragmentName,
+            burnFragmentSubtitlesOverride: request.burnFragmentSubtitles,
+            requireReusableTranscription: true,
+            preserveReviewPreferences: true,
+            approvedTranscript: ApprovedTranscriptReuseRequirement(
+                language: request.language,
+                revisionID: request.approvedRevisionID,
+                failureContext: "Создание фрагмента"
             )
         )
     }
@@ -1325,6 +1462,10 @@ final class WorkflowViewModel: ObservableObject {
         topicHumanReviewOverride: Bool? = nil,
         subtitleStyleOverride: SubtitleStyleSettings? = nil,
         subtitleSourceOverride: SubtitleSourceSelection? = nil,
+        rangeStartOverride: TimeInterval? = nil,
+        rangeEndOverride: TimeInterval? = nil,
+        fragmentNameOverride: String? = nil,
+        burnFragmentSubtitlesOverride: Bool? = nil,
         requireReusableTranscription: Bool = false,
         preserveReviewPreferences: Bool = false,
         approvedTranscript: ApprovedTranscriptReuseRequirement? = nil
@@ -1355,13 +1496,23 @@ final class WorkflowViewModel: ObservableObject {
         var start: TimeInterval = 0
         var end: TimeInterval = 1
         if operations.contains(.cutRange) || operations.contains(.burnFragmentSubtitles) || operations.contains(.renderFragment) {
-            do {
-                start = try TimecodeParser.parse(rangeStartText)
-                end = try TimecodeParser.parse(rangeEndText)
-                guard end > start else { throw WorkflowError.invalidRange }
-            } catch {
-                reportPreparationError(error)
-                return false
+            if let rangeStartOverride, let rangeEndOverride {
+                guard rangeStartOverride.isFinite, rangeEndOverride.isFinite,
+                      rangeStartOverride >= 0, rangeEndOverride > rangeStartOverride else {
+                    reportPreparationError(WorkflowError.invalidRange)
+                    return false
+                }
+                start = rangeStartOverride
+                end = rangeEndOverride
+            } else {
+                do {
+                    start = try TimecodeParser.parse(rangeStartText)
+                    end = try TimecodeParser.parse(rangeEndText)
+                    guard end > start else { throw WorkflowError.invalidRange }
+                } catch {
+                    reportPreparationError(error)
+                    return false
+                }
             }
         }
 
@@ -1418,8 +1569,8 @@ final class WorkflowViewModel: ObservableObject {
             mode: runMode,
             rangeStart: start,
             rangeEnd: end,
-            fragmentName: fragmentName,
-            burnFragmentSubtitles: burnFragmentSubtitles,
+            fragmentName: fragmentNameOverride ?? fragmentName,
+            burnFragmentSubtitles: burnFragmentSubtitlesOverride ?? burnFragmentSubtitles,
             subtitleStyle: subtitleStyleOverride ?? subtitleStyle,
             selectedTopicID: selectedTopicID.isEmpty ? nil : selectedTopicID,
             whisperModelPath: whisperModelPath,
