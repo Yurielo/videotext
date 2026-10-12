@@ -164,6 +164,7 @@ struct SimpleRenderedControlsProbe {
         try verifyCreationControls(project: scratch.appendingPathComponent("new-source"), media: media)
         try verifyTopicControls(project: scratch.appendingPathComponent("topics"), media: media)
         try verifyTranslationControls(project: scratch.appendingPathComponent("translation"), media: media)
+        try verifySourceSubtitledVideoControls(project: scratch.appendingPathComponent("subtitled-video"), media: media)
         try verifyMixedTopicVariantReopen(project: scratch.appendingPathComponent("mixed-topics"), media: media)
         // Each Source/Translation scenario has its own project. Source review can
         // legitimately invalidate downstream artifacts; the retained fixture is untouched.
@@ -839,6 +840,195 @@ struct SimpleRenderedControlsProbe {
         try require(model.selectedOperations == advancedOperations && model.translationHumanReviewEnabled == advancedTranslationReview,
             "Simple translation presentation rewrote Advanced selections or review preferences")
         print("RENDERED_TRANSLATION_CONTROLS_PASS: disabled-until-approved, CTA, fixed direction, progress/stop, review-before-ready")
+    }
+
+    private static func verifySourceSubtitledVideoControls(project: URL, media: URL) throws {
+        let store = ProjectStore()
+        let sourceOnly = project.appendingPathComponent("source-unapproved")
+        var missingManifest = try store.ensureProject(at: sourceOnly, mediaURL: media, mode: .newProject)
+        missingManifest.languageProfile = LanguageProfile(
+            detected: .ru, effective: .ru, confidence: 1, method: "fixture",
+            model: nil, modelVersion: nil, sampleRanges: [], manuallyOverridden: false, detectedAt: Date()
+        )
+        try store.save(missingManifest, to: sourceOnly)
+        let unapproved = WorkflowViewModel()
+        unapproved.projectURL = sourceOnly
+        unapproved.mediaURL = media
+        unapproved.loadDetectedResults()
+        let unapprovedWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        unapprovedWindow.isReleasedWhenClosed = false
+        unapprovedWindow.contentView = NSHostingView(rootView: ContentView(model: unapproved))
+        unapprovedWindow.makeKeyAndOrderFront(nil)
+        defer { unapprovedWindow.close() }
+        settle(unapprovedWindow)
+        try press("simple.goal.subtitledVideo", in: unapprovedWindow)
+        let unavailable = try element("simple.subtitledVideo.availability", in: unapprovedWindow)
+        try require(renderedText(unavailable).contains("утвердите исходную расшифровку"),
+            "Unapproved source did not explain why subtitle rendering is unavailable")
+        try require(!element("simple.subtitledVideo.create", in: unapprovedWindow).isAccessibilityEnabled(),
+            "Unapproved source exposed enabled subtitle rendering")
+
+        let accepted = project.appendingPathComponent("source-approved")
+        _ = try makeProject(accepted, media: media, source: .ru)
+        let model = WorkflowViewModel()
+        model.projectURL = accepted
+        model.mediaURL = media
+        model.selectedOperations = [.transcribe, .topicTimecoding]
+        model.subtitleSource = .approvedTranslation(.en)
+        model.subtitleStyle = SubtitleStyleSettings(
+            textColorHex: "#FFFFFF", outlineColorHex: "#000000", fontName: "Helvetica", fontSize: 26,
+            outlineWidth: 3, position: .bottom, backgroundOpacity: 0.3
+        )
+        let advancedOperations = model.selectedOperations
+        let advancedSubtitleSource = model.subtitleSource
+        let advancedSubtitleStyle = model.subtitleStyle
+        model.loadDetectedResults()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: ContentView(model: model))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        settle(window)
+        try press("simple.goal.subtitledVideo", in: window)
+        let create = try element("simple.subtitledVideo.create", in: window)
+        try require(create.accessibilityRole() == .button
+            && create.accessibilityLabel() == "Создать видео с субтитрами"
+            && create.isAccessibilityEnabled(),
+            "Approved source and canonical SRT have no truthful Simple subtitle-render CTA")
+        try require(renderedText(try element("simple.subtitledVideo.availability", in: window))
+            .contains("утверждённые исходные субтитры"),
+            "Simple subtitle render did not disclose the accepted source input")
+        try require(SimpleSourceSubtitleRenderRequest.standard.operations == [.burnSubtitles]
+            && SimpleSourceSubtitleRenderRequest.standard.subtitleSource == .source
+            && SimpleSourceSubtitleRenderRequest.standard.subtitleStyle == .standard,
+            "Simple subtitle render request is not exactly source-only burnSubtitles with standard style")
+        try require(model.selectedOperations == advancedOperations
+            && model.subtitleSource == advancedSubtitleSource
+            && model.subtitleStyle == advancedSubtitleStyle,
+            "Opening Simple subtitle render rewrote Advanced selections")
+
+        // Press the real rendered CTA on a separate fixture, then cancel in the
+        // same main-actor turn. The controlled ProcessController proves that
+        // activation enters the existing workflow without launching any tool.
+        let activationProject = project.appendingPathComponent("activation")
+        _ = try makeProject(activationProject, media: media, source: .ru)
+        let activationHistory = ProjectHistoryStore(indexURL: project.appendingPathComponent("activation-history.json"))
+        let activationStore = ProjectStore(history: activationHistory)
+        let activationController = ProcessController()
+        let activationEngine = WorkflowEngine(store: activationStore, controller: activationController)
+        let activation = WorkflowViewModel(
+            engine: activationEngine,
+            store: activationStore,
+            historyStore: activationHistory
+        )
+        activation.openProject(activationProject)
+        activation.selectedOperations = [.transcribe, .topicTimecoding]
+        activation.subtitleSource = .approvedTranslation(.en)
+        activation.subtitleStyle = advancedSubtitleStyle
+        let activationWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        activationWindow.isReleasedWhenClosed = false
+        activationWindow.contentView = NSHostingView(rootView: ContentView(model: activation))
+        activationWindow.makeKeyAndOrderFront(nil)
+        defer { activationWindow.close() }
+        settle(activationWindow)
+        let activationCreate = try element("simple.goal.subtitledVideo", in: activationWindow)
+        try require(activationCreate.accessibilityPerformPress(), "Simple subtitle goal did not open its rendered panel")
+        settle(activationWindow)
+        let activationButton = try element("simple.subtitledVideo.create", in: activationWindow)
+        try require(activationButton.isAccessibilityEnabled() && activationButton.accessibilityPerformPress(),
+            "Simple subtitle CTA did not activate")
+        try require(activation.isRunning && !activation.isStopping,
+            "Simple subtitle CTA did not enter the existing workflow")
+        try require(activation.selectedOperations == [.transcribe, .topicTimecoding]
+            && activation.subtitleSource == .approvedTranslation(.en)
+            && activation.subtitleStyle == advancedSubtitleStyle,
+            "Simple subtitle CTA did not restore Advanced presentation choices after capturing its fixed request")
+        activation.stop()
+        try require(activation.isStopping, "Simple subtitle CTA did not reuse the existing cancellation path")
+        for _ in 0..<200 where activation.isRunning {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        try require(!activation.isRunning && activation.status == "Остановлено",
+            "Immediate Simple subtitle cancellation did not finish through the existing workflow lifecycle: running=\(activation.isRunning), status=\(activation.status), launches=\(activationController.launchedExecutables)")
+        try require(activationController.launchedExecutables.isEmpty,
+            "Immediate subtitle CTA cancellation launched external processing: \(activationController.launchedExecutables)")
+        let activationOperations = (try activationStore.load(from: activationProject)).workflow?.operations ?? [:]
+        try require(activationOperations[WorkflowOperation.transcribe.rawValue] == nil
+            && activationOperations[WorkflowOperation.topicTimecoding.rawValue] == nil,
+            "Simple subtitle CTA started ASR or topics before cancellation")
+
+        let layout = ProjectLayout(root: accepted)
+        try "1\n00:00:00,000 --> 00:00:02,000\nПодменённые субтитры\n".write(
+            to: layout.subtitlesURL(language: .ru), atomically: true, encoding: .utf8
+        )
+        model.loadDetectedResults()
+        settle(window)
+        try require(!element("simple.subtitledVideo.create", in: window).isAccessibilityEnabled(),
+            "A source SRT that diverges from the approved revision was accepted")
+        try require(renderedText(try element("simple.subtitledVideo.availability", in: window))
+            .contains("не совпадают"), "Divergent source SRT did not fail closed in Simple")
+        let approvedBytes = try Data(contentsOf: layout.subtitleRevisionURL(id: "approved-ru", language: .ru))
+        try approvedBytes.write(to: layout.subtitlesURL(language: .ru), options: .atomic)
+        model.loadDetectedResults()
+        settle(window)
+        try require(element("simple.subtitledVideo.create", in: window).isAccessibilityEnabled(),
+            "Restored canonical source SRT did not restore the Simple subtitle-render CTA")
+
+        model.progress = WorkflowProgress(operation: .burnSubtitles, operationFraction: 0.2, overallFraction: 0.1,
+            elapsed: 1, estimatedTotal: nil, remaining: nil, isIndeterminate: true)
+        model.isRunning = true
+        settle(window)
+        try require(renderedText(try element("simple.progress.stage", in: window)).contains("Создаём видео с субтитрами"),
+            "Simple progress did not render the active subtitle render stage")
+        try require(element("simple.progress.stop", in: window).isAccessibilityEnabled(),
+            "Simple subtitle render did not reuse the existing stop action")
+        try require(!element("simple.subtitledVideo.create", in: window).isAccessibilityEnabled(),
+            "Simple exposed a duplicate subtitle render while processing")
+        model.isStopping = true
+        settle(window)
+        try require(!element("simple.progress.stop", in: window).isAccessibilityEnabled()
+            && renderedText(try element("simple.progress.stage", in: window)).contains("Останавливаем обработку"),
+            "Simple subtitle render stop state allowed repeated cancellation")
+        model.isStopping = false
+        model.isRunning = false
+        model.status = "Ошибка"
+        settle(window)
+        _ = try element("simple.subtitledVideo.error", in: window)
+        try require(element("simple.subtitledVideo.create", in: window).isAccessibilityEnabled(),
+            "Subtitle render failure did not preserve an honest retry action")
+
+        try FileManager.default.createDirectory(at: layout.subtitledVideoURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("ready video".utf8).write(to: layout.subtitledVideoURL)
+        try store.registerOutput(kind: "subtitled-video", url: layout.subtitledVideoURL, in: accepted)
+        model.status = "Завершено"
+        model.loadDetectedResults()
+        let rediscovered = model.outputs.map { "\($0.kind):\($0.path)" }.joined(separator: ", ")
+        try require(model.outputs.contains {
+            $0.kind == "subtitled-video"
+        }, "Registered source subtitled output was not rediscovered: \(rediscovered)")
+        settle(window)
+        _ = try element("simple.subtitledVideo.open", in: window)
+        try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.subtitledVideo.create" },
+            "Existing source subtitled video exposed a duplicate render CTA")
+
+        let reopened = WorkflowViewModel()
+        reopened.openProject(accepted)
+        let reopenedWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        reopenedWindow.isReleasedWhenClosed = false
+        reopenedWindow.contentView = NSHostingView(rootView: ContentView(model: reopened))
+        reopenedWindow.makeKeyAndOrderFront(nil)
+        defer { reopenedWindow.close() }
+        settle(reopenedWindow)
+        try press("simple.goal.subtitledVideo", in: reopenedWindow)
+        _ = try element("simple.subtitledVideo.open", in: reopenedWindow)
+        try require(!reopened.isRunning && !nodes(reopenedWindow).contains {
+            $0.accessibilityIdentifier() == "simple.subtitledVideo.create"
+        }, "Reopening a completed source subtitled video exposed regeneration")
+        print("RENDERED_SOURCE_SUBTITLED_VIDEO_CONTROLS_PASS: approved canonical source, source-only request, progress/stop/error, open/reopen")
     }
 
     private static func removeTopics(from project: URL, media: URL) throws {

@@ -24,11 +24,25 @@ private enum SimpleProjectHomeGoal: String, CaseIterable, Identifiable {
     var detail: String {
         switch self {
         case .textContent: return "Расшифровка · Темы · Перевод · Слова-паразиты"
-        case .subtitledVideo: return "Всё видео или фрагмент · Оригинал или перевод"
+        case .subtitledVideo: return "Полное видео · Исходные субтитры"
         case .fragment: return "По теме · По времени · По тексту"
         case .processVideo: return "Слова-паразиты · Скорость · Blur · Watermark · Звук"
         }
     }
+}
+
+/// A fixed Simple-mode request that is captured by the existing shared
+/// workflow before the Advanced presentation settings are restored.
+struct SimpleSourceSubtitleRenderRequest: Equatable {
+    let operations: Set<WorkflowOperation>
+    let subtitleSource: SubtitleSourceSelection
+    let subtitleStyle: SubtitleStyleSettings
+
+    static let standard = Self(
+        operations: [.burnSubtitles],
+        subtitleSource: .source,
+        subtitleStyle: .standard
+    )
 }
 
 /// Presentation intent for one explicitly started Simple translation.
@@ -152,6 +166,7 @@ struct ContentView: View {
     @State private var knownProjects: [SimpleProjectBrowserEntry] = []
     @State private var simpleReviewTarget: SimpleProjectHomeReviewTarget?
     @State private var showsSimpleTextContent = false
+    @State private var showsSimpleSubtitledVideo = false
     @State private var simpleTranscription = SimpleTranscriptionPresentation()
     @State private var simpleTranslation = SimpleTranslationPresentation()
 
@@ -249,6 +264,7 @@ struct ContentView: View {
             reviewSearch = ""
             reviewIssuesOnly = false
             showsSimpleTextContent = false
+            showsSimpleSubtitledVideo = false
         }
         .onChange(of: presentationMode) { _, mode in
             if mode != .simple {
@@ -749,6 +765,24 @@ struct ContentView: View {
                     .accessibilityIdentifier("simple.textContent.panel")
                 }
 
+                if showsSimpleSubtitledVideo {
+                    VStack(alignment: .leading, spacing: 9) {
+                        HStack {
+                            simpleSectionTitle("Видео с субтитрами")
+                            Spacer()
+                            Button("Скрыть") { showsSimpleSubtitledVideo = false }
+                                .buttonStyle(.borderless)
+                                .accessibilityIdentifier("simple.subtitledVideo.collapse")
+                        }
+                        simpleSourceSubtitledVideoPanel()
+                    }
+                    .padding(10)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("simple.subtitledVideo.panel")
+                }
+
                 simpleSectionTitle("Последние результаты")
                 if state.recentResults.isEmpty {
                     Text("Готовых результатов пока нет")
@@ -994,6 +1028,8 @@ struct ContentView: View {
         Button {
             if goal == .textContent {
                 showsSimpleTextContent = true
+            } else if goal == .subtitledVideo {
+                showsSimpleSubtitledVideo = true
             } else {
                 presentationMode = .advanced
                 selectedResultsTab = 0
@@ -1022,6 +1058,110 @@ struct ContentView: View {
         .buttonStyle(.plain)
         .accessibilityLabel(goal.title)
         .accessibilityIdentifier("simple.goal.\(goal.rawValue)")
+    }
+
+    @ViewBuilder
+    private func simpleSourceSubtitledVideoPanel() -> some View {
+        if let output = simpleSourceSubtitledVideoOutput {
+            HStack(spacing: 10) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Видео с исходными субтитрами")
+                        .fontWeight(.semibold)
+                    Text("Готово")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Открыть") { openSimpleResult(output.path) }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("simple.subtitledVideo.open")
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("simple.subtitledVideo.ready")
+        } else {
+            let availability = simpleSourceSubtitledVideoAvailability
+            VStack(alignment: .leading, spacing: 7) {
+                Text(availability.message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("simple.subtitledVideo.availability")
+                if model.status == "Ошибка", model.progress.operation == .burnSubtitles {
+                    Text("Видео с субтитрами не создано. Исправьте проблему и повторите попытку.")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("simple.subtitledVideo.error")
+                }
+                Button("Создать видео с субтитрами") {
+                    startSimpleSourceSubtitledVideo()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!availability.canCreate || model.isRunning)
+                .accessibilityIdentifier("simple.subtitledVideo.create")
+            }
+        }
+    }
+
+    private struct SimpleSourceSubtitledVideoAvailability {
+        var canCreate: Bool
+        var message: String
+    }
+
+    private var simpleSourceSubtitledVideoAvailability: SimpleSourceSubtitledVideoAvailability {
+        guard !model.isStopping,
+              let projectURL = model.projectURL,
+              let manifest = try? ProjectStore().load(from: projectURL),
+              let sourceLanguage = manifest.languageProfile?.effective,
+              let revision = manifest.activeTranscriptRevision(for: sourceLanguage),
+              revision.reviewStatus == .approved else {
+            return .init(
+                canCreate: false,
+                message: "Сначала утвердите исходную расшифровку, затем можно создать видео с субтитрами."
+            )
+        }
+        guard model.mediaURL != nil else {
+            return .init(canCreate: false, message: "Исходное видео недоступно для создания результата.")
+        }
+        guard let source = try? SubtitleSourceResolver.resolve(.source, manifest: manifest, projectURL: projectURL),
+              let immutable = try? Data(contentsOf: ProjectLayout(root: projectURL).subtitleRevisionURL(
+                id: revision.id,
+                language: sourceLanguage
+              )),
+              let selected = try? Data(contentsOf: source.srtURL),
+              !selected.isEmpty,
+              selected == immutable else {
+            return .init(
+                canCreate: false,
+                message: "Утверждённые исходные субтитры недоступны или не совпадают с принятой расшифровкой. Видео не создавалось."
+            )
+        }
+        return .init(canCreate: true, message: "Будут использованы утверждённые исходные субтитры.")
+    }
+
+    private var simpleSourceSubtitledVideoOutput: ProjectOutput? {
+        return model.outputs.first {
+            $0.kind == "subtitled-video"
+                && $0.isGeneratedMedia
+                && FileManager.default.fileExists(atPath: $0.path)
+        }
+    }
+
+    private func startSimpleSourceSubtitledVideo() {
+        guard presentationMode == .simple, simpleSourceSubtitledVideoAvailability.canCreate else { return }
+        let request = SimpleSourceSubtitleRenderRequest.standard
+        let advancedOperations = model.selectedOperations
+        let advancedSubtitleSource = model.subtitleSource
+        let advancedSubtitleStyle = model.subtitleStyle
+        model.selectedOperations = request.operations
+        model.subtitleSource = request.subtitleSource
+        model.subtitleStyle = request.subtitleStyle
+        model.run()
+        // startRun copies its WorkflowSettings before returning. Restore Advanced
+        // presentation choices so this fixed Simple action has no lasting UI side effect.
+        model.selectedOperations = advancedOperations
+        model.subtitleSource = advancedSubtitleSource
+        model.subtitleStyle = advancedSubtitleStyle
     }
 
     private func simpleRecentResultRow(_ output: SimpleProjectHomeResult) -> some View {
@@ -1167,6 +1307,7 @@ struct ContentView: View {
     private var simpleProgressStage: String {
         if model.isStopping { return "Останавливаем обработку" }
         if model.progress.operation == .translateTranscript { return "Создаём перевод" }
+        if model.progress.operation == .burnSubtitles { return "Создаём видео с субтитрами" }
         return SimpleTranscriptionPresentation.stage(operation: model.progress.operation, isStopping: false)
     }
 
