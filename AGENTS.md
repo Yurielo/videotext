@@ -180,6 +180,22 @@ Release inputs включают `Sources/**`, `Resources/**`, `scripts/build_app
 7. Итоговый отчет честно перечисляет проверки, входные данные, результаты и
    известные ограничения.
 
+### Owner-approved delivery chain
+
+Явный `Owner Test PASS` для exact Candidate разрешает Codex самостоятельно
+завершить безопасную delivery chain:
+
+`Owner PASS → final gate verification → merge → installation exact accepted
+Candidate → post-install smoke → DELIVERED`.
+
+Отдельное Owner approval между merge и installation не требуется, когда
+одновременно сохранены accepted HEAD и application tree, Candidate и его
+digest, пересборка или переподпись не требуются, а обязательные gates PASS.
+Если после Owner PASS меняется application code/tree или Candidate, это
+разрешение прекращается: требуется новый Owner Test и acceptance. Это правило
+не отменяет остальные governance gates, identity checks, rollback или строгую
+проверку подписи перед установкой.
+
 ## Критерий завершения
 
 Задача завершена только когда пользовательский результат реализован, ведущая
