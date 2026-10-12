@@ -328,6 +328,23 @@ struct SimpleRenderedControlsProbe {
         settle(window)
     }
 
+    private static func selectSubtitledVideoSource(
+        translated: Bool,
+        targetLanguage: ArtifactLanguage,
+        in window: NSWindow
+    ) throws {
+        let picker = try element("simple.subtitledVideo.source", in: window)
+        let label = translated ? "Переведённые (\(targetLanguage.rawValue.uppercased()))" : "Исходные"
+        guard let option = tree(picker).first(where: { $0.accessibilityLabel() == label }) else {
+            throw RenderedProbeFailure(message: "Simple subtitle source picker has no rendered \(label) option")
+        }
+        let performed = option.accessibilityPerformPress()
+        if !performed {
+            try clickRenderedSegment(option, in: window)
+        }
+        settle(window)
+    }
+
     private static func assertSimple(_ window: NSWindow) throws {
         let picker = try element("simple.modePicker", in: window)
         let simpleSelected = tree(picker).contains {
@@ -813,6 +830,33 @@ struct SimpleRenderedControlsProbe {
         model.progress = .idle
 
         var manifest = try store.load(from: accepted)
+        let staleTarget = project.appendingPathComponent("translation-stale")
+        _ = try makeProject(staleTarget, media: media, source: .ru)
+        let staleLayout = ProjectLayout(root: staleTarget)
+        try "1\n00:00:00,000 --> 00:00:02,000\nStale target subtitles\n".write(
+            to: staleLayout.subtitlesURL(language: .en), atomically: true, encoding: .utf8
+        )
+        let staleModel = WorkflowViewModel()
+        staleModel.openProject(staleTarget)
+        let staleWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        staleWindow.isReleasedWhenClosed = false
+        staleWindow.contentView = NSHostingView(rootView: ContentView(model: staleModel))
+        staleWindow.makeKeyAndOrderFront(nil)
+        defer { staleWindow.close() }
+        settle(staleWindow)
+        try press("simple.goal.subtitledVideo", in: staleWindow)
+        _ = try element("simple.subtitledVideo.translation.unavailable", in: staleWindow)
+        try require(staleModel.simpleApprovedTranslatedSubtitleTarget == nil
+            && staleModel.simpleTranslatedSubtitleWorkflowRequest == nil
+            && !nodes(staleWindow).contains { $0.accessibilityIdentifier() == "simple.subtitledVideo.source" },
+            "Stale target SRT exposed a translated subtitle selection or request")
+        let staleOperations = (try store.load(from: staleTarget)).workflow?.operations ?? [:]
+        try require(staleOperations[WorkflowOperation.transcribe.rawValue] == nil
+            && staleOperations[WorkflowOperation.topicTimecoding.rawValue] == nil
+            && staleOperations[WorkflowOperation.translateTranscript.rawValue] == nil,
+            "Fail-closed target provenance validation started ASR, topics, or translation")
+
         let layout = ProjectLayout(root: accepted)
         let pendingCues = [
             SubtitleCue(id: 1, start: 0, end: 2, text: "Pending translated cue one."),
@@ -919,6 +963,32 @@ struct SimpleRenderedControlsProbe {
             && model.subtitleSource == advancedSubtitleSource
             && model.subtitleStyle == advancedSubtitleStyle,
             "Opening Simple subtitle render rewrote Advanced selections")
+        try require(nodes(window).contains { $0.accessibilityIdentifier() == "simple.subtitledVideo.source" },
+            "An approved translated target did not expose the Simple subtitle-source choice")
+        try selectSubtitledVideoSource(translated: true, targetLanguage: .en, in: window)
+        let translatedCreate = try element("simple.subtitledVideo.translation.create", in: window)
+        try require(translatedCreate.accessibilityRole() == .button
+            && translatedCreate.accessibilityLabel() == "Создать видео с субтитрами"
+            && translatedCreate.isAccessibilityEnabled(),
+            "Approved target translation has no truthful Simple subtitle-render CTA")
+        try require(renderedText(try element("simple.subtitledVideo.translation.availability", in: window))
+            .contains("утверждённые переведённые субтитры EN"),
+            "Simple target subtitle render did not disclose the approved translated input")
+        guard let translatedRequest = model.simpleTranslatedSubtitleWorkflowRequest else {
+            throw RenderedProbeFailure(message: "Approved translated target did not expose the Simple subtitle workflow request")
+        }
+        try require(translatedRequest.operations == [.burnSubtitles]
+            && translatedRequest.subtitleSource == .approvedTranslation(.en)
+            && translatedRequest.subtitleStyle == .standard
+            && translatedRequest.sourceLanguage == .ru
+            && translatedRequest.sourceApprovedRevisionID == "approved-ru"
+            && translatedRequest.targetLanguage == .en,
+            "Simple translated subtitle request is not exactly approved-target burnSubtitles with standard style and source reuse provenance")
+        try require(model.selectedOperations == advancedOperations
+            && model.subtitleSource == advancedSubtitleSource
+            && model.subtitleStyle == advancedSubtitleStyle,
+            "Selecting Simple translated subtitles rewrote Advanced selections")
+        try selectSubtitledVideoSource(translated: false, targetLanguage: .en, in: window)
 
         // Press the real rendered CTA on a separate fixture, then cancel in the
         // same main-actor turn. The controlled ProcessController proves that
@@ -970,6 +1040,59 @@ struct SimpleRenderedControlsProbe {
         try require(activationOperations[WorkflowOperation.transcribe.rawValue] == nil
             && activationOperations[WorkflowOperation.topicTimecoding.rawValue] == nil,
             "Simple subtitle CTA started ASR or topics before cancellation")
+
+        let translatedActivationProject = project.appendingPathComponent("translated-activation")
+        _ = try makeProject(translatedActivationProject, media: media, source: .ru)
+        let translatedActivationLayout = ProjectLayout(root: translatedActivationProject)
+        try FileManager.default.createDirectory(at: translatedActivationLayout.subtitledVideoURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("existing source video".utf8).write(to: translatedActivationLayout.subtitledVideoURL)
+        try store.registerOutput(kind: "subtitled-video", url: translatedActivationLayout.subtitledVideoURL, in: translatedActivationProject)
+        let translatedActivationHistory = ProjectHistoryStore(indexURL: project.appendingPathComponent("translated-activation-history.json"))
+        let translatedActivationStore = ProjectStore(history: translatedActivationHistory)
+        let translatedActivationController = ProcessController()
+        let translatedActivation = WorkflowViewModel(
+            engine: WorkflowEngine(store: translatedActivationStore, controller: translatedActivationController),
+            store: translatedActivationStore,
+            historyStore: translatedActivationHistory
+        )
+        translatedActivation.openProject(translatedActivationProject)
+        translatedActivation.selectedOperations = [.transcribe, .topicTimecoding]
+        translatedActivation.subtitleSource = .source
+        translatedActivation.subtitleStyle = advancedSubtitleStyle
+        let translatedActivationWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        translatedActivationWindow.isReleasedWhenClosed = false
+        translatedActivationWindow.contentView = NSHostingView(rootView: ContentView(model: translatedActivation))
+        translatedActivationWindow.makeKeyAndOrderFront(nil)
+        defer { translatedActivationWindow.close() }
+        settle(translatedActivationWindow)
+        try press("simple.goal.subtitledVideo", in: translatedActivationWindow)
+        try selectSubtitledVideoSource(translated: true, targetLanguage: .en, in: translatedActivationWindow)
+        let translatedActivationButton = try element("simple.subtitledVideo.translation.create", in: translatedActivationWindow)
+        try require(translatedActivationButton.isAccessibilityEnabled() && translatedActivationButton.accessibilityPerformPress(),
+            "Simple approved-target subtitle CTA did not activate")
+        try require(translatedActivation.isRunning && !translatedActivation.isStopping,
+            "Simple approved-target subtitle CTA did not enter the existing workflow")
+        try require(translatedActivation.selectedOperations == [.transcribe, .topicTimecoding]
+            && translatedActivation.subtitleSource == .source
+            && translatedActivation.subtitleStyle == advancedSubtitleStyle,
+            "Simple approved-target subtitle CTA did not preserve Advanced presentation choices")
+        translatedActivation.stop()
+        for _ in 0..<200 where translatedActivation.isRunning {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        try require(!translatedActivation.isRunning && translatedActivation.status == "Остановлено"
+            && translatedActivationController.launchedExecutables.isEmpty,
+            "Immediate approved-target subtitle cancellation bypassed the existing lifecycle")
+        let translatedActivationOperations = (try translatedActivationStore.load(from: translatedActivationProject)).workflow?.operations ?? [:]
+        try require(translatedActivationOperations[WorkflowOperation.transcribe.rawValue] == nil
+            && translatedActivationOperations[WorkflowOperation.topicTimecoding.rawValue] == nil
+            && translatedActivationOperations[WorkflowOperation.translateTranscript.rawValue] == nil,
+            "Simple approved-target subtitle CTA started ASR, topics, or translation")
+        try require(try Data(contentsOf: translatedActivationLayout.subtitledVideoURL) == Data("existing source video".utf8)
+            && !FileManager.default.fileExists(atPath: translatedActivationLayout.subtitledVideoURL(language: .en).path),
+            "Launching an approved-target subtitle render changed the existing source result or created a target result before render")
+
         // A Simple action can fail during an accepted-transcript prerequisite
         // before burnSubtitles becomes the active progress operation. Its actual
         // action error must remain visible without inferring success from progress.
@@ -1040,6 +1163,14 @@ struct SimpleRenderedControlsProbe {
         _ = try element("simple.subtitledVideo.open", in: window)
         try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.subtitledVideo.create" },
             "Existing source subtitled video exposed a duplicate render CTA")
+        try FileManager.default.createDirectory(at: layout.subtitledVideoURL(language: .en).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("ready target video".utf8).write(to: layout.subtitledVideoURL(language: .en))
+        try store.registerOutput(kind: "subtitled-video-en", url: layout.subtitledVideoURL(language: .en), in: accepted)
+        model.loadDetectedResults()
+        try selectSubtitledVideoSource(translated: true, targetLanguage: .en, in: window)
+        _ = try element("simple.subtitledVideo.translation.open", in: window)
+        try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.subtitledVideo.translation.create" },
+            "Existing translated subtitled video exposed a duplicate render CTA")
 
         let reopened = WorkflowViewModel()
         reopened.openProject(accepted)
@@ -1055,7 +1186,12 @@ struct SimpleRenderedControlsProbe {
         try require(!reopened.isRunning && !nodes(reopenedWindow).contains {
             $0.accessibilityIdentifier() == "simple.subtitledVideo.create"
         }, "Reopening a completed source subtitled video exposed regeneration")
-        print("RENDERED_SOURCE_SUBTITLED_VIDEO_CONTROLS_PASS: approved canonical source, source-only request, progress/stop/error, open/reopen")
+        try selectSubtitledVideoSource(translated: true, targetLanguage: .en, in: reopenedWindow)
+        _ = try element("simple.subtitledVideo.translation.open", in: reopenedWindow)
+        try require(!reopened.isRunning && !nodes(reopenedWindow).contains {
+            $0.accessibilityIdentifier() == "simple.subtitledVideo.translation.create"
+        }, "Reopening a completed translated subtitled video exposed regeneration")
+        print("RENDERED_SOURCE_SUBTITLED_VIDEO_CONTROLS_PASS: source and approved target requests, progress/stop/error, source preservation, target open/reopen")
     }
 
     private static func removeTopics(from project: URL, media: URL) throws {
