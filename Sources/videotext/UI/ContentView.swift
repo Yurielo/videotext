@@ -4,6 +4,13 @@ import AVKit
 import AVFoundation
 import UniformTypeIdentifiers
 
+private enum SimpleSubtitledVideoSource: String, CaseIterable, Identifiable {
+    case source
+    case approvedTranslation
+
+    var id: Self { self }
+}
+
 private enum SimpleProjectHomeGoal: String, CaseIterable, Identifiable {
     case textContent
     case subtitledVideo
@@ -153,7 +160,8 @@ struct ContentView: View {
     @State private var simpleReviewTarget: SimpleProjectHomeReviewTarget?
     @State private var showsSimpleTextContent = false
     @State private var showsSimpleSubtitledVideo = false
-    @State private var simpleSourceSubtitledVideoActionStarted = false
+    @State private var simpleSubtitledVideoSource: SimpleSubtitledVideoSource = .source
+    @State private var simpleSubtitledVideoActionStarted = false
     @State private var simpleTranscription = SimpleTranscriptionPresentation()
     @State private var simpleTranslation = SimpleTranslationPresentation()
 
@@ -252,7 +260,8 @@ struct ContentView: View {
             reviewIssuesOnly = false
             showsSimpleTextContent = false
             showsSimpleSubtitledVideo = false
-            simpleSourceSubtitledVideoActionStarted = false
+            simpleSubtitledVideoSource = .source
+            simpleSubtitledVideoActionStarted = false
         }
         .onChange(of: presentationMode) { _, mode in
             if mode != .simple {
@@ -1050,45 +1059,119 @@ struct ContentView: View {
 
     @ViewBuilder
     private func simpleSourceSubtitledVideoPanel() -> some View {
-        if let output = simpleSourceSubtitledVideoOutput {
-            HStack(spacing: 10) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Видео с исходными субтитрами")
-                        .fontWeight(.semibold)
-                    Text("Готово")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("Открыть") { openSimpleResult(output.path) }
-                    .buttonStyle(.bordered)
-                    .accessibilityIdentifier("simple.subtitledVideo.open")
+        let targetLanguage = model.simpleApprovedTranslatedSubtitleTarget
+        let selectedSource = simpleSubtitledVideoSource == .approvedTranslation && targetLanguage != nil
+            ? SimpleSubtitledVideoSource.approvedTranslation
+            : .source
+
+        if let targetLanguage {
+            Picker("Субтитры", selection: $simpleSubtitledVideoSource) {
+                Text("Исходные").tag(SimpleSubtitledVideoSource.source)
+                Text("Переведённые (\(targetLanguage.rawValue.uppercased()))")
+                    .tag(SimpleSubtitledVideoSource.approvedTranslation)
             }
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("simple.subtitledVideo.ready")
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("simple.subtitledVideo.source")
+            .onChange(of: simpleSubtitledVideoSource) { _, _ in
+                simpleSubtitledVideoActionStarted = false
+            }
+        } else {
+            Text("Переведённые субтитры станут доступны после утверждения перевода.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("simple.subtitledVideo.translation.unavailable")
+        }
+
+        switch selectedSource {
+        case .source:
+            simpleSourceSubtitledVideoContent()
+        case .approvedTranslation:
+            simpleTranslatedSubtitledVideoContent(targetLanguage: targetLanguage!)
+        }
+    }
+
+    @ViewBuilder
+    private func simpleSourceSubtitledVideoContent() -> some View {
+        if let output = simpleSourceSubtitledVideoOutput {
+            simpleSubtitledVideoReadyContent(
+                title: "Видео с исходными субтитрами",
+                output: output,
+                identifier: "simple.subtitledVideo"
+            )
         } else {
             let availability = simpleSourceSubtitledVideoAvailability
-            VStack(alignment: .leading, spacing: 7) {
-                Text(availability.message)
+            simpleSubtitledVideoCreationContent(
+                availability: availability,
+                action: { model.startSimpleSourceSubtitledVideoFromAcceptedTranscript() },
+                identifier: "simple.subtitledVideo"
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func simpleTranslatedSubtitledVideoContent(targetLanguage: ArtifactLanguage) -> some View {
+        if let output = simpleTranslatedSubtitledVideoOutput(language: targetLanguage) {
+            simpleSubtitledVideoReadyContent(
+                title: "Видео с переведёнными субтитрами (\(targetLanguage.rawValue.uppercased()))",
+                output: output,
+                identifier: "simple.subtitledVideo.translation"
+            )
+        } else {
+            let availability = simpleTranslatedSubtitledVideoAvailability(targetLanguage: targetLanguage)
+            simpleSubtitledVideoCreationContent(
+                availability: availability,
+                action: { model.startSimpleTranslatedSubtitledVideoFromAcceptedTranscript() },
+                identifier: "simple.subtitledVideo.translation"
+            )
+        }
+    }
+
+    private func simpleSubtitledVideoReadyContent(
+        title: String,
+        output: ProjectOutput,
+        identifier: String
+    ) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .fontWeight(.semibold)
+                Text("Готово")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("simple.subtitledVideo.availability")
-                if simpleSourceSubtitledVideoActionStarted, model.status == "Ошибка" {
-                    Text(model.alert?.message ?? "Видео с субтитрами не создано. Исправьте проблему и повторите попытку.")
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .accessibilityIdentifier("simple.subtitledVideo.error")
-                }
-                Button("Создать видео с субтитрами") {
-                    simpleSourceSubtitledVideoActionStarted =
-                        model.startSimpleSourceSubtitledVideoFromAcceptedTranscript()
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(!availability.canCreate)
-                .accessibilityIdentifier("simple.subtitledVideo.create")
             }
+            Spacer()
+            Button("Открыть") { openSimpleResult(output.path) }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("\(identifier).open")
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("\(identifier).ready")
+    }
+
+    private func simpleSubtitledVideoCreationContent(
+        availability: SimpleSourceSubtitledVideoAvailability,
+        action: @escaping () -> Bool,
+        identifier: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(availability.message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("\(identifier).availability")
+            if simpleSubtitledVideoActionStarted, model.status == "Ошибка" {
+                Text(model.alert?.message ?? "Видео с субтитрами не создано. Исправьте проблему и повторите попытку.")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier("\(identifier).error")
+            }
+            Button("Создать видео с субтитрами") {
+                simpleSubtitledVideoActionStarted = action()
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!availability.canCreate)
+            .accessibilityIdentifier("\(identifier).create")
         }
     }
 
@@ -1113,9 +1196,35 @@ struct ContentView: View {
         )
     }
 
+    private func simpleTranslatedSubtitledVideoAvailability(
+        targetLanguage: ArtifactLanguage
+    ) -> SimpleSourceSubtitledVideoAvailability {
+        if model.canCreateTranslatedSubtitledVideoFromAcceptedTranscript {
+            return .init(
+                canCreate: true,
+                message: "Будут использованы утверждённые переведённые субтитры \(targetLanguage.rawValue.uppercased())."
+            )
+        }
+        if model.isStopping {
+            return .init(canCreate: false, message: "Останавливаем обработку.")
+        }
+        return .init(
+            canCreate: false,
+            message: "Утвердите перевод и подготовьте его субтитры для этого видео."
+        )
+    }
+
     private var simpleSourceSubtitledVideoOutput: ProjectOutput? {
-        return model.outputs.first {
+        model.outputs.first {
             $0.kind == "subtitled-video"
+                && $0.isGeneratedMedia
+                && FileManager.default.fileExists(atPath: $0.path)
+        }
+    }
+
+    private func simpleTranslatedSubtitledVideoOutput(language: ArtifactLanguage) -> ProjectOutput? {
+        model.outputs.first {
+            $0.kind == "subtitled-video-\(language.rawValue)"
                 && $0.isGeneratedMedia
                 && FileManager.default.fileExists(atPath: $0.path)
         }

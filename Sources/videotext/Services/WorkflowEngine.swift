@@ -30,6 +30,33 @@ struct SimpleSourceSubtitleWorkflowRequest: Equatable {
     }
 }
 
+/// The fixed translated full-video request exposed to Simple Mode. It binds the
+/// shared renderer to the only approved target revision while retaining the
+/// accepted source-revision requirement needed to reuse existing timing.
+struct SimpleTranslatedSubtitleWorkflowRequest: Equatable {
+    let operations: Set<WorkflowOperation>
+    let subtitleSource: SubtitleSourceSelection
+    let subtitleStyle: SubtitleStyleSettings
+    let sourceLanguage: ArtifactLanguage
+    let sourceApprovedRevisionID: String
+    let targetLanguage: ArtifactLanguage
+
+    static func standard(
+        sourceLanguage: ArtifactLanguage,
+        sourceApprovedRevisionID: String,
+        targetLanguage: ArtifactLanguage
+    ) -> Self {
+        Self(
+            operations: [.burnSubtitles],
+            subtitleSource: .approvedTranslation(targetLanguage),
+            subtitleStyle: .standard,
+            sourceLanguage: sourceLanguage,
+            sourceApprovedRevisionID: sourceApprovedRevisionID,
+            targetLanguage: targetLanguage
+        )
+    }
+}
+
 struct ApprovedTranscriptReuseRequirement: Equatable {
     let language: ArtifactLanguage
     let revisionID: String
@@ -428,6 +455,75 @@ final class WorkflowViewModel: ObservableObject {
                 language: request.language,
                 revisionID: request.approvedRevisionID,
                 failureContext: "Создание видео с исходными субтитрами"
+            )
+        )
+    }
+
+    /// The approved target is exposed only after the shared resolver confirms
+    /// that its working SRT exactly matches the accepted target revision.
+    /// This intentionally does not depend on any Advanced controls.
+    var simpleApprovedTranslatedSubtitleTarget: ArtifactLanguage? {
+        guard let projectURL,
+              let manifest = try? store.load(from: projectURL),
+              let sourceLanguage = manifest.languageProfile?.effective else { return nil }
+        let targetLanguage = sourceLanguage.translationTarget
+        guard let resolved = try? SubtitleSourceResolver.resolve(
+            .approvedTranslation(targetLanguage),
+            manifest: manifest,
+            projectURL: projectURL
+        ), resolved.language == targetLanguage, resolved.isTranslation else { return nil }
+        return targetLanguage
+    }
+
+    var simpleTranslatedSubtitleWorkflowRequest: SimpleTranslatedSubtitleWorkflowRequest? {
+        guard !isRunning, !isStopping, mediaURL != nil,
+              humanReviewCheckpoint == nil, topicReviewCheckpoint == nil,
+              let projectURL,
+              let manifest = try? store.load(from: projectURL),
+              manifest.humanReviewState?.pendingCheckpoint == nil,
+              manifest.topicReviewState?.pendingCheckpoint == nil,
+              let sourceLanguage = manifest.languageProfile?.effective,
+              let sourceRevision = manifest.activeTranscriptRevision(for: sourceLanguage),
+              sourceRevision.reviewStatus == .approved,
+              let targetLanguage = simpleApprovedTranslatedSubtitleTarget else { return nil }
+
+        let layout = ProjectLayout(root: projectURL)
+        guard !simpleHasNonemptyFile(layout.subtitledVideoURL(language: targetLanguage)),
+              isSimpleApprovedSourceSubtitleReusable(
+                language: sourceLanguage,
+                revisionID: sourceRevision.id,
+                manifest: manifest,
+                projectURL: projectURL
+              ) else { return nil }
+
+        return .standard(
+            sourceLanguage: sourceLanguage,
+            sourceApprovedRevisionID: sourceRevision.id,
+            targetLanguage: targetLanguage
+        )
+    }
+
+    var canCreateTranslatedSubtitledVideoFromAcceptedTranscript: Bool {
+        simpleTranslatedSubtitleWorkflowRequest != nil
+    }
+
+    /// Starts only the existing full-video subtitle operation with an explicit,
+    /// approved target. The existing source timing is required and reused; no
+    /// source, translation, or topics operation can be added by this adapter.
+    @discardableResult
+    func startSimpleTranslatedSubtitledVideoFromAcceptedTranscript() -> Bool {
+        guard let request = simpleTranslatedSubtitleWorkflowRequest else { return false }
+        return startRun(
+            operations: request.operations,
+            fillerAnalysisBeforeReviewOverride: false,
+            subtitleStyleOverride: request.subtitleStyle,
+            subtitleSourceOverride: request.subtitleSource,
+            requireReusableTranscription: true,
+            preserveReviewPreferences: true,
+            approvedTranscript: ApprovedTranscriptReuseRequirement(
+                language: request.sourceLanguage,
+                revisionID: request.sourceApprovedRevisionID,
+                failureContext: "Создание видео с переведёнными субтитрами"
             )
         )
     }
