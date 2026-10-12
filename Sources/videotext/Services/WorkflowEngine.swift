@@ -577,7 +577,7 @@ final class WorkflowViewModel: ObservableObject {
         if isRunning {
             return .init(canCreate: false, message: "Дождитесь завершения текущей обработки.")
         }
-        guard mediaURL != nil, let projectURL else {
+        guard let mediaURL, let projectURL else {
             return .init(canCreate: false, message: "Откройте проект с исходным видео и утверждённой расшифровкой.")
         }
         guard humanReviewCheckpoint == nil, topicReviewCheckpoint == nil,
@@ -606,7 +606,7 @@ final class WorkflowViewModel: ObservableObject {
         guard start >= 0, end > start else {
             return .init(canCreate: false, message: "Конец фрагмента должен быть позже начала.")
         }
-        guard let duration = manifest.durationSeconds, duration.isFinite, duration > 0 else {
+        guard let duration = actualSourceMediaDuration(mediaURL) else {
             return .init(canCreate: false, message: "Не удалось определить длительность исходного видео.")
         }
         guard end <= duration else {
@@ -616,6 +616,17 @@ final class WorkflowViewModel: ObservableObject {
             )
         }
         return .init(canCreate: true, message: "Будет создан фрагмент с утверждёнными исходными субтитрами.")
+    }
+
+    /// This preflight intentionally reads the currently selected local media,
+    /// rather than trusting a historical manifest value.  The shared engine
+    /// repeats its own duration check before cutting; Simple uses this guard so
+    /// an overestimated manifest cannot expose an action that is known to fail.
+    private func actualSourceMediaDuration(_ mediaURL: URL) -> TimeInterval? {
+        guard FileManager.default.fileExists(atPath: mediaURL.path) else { return nil }
+        let duration = AVURLAsset(url: mediaURL).duration.seconds
+        guard duration.isFinite, duration > 0 else { return nil }
+        return duration
     }
 
     func simpleCutRangeWorkflowRequest(startText: String, endText: String) -> SimpleCutRangeWorkflowRequest? {

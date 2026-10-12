@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import AVFoundation
 
 private struct RenderedProbeFailure: LocalizedError {
     var message: String
@@ -108,6 +109,70 @@ struct SimpleRenderedControlsProbe {
         guard condition else { throw RenderedProbeFailure(message: message) }
     }
 
+    private static func makeFixtureVideo(at url: URL, durationSeconds: Int) throws {
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+        let input = AVAssetWriterInput(
+            mediaType: .video,
+            outputSettings: [
+                AVVideoCodecKey: AVVideoCodecType.h264,
+                AVVideoWidthKey: 16,
+                AVVideoHeightKey: 16
+            ]
+        )
+        input.expectsMediaDataInRealTime = false
+        let attributes: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: 16,
+            kCVPixelBufferHeightKey as String: 16
+        ]
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: input,
+            sourcePixelBufferAttributes: attributes
+        )
+        guard writer.canAdd(input) else {
+            throw RenderedProbeFailure(message: "Could not create local media fixture")
+        }
+        writer.add(input)
+        guard writer.startWriting() else {
+            throw RenderedProbeFailure(message: "Could not start local media fixture writer")
+        }
+        writer.startSession(atSourceTime: .zero)
+        for frame in 0..<(durationSeconds * 30) {
+            while !input.isReadyForMoreMediaData {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.001))
+            }
+            var buffer: CVPixelBuffer?
+            guard CVPixelBufferCreate(
+                kCFAllocatorDefault, 16, 16, kCVPixelFormatType_32BGRA,
+                attributes as CFDictionary, &buffer
+            ) == kCVReturnSuccess, let buffer else {
+                throw RenderedProbeFailure(message: "Could not allocate local media fixture frame")
+            }
+            CVPixelBufferLockBaseAddress(buffer, [])
+            if let base = CVPixelBufferGetBaseAddress(buffer) {
+                base.assumingMemoryBound(to: UInt8.self).initialize(
+                    repeating: 0,
+                    count: CVPixelBufferGetDataSize(buffer)
+                )
+            }
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            guard adaptor.append(buffer, withPresentationTime: CMTime(value: Int64(frame), timescale: 30)) else {
+                throw RenderedProbeFailure(message: "Could not append local media fixture frame")
+            }
+        }
+        input.markAsFinished()
+        let completion = DispatchSemaphore(value: 0)
+        writer.finishWriting { completion.signal() }
+        guard completion.wait(timeout: .now() + 10) == .success, writer.status == .completed else {
+            throw RenderedProbeFailure(message: "Could not finish local media fixture")
+        }
+    }
+
+    private static func measuredDuration(of mediaURL: URL) -> TimeInterval? {
+        let duration = AVURLAsset(url: mediaURL).duration.seconds
+        return duration.isFinite && duration > 0 ? duration : nil
+    }
+
     private static func run() throws {
         let fm = FileManager.default
         let scratch = fm.temporaryDirectory.appendingPathComponent("simple-rendered-\(UUID().uuidString)")
@@ -120,8 +185,7 @@ struct SimpleRenderedControlsProbe {
             try fm.copyItem(at: URL(fileURLWithPath: path), to: media)
         } else {
             try require(retainedRoot == nil, "Retained Candidate fixture requires VIDEOTEXT_UI_FIXTURE_MEDIA with real short media")
-            // No media player or cue editor is opened by this controls-only probe.
-            try Data("controls-only fixture; not real media".utf8).write(to: media)
+            try makeFixtureVideo(at: media, durationSeconds: 5)
         }
         if let root = retainedRoot {
             let marker = root.appendingPathComponent("issue17-fixture.json")
@@ -183,7 +247,10 @@ struct SimpleRenderedControlsProbe {
         let store = ProjectStore()
         var manifest = try store.ensureProject(at: project, mediaURL: media, mode: .newProject)
         let layout = ProjectLayout(root: project)
-        manifest.durationSeconds = 4
+        guard let duration = measuredDuration(of: media) else {
+            throw RenderedProbeFailure(message: "Fixture media has no readable duration")
+        }
+        manifest.durationSeconds = duration
         manifest.languageProfile = LanguageProfile(
             detected: source == .ru ? .ru : .en, effective: source, confidence: 1, method: "fixture",
             model: nil, modelVersion: nil, sampleRanges: [], manuallyOverridden: false, detectedAt: Date()
@@ -1234,12 +1301,29 @@ struct SimpleRenderedControlsProbe {
             && zeroRequest.language == .ru
             && zeroRequest.approvedRevisionID == "approved-ru",
             "Simple cut request is not the fixed source-only cutRange request")
+        guard let actualDuration = measuredDuration(of: media) else {
+            throw RenderedProbeFailure(message: "Simple cut fixture has no actual source duration")
+        }
+        let originalManifest = try store.load(from: project)
+        var overstatedManifest = originalManifest
+        overstatedManifest.durationSeconds = actualDuration + 10
+        try store.save(overstatedManifest, to: project)
+        let beyondActual = String(format: "%.3f", actualDuration + 1)
+        try require(
+            model.simpleCutRangeWorkflowRequest(startText: "00:00:00", endText: beyondActual) == nil
+                && !model.simpleCutRangeAvailability(startText: "00:00:00", endText: beyondActual).canCreate,
+            "Overstated manifest duration exposed a Simple cut request beyond actual media"
+        )
+        let blockedOperations = (try store.load(from: project)).workflow?.operations ?? [:]
+        try require(blockedOperations[WorkflowOperation.cutRange.rawValue] == nil,
+            "Actual-duration preflight started cutRange for an invalid range")
+        try store.save(originalManifest, to: project)
         for invalid in [
             ("00:00:02", "00:00:02"),
             ("00:00:03", "00:00:02"),
             ("-1", "00:00:02"),
             ("wrong", "00:00:02"),
-            ("00:00:00", "00:00:05")
+            ("00:00:00", String(format: "%.3f", actualDuration + 1))
         ] {
             try require(model.simpleCutRangeWorkflowRequest(startText: invalid.0, endText: invalid.1) == nil
                 && !model.simpleCutRangeAvailability(startText: invalid.0, endText: invalid.1).canCreate,
