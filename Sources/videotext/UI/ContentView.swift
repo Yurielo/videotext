@@ -166,6 +166,8 @@ struct ContentView: View {
     @State private var simpleFragmentStartText = "00:00:00"
     @State private var simpleFragmentEndText = "00:00:02"
     @State private var simpleFragmentActionStarted = false
+    @State private var simpleSelectedTopicFragmentID: String?
+    @State private var simpleTopicFragmentActionStarted = false
     @State private var simpleTranscription = SimpleTranscriptionPresentation()
     @State private var simpleTranslation = SimpleTranslationPresentation()
 
@@ -270,6 +272,8 @@ struct ContentView: View {
             simpleFragmentStartText = "00:00:00"
             simpleFragmentEndText = "00:00:02"
             simpleFragmentActionStarted = false
+            simpleSelectedTopicFragmentID = nil
+            simpleTopicFragmentActionStarted = false
         }
         .onChange(of: presentationMode) { _, mode in
             if mode != .simple {
@@ -797,6 +801,7 @@ struct ContentView: View {
                                 .buttonStyle(.borderless)
                                 .accessibilityIdentifier("simple.fragment.collapse")
                         }
+                        simpleCutTopicPanel()
                         simpleCutRangePanel()
                     }
                     .padding(10)
@@ -1251,6 +1256,78 @@ struct ContentView: View {
     }
 
     @ViewBuilder
+    private func simpleCutTopicPanel() -> some View {
+        let options = model.simpleApprovedTopicOptions
+        let availability = model.simpleTopicCutAvailability(topicID: simpleSelectedTopicFragmentID ?? "")
+        let canCreate = !options.isEmpty && availability.canCreate
+        let availabilityMessage = options.isEmpty
+            ? "Нет доступных утверждённых тем. Сначала создайте и утвердите темы для принятой расшифровки."
+            : availability.message
+
+        VStack(alignment: .leading, spacing: 8) {
+            Text("По теме")
+                .font(.subheadline.weight(.semibold))
+            if options.isEmpty {
+                Text(availabilityMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier("simple.fragment.topic.unavailable")
+            } else {
+                Picker("Тема", selection: $simpleSelectedTopicFragmentID) {
+                    Text("Выберите утверждённую тему").tag(nil as String?)
+                    ForEach(options) { option in
+                        Text("\(option.title) · \(TimecodeParser.display(option.start))–\(TimecodeParser.display(option.end))")
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .tag(option.id as String?)
+                    }
+                }
+                .onChange(of: simpleSelectedTopicFragmentID) { _, _ in
+                    simpleTopicFragmentActionStarted = false
+                }
+                .accessibilityIdentifier("simple.fragment.topic.picker")
+                Text(availabilityMessage)
+                    .font(.caption)
+                    .foregroundStyle(canCreate ? Color.secondary : Color.red)
+                    .accessibilityIdentifier("simple.fragment.topic.availability")
+            }
+            if simpleTopicFragmentActionStarted, model.status == "Ошибка" {
+                Text(model.alert?.message ?? "Фрагмент по теме не создан. Исправьте проблему и повторите попытку.")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier("simple.fragment.topic.error")
+            }
+            Button("Создать фрагмент") {
+                guard let topicID = simpleSelectedTopicFragmentID else { return }
+                simpleTopicFragmentActionStarted = model.startSimpleTopicCutFromAcceptedTranscript(topicID: topicID)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!canCreate)
+            .accessibilityIdentifier("simple.fragment.topic.create")
+
+            if let output = simpleLatestFragmentOutput {
+                HStack(spacing: 10) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Последний фрагмент готов")
+                            .fontWeight(.semibold)
+                        Text("Готово")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Открыть") { openSimpleResult(output.path) }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("simple.fragment.topic.open")
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("simple.fragment.topic.ready")
+            }
+        }
+    }
+
+    @ViewBuilder
     private func simpleCutRangePanel() -> some View {
         let availability = model.simpleCutRangeAvailability(
             startText: simpleFragmentStartText,
@@ -1483,7 +1560,9 @@ struct ContentView: View {
         if model.isStopping { return "Останавливаем обработку" }
         if model.progress.operation == .translateTranscript { return "Создаём перевод" }
         if model.progress.operation == .burnSubtitles { return "Создаём видео с субтитрами" }
-        if model.progress.operation == .cutRange { return "Создаём фрагмент" }
+        if model.progress.operation == .cutRange || model.progress.operation == .cutTopic {
+            return "Создаём фрагмент"
+        }
         return SimpleTranscriptionPresentation.stage(operation: model.progress.operation, isStopping: false)
     }
 
@@ -1527,7 +1606,7 @@ struct ContentView: View {
 
     private func simpleCurrentState(_ state: SimpleProjectHomeState) -> String {
         if model.isRunning {
-            if model.progress.operation == .cutRange {
+            if model.progress.operation == .cutRange || model.progress.operation == .cutTopic {
                 return model.isStopping ? "Останавливаем обработку" : "Создаём фрагмент"
             }
             return SimpleTranscriptionPresentation.stage(operation: model.progress.operation, isStopping: model.isStopping)
