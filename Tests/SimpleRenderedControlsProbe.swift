@@ -153,6 +153,7 @@ struct SimpleRenderedControlsProbe {
             return
         }
         try verifyTranscriptionPresentation()
+        try verifyTranslationPresentation()
         _ = NSApplication.shared
         NSApplication.shared.setActivationPolicy(.accessory)
         NSApplication.shared.finishLaunching()
@@ -162,6 +163,7 @@ struct SimpleRenderedControlsProbe {
         )
         try verifyCreationControls(project: scratch.appendingPathComponent("new-source"), media: media)
         try verifyTopicControls(project: scratch.appendingPathComponent("topics"), media: media)
+        try verifyTranslationControls(project: scratch.appendingPathComponent("translation"), media: media)
         try verifyMixedTopicVariantReopen(project: scratch.appendingPathComponent("mixed-topics"), media: media)
         // Each Source/Translation scenario has its own project. Source review can
         // legitimately invalidate downstream artifacts; the retained fixture is untouched.
@@ -406,6 +408,50 @@ struct SimpleRenderedControlsProbe {
         print("SIMPLE_TRANSCRIPTION_PRESENTATION_CONTRACT_PASS")
     }
 
+    private static func verifyTranslationPresentation() throws {
+        let project = URL(fileURLWithPath: "/private/tmp/simple-translation-presentation")
+        let other = project.appendingPathComponent("other")
+        let start = Date(timeIntervalSince1970: 100)
+        let translated = HumanReviewCheckpoint(kind: .translatedTranscript, language: .en, revisionID: "new-translation",
+            pendingOperations: [], createdAt: start.addingTimeInterval(1))
+        let source = HumanReviewCheckpoint(kind: .sourceTranscript, language: .ru, revisionID: "new-source",
+            pendingOperations: [], createdAt: start.addingTimeInterval(1))
+        var flow = SimpleTranslationPresentation()
+        flow.begin(projectURL: project, target: .en, now: start)
+        try require(flow.observe(projectURL: project, mode: .simple, isRunning: false, checkpoint: translated) == nil,
+            "Translation review must wait for the explicit run's completion")
+        try require(flow.observe(projectURL: project, mode: .simple, isRunning: true, checkpoint: translated) == nil,
+            "Translation review opened while the translation was still running")
+        try require(flow.suppressesReviewAlert(title: "Требуется Human Review", projectURL: project, checkpoint: translated),
+            "The competing translation review alert must be suppressed for the Simple flow")
+        try require(!flow.suppressesReviewAlert(title: "Требуется Human Review", projectURL: project, checkpoint: source),
+            "Source review must not be claimed by a translation intent")
+        try require(flow.observe(projectURL: project, mode: .simple, isRunning: false, checkpoint: translated) == translated,
+            "Completed translation did not open the existing Translation Human Review")
+        try require(flow.observe(projectURL: project, mode: .simple, isRunning: false, checkpoint: translated) == nil,
+            "Closing Translation Human Review caused a false automatic success/reopen")
+
+        flow.begin(projectURL: project, target: .en, now: start)
+        _ = flow.observe(projectURL: project, mode: .simple, isRunning: true, checkpoint: nil)
+        let failedTranslation = AppAlert(title: "Перевод не выполнен", message: "internal translation diagnostics")
+        let readableFailure = flow.translationRunAlert(failedTranslation, projectURL: project)
+        try require(readableFailure.title == "Не удалось создать перевод" && !readableFailure.message.contains("internal"),
+            "Active translation failure is not rendered as a user-facing translation error")
+        _ = flow.observe(projectURL: project, mode: .simple, isRunning: false, checkpoint: nil, failedOrStopped: true)
+        try require(flow.observe(projectURL: project, mode: .simple, isRunning: false, checkpoint: translated) == nil,
+            "A stopped translation later claimed a successful review")
+        let unrelated = AppAlert(title: "Ошибка обработки", message: "Topic diagnostics")
+        let sameProjectAlert = flow.translationRunAlert(unrelated, projectURL: project)
+        try require(sameProjectAlert.id == unrelated.id && sameProjectAlert.title == unrelated.title
+                    && sameProjectAlert.message == unrelated.message,
+            "A terminated translation relabeled a later unrelated Simple error")
+        let otherProjectAlert = flow.translationRunAlert(unrelated, projectURL: other)
+        try require(otherProjectAlert.id == unrelated.id && otherProjectAlert.title == unrelated.title
+                    && otherProjectAlert.message == unrelated.message,
+            "Translation error rendering changed another project")
+        print("SIMPLE_TRANSLATION_PRESENTATION_CONTRACT_PASS")
+    }
+
     private static func renderedText(_ node: RenderedAXElement) -> String {
         tree(node).flatMap { [$0.accessibilityLabel(), $0.accessibilityValue() as? String].compactMap { $0 } }
             .joined(separator: " ")
@@ -420,6 +466,19 @@ struct SimpleRenderedControlsProbe {
                 let frame = control.accessibilityFrame()
                 try require(frame.width > 0 && frame.height > 0 && frame.minX >= row.minX - 2 && frame.maxX <= row.maxX + 2,
                     "Rendered source \(action) is clipped or outside its row")
+            }
+        }
+    }
+
+    private static func assertTranslationRowFits(_ section: String, window: NSWindow) throws {
+        let row = try element("simple.\(section).translation.row", in: window).accessibilityFrame()
+        try require(row.minX >= window.frame.minX && row.maxX <= window.frame.maxX,
+            "Rendered translation row exceeds the 980-point window")
+        for action in ["create", "open", "correct"] {
+            for control in nodes(window).filter({ $0.accessibilityIdentifier() == "simple.\(section).translation.\(action)" }) {
+                let frame = control.accessibilityFrame()
+                try require(frame.width > 0 && frame.height > 0 && frame.minX >= row.minX - 2 && frame.maxX <= row.maxX + 2,
+                    "Rendered translation \(action) is clipped or outside its row")
             }
         }
     }
@@ -672,6 +731,116 @@ struct SimpleRenderedControlsProbe {
         print("RENDERED_TOPIC_CONTROLS_PASS: create CTA, no unnecessary choice, no Simple correction, Advanced handoff")
     }
 
+    private static func verifyTranslationControls(project: URL, media: URL) throws {
+        let store = ProjectStore()
+        let sourceOnly = project.appendingPathComponent("source-unapproved")
+        var missingManifest = try store.ensureProject(at: sourceOnly, mediaURL: media, mode: .newProject)
+        missingManifest.languageProfile = LanguageProfile(
+            detected: .ru, effective: .ru, confidence: 1, method: "fixture",
+            model: nil, modelVersion: nil, sampleRanges: [], manuallyOverridden: false, detectedAt: Date()
+        )
+        try store.save(missingManifest, to: sourceOnly)
+        let unapprovedModel = WorkflowViewModel()
+        unapprovedModel.projectURL = sourceOnly
+        unapprovedModel.mediaURL = media
+        unapprovedModel.loadDetectedResults()
+        let unapprovedWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        unapprovedWindow.isReleasedWhenClosed = false
+        unapprovedWindow.contentView = NSHostingView(rootView: ContentView(model: unapprovedModel))
+        unapprovedWindow.makeKeyAndOrderFront(nil)
+        defer { unapprovedWindow.close() }
+        settle(unapprovedWindow)
+        try press("simple.goal.textContent", in: unapprovedWindow)
+        let unavailable = try element("simple.textContent.translation.unavailable", in: unapprovedWindow)
+        try require(renderedText(unavailable).contains("Сначала утвердите расшифровку"),
+            "Unapproved source did not explain why translation is unavailable")
+        try require(!element("simple.textContent.translation.create", in: unapprovedWindow).isAccessibilityEnabled(),
+            "Unapproved source exposed an enabled translation creation action")
+
+        let accepted = project.appendingPathComponent("source-approved")
+        _ = try makeProject(accepted, media: media, source: .ru)
+        try removeTranslation(from: accepted)
+        let model = WorkflowViewModel()
+        model.projectURL = accepted
+        model.mediaURL = media
+        model.loadDetectedResults()
+        let advancedOperations = model.selectedOperations
+        let advancedTranslationReview = model.translationHumanReviewEnabled
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: ContentView(model: model))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        settle(window)
+        try press("simple.goal.textContent", in: window)
+        let create = try element("simple.textContent.translation.create", in: window)
+        try require(create.accessibilityRole() == .button && create.accessibilityLabel() == "Создать перевод"
+            && create.isAccessibilityEnabled() == model.canTranslate,
+            "Approved source has no truthful rendered Simple translation creation action")
+        try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.translation.language" },
+            "Simple rendered a translation language picker despite the existing fixed pipeline direction")
+        try require(!nodes(window).contains {
+            ["simple.textContent.translation.open", "simple.textContent.translation.correct"].contains($0.accessibilityIdentifier() ?? "")
+        }, "Missing translation claimed a ready result or review before generation")
+        try assertTranslationRowFits("textContent", window: window)
+
+        model.progress = WorkflowProgress(operation: .translateTranscript, operationFraction: 0.2, overallFraction: 0.1,
+            elapsed: 1, estimatedTotal: nil, remaining: nil, isIndeterminate: true)
+        model.isRunning = true
+        settle(window)
+        try require(renderedText(element("simple.progress.stage", in: window)).contains("Создаём перевод"),
+            "Simple progress did not render the active translation stage")
+        try require(element("simple.progress.stop", in: window).isAccessibilityEnabled(),
+            "Simple translation processing did not reuse the existing stop action")
+        try require(!element("simple.textContent.translation.create", in: window).isAccessibilityEnabled(),
+            "Simple exposed duplicate translation creation while processing")
+        model.isStopping = true
+        settle(window)
+        try require(renderedText(element("simple.progress.stage", in: window)).contains("Останавливаем обработку")
+            && !element("simple.progress.stop", in: window).isAccessibilityEnabled(),
+            "Simple translation stop state allowed repeated cancellation")
+        model.isStopping = false
+        model.isRunning = false
+        model.progress = .idle
+
+        var manifest = try store.load(from: accepted)
+        let layout = ProjectLayout(root: accepted)
+        let pendingCues = [
+            SubtitleCue(id: 1, start: 0, end: 2, text: "Pending translated cue one."),
+            SubtitleCue(id: 2, start: 2, end: 4, text: "Pending translated cue two.")
+        ]
+        try SRTService().writePreservingIDs(pendingCues, to: layout.subtitlesURL(language: .en))
+        try pendingCues.map(\.text).joined(separator: "\n\n").write(
+            to: layout.transcriptURL(language: .en), atomically: true, encoding: .utf8
+        )
+        let sourceRevisionID = manifest.activeTranscriptRevision(for: .ru)?.id
+        let pendingRevision = TranscriptRevision(
+            id: "pending-translation", language: .en, origin: .translated,
+            parentRevisionID: sourceRevisionID,
+            transcriptArtifactID: "pending-translation-txt", subtitleArtifactID: "pending-translation-srt",
+            contentHash: StableTopicHash.string("pending-translation"), createdAt: Date(), reviewStatus: .pending
+        )
+        manifest.transcriptRevisions?.append(pendingRevision)
+        let checkpoint = HumanReviewCheckpoint(kind: .translatedTranscript, language: .en, revisionID: "pending-translation",
+            pendingOperations: [], createdAt: Date())
+        manifest.humanReviewState?.pendingCheckpoint = checkpoint
+        manifest.workflow?.status = .awaitingReview
+        try store.save(manifest, to: accepted)
+        model.loadDetectedResults()
+        settle(window)
+        try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.translation.open" },
+            "Translation appeared ready before Translation Human Review accepted it")
+        try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.translation.create" },
+            "Pending Translation Human Review exposed a second creation action")
+        let correct = try element("simple.textContent.translation.correct", in: window)
+        try require(correct.isAccessibilityEnabled(), "Pending translation did not expose the existing Translation Human Review")
+        try require(model.selectedOperations == advancedOperations && model.translationHumanReviewEnabled == advancedTranslationReview,
+            "Simple translation presentation rewrote Advanced selections or review preferences")
+        print("RENDERED_TRANSLATION_CONTROLS_PASS: disabled-until-approved, CTA, fixed direction, progress/stop, review-before-ready")
+    }
+
     private static func removeTopics(from project: URL, media: URL) throws {
         _ = try makeProject(project, media: media, source: .ru)
         let store = ProjectStore()
@@ -683,6 +852,31 @@ struct SimpleRenderedControlsProbe {
         let topicsDirectory = ProjectLayout(root: project).topicsDirectory
         if FileManager.default.fileExists(atPath: topicsDirectory.path) {
             try FileManager.default.removeItem(at: topicsDirectory)
+        }
+    }
+
+    private static func removeTranslation(from project: URL) throws {
+        let store = ProjectStore()
+        var manifest = try store.load(from: project)
+        guard let source = manifest.languageProfile?.effective else {
+            throw RenderedProbeFailure(message: "Translation fixture has no source language")
+        }
+        let target = source.translationTarget
+        manifest.transcriptRevisions?.removeAll { $0.language == target }
+        if var review = manifest.humanReviewState {
+            review.activeRevisionIDs[target.rawValue] = nil
+            review.draftRevisionIDs[target.rawValue] = nil
+            review.pendingCheckpoint = nil
+            manifest.humanReviewState = review
+        }
+        manifest.artifacts = manifest.artifacts?.filter {
+            !($0.language == target && ($0.kind == .transcript || $0.kind == .subtitles))
+        }
+        try store.save(manifest, to: project)
+        let layout = ProjectLayout(root: project)
+        for url in [layout.transcriptURL(language: target), layout.subtitlesURL(language: target)]
+            where FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
         }
     }
 

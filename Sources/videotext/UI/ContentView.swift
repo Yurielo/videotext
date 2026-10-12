@@ -31,6 +31,107 @@ private enum SimpleProjectHomeGoal: String, CaseIterable, Identifiable {
     }
 }
 
+/// Presentation intent for one explicitly started Simple translation.
+/// It only opens the existing Human Review when that translation has actually
+/// completed and persisted its review checkpoint.
+struct SimpleTranslationPresentation {
+    private struct Intent {
+        var target: ArtifactLanguage
+        var startedAt: Date
+        var sawRunning = false
+        var sawCompletion = false
+    }
+
+    private var intent: Intent?
+    private var presentedCheckpoint: HumanReviewCheckpoint?
+    private(set) var projectPath: String?
+
+    mutating func begin(projectURL: URL, target: ArtifactLanguage, now: Date = Date()) {
+        projectPath = projectURL.standardizedFileURL.path
+        presentedCheckpoint = nil
+        intent = Intent(
+            target: target,
+            // Persisted checkpoint dates may have whole-second precision.
+            startedAt: Date(timeIntervalSince1970: floor(now.timeIntervalSince1970))
+        )
+    }
+
+    mutating func reset() {
+        intent = nil
+        presentedCheckpoint = nil
+        projectPath = nil
+    }
+
+    private mutating func cancelPendingReview() {
+        intent = nil
+    }
+
+    private func belongsTo(_ projectURL: URL?) -> Bool {
+        guard let projectURL else { return false }
+        return projectPath == projectURL.standardizedFileURL.path
+    }
+
+    private func matches(_ checkpoint: HumanReviewCheckpoint, projectURL: URL?) -> Bool {
+        guard let intent, belongsTo(projectURL), checkpoint.kind == .translatedTranscript,
+              checkpoint.createdAt >= intent.startedAt else { return false }
+        return checkpoint.language == intent.target
+    }
+
+    func suppressesReviewAlert(title: String, projectURL: URL?, checkpoint: HumanReviewCheckpoint?) -> Bool {
+        guard title == "Требуется Human Review", belongsTo(projectURL),
+              let checkpoint, checkpoint.kind == .translatedTranscript else { return false }
+        if matches(checkpoint, projectURL: projectURL) { return true }
+        return presentedCheckpoint?.revisionID == checkpoint.revisionID
+            && presentedCheckpoint?.language == checkpoint.language
+    }
+
+    func translationRunAlert(_ alert: AppAlert, projectURL: URL?) -> AppAlert {
+        guard intent != nil, belongsTo(projectURL), presentedCheckpoint == nil else { return alert }
+        var display = alert
+        if alert.title == "Обработка остановлена" {
+            display.message = "Перевод не завершён. Его можно создать заново из утверждённой расшифровки."
+        } else if alert.title == "Ошибка" || alert.title == "Ошибка обработки" || alert.title == "Перевод не выполнен" {
+            display.title = "Не удалось создать перевод"
+            display.message = "Проверьте доступность TranslateGemma и повторите попытку."
+        }
+        return display
+    }
+
+    mutating func observe(
+        projectURL: URL?,
+        mode: ProjectPresentationMode,
+        isRunning: Bool,
+        checkpoint: HumanReviewCheckpoint?,
+        failedOrStopped: Bool = false
+    ) -> HumanReviewCheckpoint? {
+        guard mode == .simple, belongsTo(projectURL) else {
+            reset()
+            return nil
+        }
+        guard !failedOrStopped else {
+            cancelPendingReview()
+            return nil
+        }
+        guard var current = intent else { return nil }
+        if isRunning {
+            guard !current.sawCompletion else {
+                cancelPendingReview()
+                return nil
+            }
+            current.sawRunning = true
+            intent = current
+            return nil
+        }
+        guard current.sawRunning else { return nil }
+        current.sawCompletion = true
+        intent = current
+        guard let checkpoint, matches(checkpoint, projectURL: projectURL) else { return nil }
+        presentedCheckpoint = checkpoint
+        intent = nil
+        return checkpoint
+    }
+}
+
 struct ContentView: View {
     @ObservedObject var model: WorkflowViewModel
     @State private var fragmentSelectionMode = FragmentSelectionMode.timecode
@@ -52,6 +153,7 @@ struct ContentView: View {
     @State private var simpleReviewTarget: SimpleProjectHomeReviewTarget?
     @State private var showsSimpleTextContent = false
     @State private var simpleTranscription = SimpleTranscriptionPresentation()
+    @State private var simpleTranslation = SimpleTranslationPresentation()
 
     var body: some View {
         Group {
@@ -131,16 +233,17 @@ struct ContentView: View {
         .onChange(of: model.humanReviewCheckpoint) { _, checkpoint in
             if checkpoint != nil { selectedResultsTab = 2 }
             if checkpoint == nil { simpleReviewTarget = nil }
-            updateSimpleTranscriptionReview()
+            updateSimpleHumanReview()
         }
         .onChange(of: model.isRunning) { _, _ in
-            updateSimpleTranscriptionReview()
+            updateSimpleHumanReview()
         }
         .onChange(of: model.alert?.id) { _, _ in
-            updateSimpleTranscriptionReview()
+            updateSimpleHumanReview()
         }
         .onChange(of: model.projectURL) { _, _ in
             simpleTranscription.reset()
+            simpleTranslation.reset()
             simpleReviewTarget = nil
             editingReviewCue = nil
             reviewSearch = ""
@@ -148,7 +251,10 @@ struct ContentView: View {
             showsSimpleTextContent = false
         }
         .onChange(of: presentationMode) { _, mode in
-            if mode != .simple { simpleTranscription.reset() }
+            if mode != .simple {
+                simpleTranscription.reset()
+                simpleTranslation.reset()
+            }
         }
         .onChange(of: model.topicReviewCheckpoint) { _, checkpoint in
             if checkpoint != nil { selectedResultsTab = 1 }
@@ -298,7 +404,7 @@ struct ContentView: View {
         let fraction = SimpleTranscriptionPresentation.fraction(model.progress.overallFraction)
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(SimpleTranscriptionPresentation.stage(operation: model.progress.operation, isStopping: model.isStopping))
+                Text(simpleProgressStage)
                     .font(.subheadline.bold())
                     .accessibilityIdentifier("simple.progress.stage")
                 Spacer()
@@ -771,6 +877,7 @@ struct ContentView: View {
                 .accessibilityIdentifier("simple.\(section).transcription.create")
             }
             simpleTopicsActions(artifact, section: section)
+            simpleTranslationActions(artifact, section: section)
         }
         .padding(.vertical, 3)
         .accessibilityElement(children: .contain)
@@ -826,6 +933,38 @@ struct ContentView: View {
                     .disabled(!model.canCreateTopicsFromAcceptedTranscript)
                     .accessibilityIdentifier("simple.\(section).topics.create")
                 }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func simpleTranslationActions(_ artifact: SimpleProjectHomeArtifact, section: String) -> some View {
+        if artifact.kind == .translation, section == "textContent",
+           artifact.readiness == .missing || artifact.readiness == .failed {
+            if !simpleSourceTranscriptIsApproved {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Сначала утвердите расшифровку, затем можно создать перевод.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("simple.\(section).translation.unavailable")
+                    Button("Создать перевод") {}
+                        .buttonStyle(.borderedProminent)
+                        .disabled(true)
+                        .accessibilityIdentifier("simple.\(section).translation.create")
+                }
+            } else {
+                if !model.canTranslate && !model.isRunning {
+                    Text(model.translationStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("simple.\(section).translation.unavailable")
+                }
+                Button("Создать перевод") {
+                    startSimpleTranslation()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!model.canTranslate)
+                .accessibilityIdentifier("simple.\(section).translation.create")
             }
         }
     }
@@ -939,7 +1078,17 @@ struct ContentView: View {
                        projectURL: model.projectURL,
                        checkpoint: model.humanReviewCheckpoint
                    ) { return nil }
+                if presentationMode == .simple,
+                   simpleTranslation.suppressesReviewAlert(
+                       title: alert.title,
+                       projectURL: model.projectURL,
+                       checkpoint: model.humanReviewCheckpoint
+                   ) { return nil }
                 if presentationMode == .simple {
+                    let translationAlert = simpleTranslation.translationRunAlert(alert, projectURL: model.projectURL)
+                    if translationAlert.id != alert.id || translationAlert.title != alert.title || translationAlert.message != alert.message {
+                        return translationAlert
+                    }
                     return simpleTranscription.sourceRunAlert(alert, projectURL: model.projectURL)
                 }
                 return alert
@@ -954,7 +1103,7 @@ struct ContentView: View {
         simpleTranscription.begin(projectURL: projectURL, language: model.simpleTranscriptionLanguage)
         if model.startSimpleTranscription() {
             showsSimpleTextContent = true
-            updateSimpleTranscriptionReview()
+            updateSimpleHumanReview()
         } else {
             simpleTranscription.cancelPendingReview()
         }
@@ -966,7 +1115,17 @@ struct ContentView: View {
         showsSimpleTextContent = true
     }
 
-    private func updateSimpleTranscriptionReview() {
+    private func startSimpleTranslation() {
+        guard presentationMode == .simple, model.canTranslate,
+              let projectURL = model.projectURL,
+              let direction = model.translationDirection else { return }
+        simpleTranslation.begin(projectURL: projectURL, target: direction.target)
+        model.translateApprovedTranscript()
+        showsSimpleTextContent = true
+        updateSimpleHumanReview()
+    }
+
+    private func updateSimpleHumanReview() {
         guard presentationMode == .simple else { return }
         if let alert = model.alert,
            simpleTranscription.suppressesReviewAlert(
@@ -985,6 +1144,30 @@ struct ContentView: View {
         ) != nil {
             presentSimpleReview(.source)
         }
+        if let alert = model.alert,
+           simpleTranslation.suppressesReviewAlert(
+               title: alert.title,
+               projectURL: model.projectURL,
+               checkpoint: model.humanReviewCheckpoint
+           ) {
+            model.alert = nil
+        }
+        if simpleTranslation.observe(
+            projectURL: model.projectURL,
+            mode: presentationMode,
+            isRunning: model.isRunning,
+            checkpoint: model.humanReviewCheckpoint,
+            failedOrStopped: model.status == "Ошибка" || model.status == "Остановлено"
+                || model.status == "Перевод не выполнен"
+        ) != nil {
+            presentSimpleReview(.translation)
+        }
+    }
+
+    private var simpleProgressStage: String {
+        if model.isStopping { return "Останавливаем обработку" }
+        if model.progress.operation == .translateTranscript { return "Создаём перевод" }
+        return SimpleTranscriptionPresentation.stage(operation: model.progress.operation, isStopping: false)
     }
 
     private func simpleHumanReviewSheet(_ target: SimpleProjectHomeReviewTarget) -> some View {

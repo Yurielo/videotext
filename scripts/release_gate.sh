@@ -320,8 +320,8 @@ for run in 1 2; do
   else
     [[ "$(/usr/bin/grep -Fc 'REAL_TRANSLATION_PASS ru->en:' "$log")" -eq 1 ]] || \
       fail "E2E #$run не доказал единственный RU->EN production-проход"
-    [[ "$(/usr/bin/grep -Fc 'REAL_TRANSLATION_PASS en->ru:' "$log")" -eq 1 ]] || \
-      fail "E2E #$run не доказал успешный EN->RU valid-full.srt проход"
+    [[ "$(/usr/bin/grep -Fc 'REAL_TRANSLATION_FAIL_CLOSED_PASS en->ru:' "$log")" -eq 1 ]] || \
+      fail "E2E #$run не доказал fail-closed EN->RU legacy full.srt contract"
   fi
   [[ "$(shasum -a 256 "$VIDEO_PATH" | awk '{print $1}')" == "$VIDEO_SHA256" ]] || \
     fail "E2E #$run изменил RU-видео"

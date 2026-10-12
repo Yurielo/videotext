@@ -448,13 +448,18 @@ struct EndToEndTest {
             )
             try validateHybridTopics(initialResult.projectURL)
             if profile == .translation {
+                let legacyRussianProjectURL = try makeLegacyFullSRTTranslationProject(
+                    from: initialResult.projectURL,
+                    sourceLanguage: .ru
+                )
                 try await validateRealTranslation(
                     mediaURL: mediaURL,
-                    projectURL: initialResult.projectURL,
+                    projectURL: legacyRussianProjectURL,
                     modelPath: modelPath,
                     sourceLanguage: .ru,
                     targetLanguage: .en
                 )
+                try FileManager.default.removeItem(at: legacyRussianProjectURL)
                 let englishMediaURL = URL(fileURLWithPath: CommandLine.arguments[3])
                 let englishProjectURL = URL(fileURLWithPath: CommandLine.arguments[4], isDirectory: true)
                 try require(
@@ -465,13 +470,18 @@ struct EndToEndTest {
                     FileManager.default.fileExists(atPath: ProjectLayout(root: englishProjectURL).manifestURL.path),
                     "Английский тестовый проект не найден"
                 )
+                let legacyEnglishProjectURL = try makeLegacyFullSRTTranslationProject(
+                    from: englishProjectURL,
+                    sourceLanguage: .en
+                )
                 try await validateRealTranslation(
                     mediaURL: englishMediaURL,
-                    projectURL: englishProjectURL,
+                    projectURL: legacyEnglishProjectURL,
                     modelPath: modelPath,
                     sourceLanguage: .en,
                     targetLanguage: .ru
                 )
+                try FileManager.default.removeItem(at: legacyEnglishProjectURL)
             }
             try await validateExplicitTopicVariant(
                 mediaURL: mediaURL,
@@ -607,6 +617,28 @@ struct EndToEndTest {
         }
     }
 
+    private static func makeLegacyFullSRTTranslationProject(
+        from projectURL: URL,
+        sourceLanguage: ArtifactLanguage
+    ) throws -> URL {
+        let legacyProjectURL = projectURL.deletingLastPathComponent()
+            .appendingPathComponent("Legacy full SRT translation \(sourceLanguage.rawValue)", isDirectory: true)
+        if FileManager.default.fileExists(atPath: legacyProjectURL.path) {
+            try FileManager.default.removeItem(at: legacyProjectURL)
+        }
+        try FileManager.default.copyItem(at: projectURL, to: legacyProjectURL)
+
+        let layout = ProjectLayout(root: legacyProjectURL)
+        try FileManager.default.removeItem(at: layout.subtitlesURL(language: sourceLanguage))
+        try? FileManager.default.removeItem(at: layout.transcriptURL(language: sourceLanguage))
+        try? FileManager.default.removeItem(at: layout.selectedTimingSourceUnitsURL)
+        try require(
+            nonemptyFile(at: layout.fullSRTURL),
+            "Legacy translation fixture has no full.srt"
+        )
+        return legacyProjectURL
+    }
+
     private static func validateRealTranslation(
         mediaURL: URL,
         projectURL: URL,
@@ -715,6 +747,114 @@ struct EndToEndTest {
             try manifestBytes.write(to: evidence.appendingPathComponent(name))
         }
 
+        func assertCanonicalSourceStillRequiresHumanReview() async throws {
+            guard materializesLegacySource else { return }
+            let probeProject = evidence.appendingPathComponent("canonical-source-without-selected-units", isDirectory: true)
+            try FileManager.default.copyItem(at: projectURL, to: probeProject)
+            defer { try? FileManager.default.removeItem(at: probeProject) }
+
+            let probeLayout = ProjectLayout(root: probeProject)
+            try SRTService().writePreservingIDs(source, to: probeLayout.subtitlesURL(language: sourceLanguage))
+            let persistedSource = try SelectedTimingVerticalSlice().loadPersistedSource(
+                projectURL: probeProject,
+                mediaURL: mediaURL
+            )
+            try require(
+                persistedSource == nil,
+                "Canonical Human Review guard probe unexpectedly has persisted selected timing"
+            )
+            var canonicalSettings = settings
+            canonicalSettings.projectURL = probeProject
+            do {
+                _ = try await engine(ProcessController()).run(settings: canonicalSettings, onLog: { _ in })
+                throw EndToEndError.failed("Canonical source without selected timing bypassed Translation Human Review")
+            } catch {
+                try require(
+                    error.localizedDescription.contains("Перевод требует обязательного Translation Human Review."),
+                    "Canonical source without selected timing took the legacy translation route"
+                )
+            }
+            try require(
+                !FileManager.default.fileExists(atPath: probeLayout.selectedTimingSourceUnitsURL.path),
+                "Canonical Human Review guard imported selected timing before rejecting translation"
+            )
+        }
+
+        func assertZeroByteCanonicalSourceStaysCanonical() async throws {
+            guard materializesLegacySource else { return }
+            let probeProject = evidence.appendingPathComponent("zero-byte-canonical-source", isDirectory: true)
+            try FileManager.default.copyItem(at: projectURL, to: probeProject)
+            defer { try? FileManager.default.removeItem(at: probeProject) }
+
+            let probeLayout = ProjectLayout(root: probeProject)
+            let zeroByteSourceURL = probeLayout.subtitlesURL(language: sourceLanguage)
+            try Data().write(to: zeroByteSourceURL, options: .atomic)
+            try? FileManager.default.removeItem(at: probeLayout.selectedTimingSourceUnitsURL)
+            var canonicalSettings = settings
+            canonicalSettings.projectURL = probeProject
+            do {
+                _ = try await engine(ProcessController()).run(settings: canonicalSettings, onLog: { _ in })
+                throw EndToEndError.failed("Zero-byte canonical source bypassed Translation Human Review")
+            } catch {
+                try require(
+                    error.localizedDescription.contains("Перевод требует обязательного Translation Human Review."),
+                    "Zero-byte canonical source took the legacy full.srt translation route"
+                )
+            }
+            let sourceAfterHumanReviewGuard = try Data(contentsOf: zeroByteSourceURL)
+            try require(
+                sourceAfterHumanReviewGuard.isEmpty
+                    && !FileManager.default.fileExists(atPath: probeLayout.selectedTimingSourceUnitsURL.path),
+                "Zero-byte canonical source was materialized or imported before the Human Review guard"
+            )
+
+            canonicalSettings.translationHumanReviewEnabled = true
+            var baselineRejected = false
+            do {
+                _ = try await engine(ProcessController()).run(settings: canonicalSettings, onLog: { _ in })
+            } catch {
+                baselineRejected = true
+            }
+            let sourceAfterBaselineValidation = try Data(contentsOf: zeroByteSourceURL)
+            try require(
+                baselineRejected
+                    && sourceAfterBaselineValidation.isEmpty
+                    && !FileManager.default.fileExists(atPath: probeLayout.selectedTimingSourceUnitsURL.path),
+                "Zero-byte canonical source bypassed baseline validation through legacy full.srt fallback"
+            )
+        }
+
+        func assertMixedCanonicalTranslationFailsBeforeWork() async throws {
+            guard materializesLegacySource else { return }
+            let probeProject = evidence.appendingPathComponent("mixed-canonical-translation-preflight", isDirectory: true)
+            try FileManager.default.copyItem(at: projectURL, to: probeProject)
+            defer { try? FileManager.default.removeItem(at: probeProject) }
+
+            let probeLayout = ProjectLayout(root: probeProject)
+            try SRTService().writePreservingIDs(source, to: probeLayout.subtitlesURL(language: sourceLanguage))
+            try? FileManager.default.removeItem(at: probeLayout.logURL)
+            try? FileManager.default.removeItem(at: probeLayout.diagnosticsURL)
+            var mixedSettings = settings
+            mixedSettings.projectURL = probeProject
+            mixedSettings.selectedOperations = [.translateTranscript, .topicTimecoding]
+            var logs: [String] = []
+            do {
+                _ = try await engine(ProcessController()).run(settings: mixedSettings, onLog: { logs.append($0) })
+                throw EndToEndError.failed("Mixed canonical translation bypassed the Human Review preflight")
+            } catch {
+                try require(
+                    error.localizedDescription.contains("Перевод требует обязательного Translation Human Review."),
+                    "Mixed canonical translation did not fail at the required Human Review preflight"
+                )
+            }
+            try require(
+                logs.isEmpty
+                    && !FileManager.default.fileExists(atPath: probeLayout.logURL.path)
+                    && !FileManager.default.fileExists(atPath: probeLayout.diagnosticsURL.path),
+                "Mixed canonical translation began workflow work before the Human Review preflight"
+            )
+        }
+
         let identity = TranslationModelIdentity(
             model: OllamaTranslationProvider.model,
             digest: E2ETranslationWire.digest,
@@ -734,6 +874,9 @@ struct EndToEndTest {
             projectURL: projectURL,
             mediaURL: mediaURL
         ) != nil
+        try await assertCanonicalSourceStillRequiresHumanReview()
+        try await assertZeroByteCanonicalSourceStaysCanonical()
+        try await assertMixedCanonicalTranslationFailsBeforeWork()
         let executionController = ProcessController()
         let resumed: WorkflowResult
         do {
@@ -764,18 +907,40 @@ struct EndToEndTest {
             let targetArtifacts = (failedManifest.artifacts ?? []).filter {
                 $0.sourceRevision == targetRevision?.id
             }
+            let reviewTasks = (failedManifest.reviewTasks ?? []).filter {
+                report.reviewTaskIDs.contains($0.id)
+            }
+            let sourceByID = Dictionary(uniqueKeysWithValues: source.map { ($0.id, $0) })
+            let fallbackByID = Dictionary(uniqueKeysWithValues: fallback.map { ($0.id, $0) })
             try require(
                 !targetArtifacts.isEmpty
                     && targetArtifacts.allSatisfy { $0.validationStatus == .needsReview }
                     && fallback.count == source.count
-                    && zip(fallback, source).allSatisfy { $0.id == $1.id && $0.text == $1.text },
-                "Legacy full.srt exposed source fallback as a ready translation"
+                    && zip(fallback, source).allSatisfy {
+                        $0.id == $1.id && $0.start == $1.start && $0.end == $1.end
+                    }
+                    && reviewTasks.map(\.cueIDs).flatMap { $0 }.sorted() == [2, 5]
+                    && Set(reviewTasks.map(\.id)) == Set(report.reviewTaskIDs)
+                    && reviewTasks.allSatisfy { task in
+                        task.status == .needsReview
+                            && task.cueIDs.allSatisfy { cueID in
+                                guard let sourceCue = sourceByID[cueID],
+                                      let fallbackCue = fallbackByID[cueID] else {
+                                    return false
+                                }
+                                return task.originalText == sourceCue.text
+                                    && task.suggestedText == fallbackCue.text
+                            }
+                    },
+                "Legacy full.srt did not preserve unresolved candidates as pending review tasks"
             )
             try require(
                 failedManifest.workflow?.status == .failed
                     && failedManifest.workflow?.operations[WorkflowOperation.translateTranscript.rawValue]?.status == .failed,
                 "Legacy full.srt did not record failed translation state"
             )
+            try FileManager.default.removeItem(at: localizedSourceURL)
+            try? FileManager.default.removeItem(at: layout.transcriptURL(language: sourceLanguage))
             do {
                 _ = try await engine(ProcessController()).run(settings: settings, onLog: { print($0) })
                 throw EndToEndError.failed("Legacy full.srt resume converted source fallback into success")
@@ -1017,7 +1182,11 @@ struct EndToEndTest {
         let outputBytes = try outputs.map { try Data(contentsOf: $0) }
         let outputDates = outputs.map { modificationDate($0) }
         let reopenedController = ProcessController()
-        _ = try await engine(reopenedController).run(settings: settings, onLog: { print($0) })
+        var completedResumeSettings = settings
+        if materializesLegacySource {
+            completedResumeSettings.translationHumanReviewEnabled = true
+        }
+        _ = try await engine(reopenedController).run(settings: completedResumeSettings, onLog: { print($0) })
         let chatsAfterCompletedResume = await wire.chats
         try require(chatsAfterCompletedResume == chats, "Completed resume unnecessarily called chat")
         for (index, url) in outputs.enumerated() {
@@ -1029,6 +1198,14 @@ struct EndToEndTest {
         }
 
         // Rebuild only the generated report from the real persisted unit checkpoints.
+        if materializesLegacySource {
+            // The earlier completed-resume assertion proves the materialized project
+            // reopens without translation. Recreate the legacy entry condition for
+            // this separate checkpoint-replay probe; only an absent localized SRT
+            // may select the legacy ownership adapter without Human Review.
+            try FileManager.default.removeItem(at: localizedSourceURL)
+            try? FileManager.default.removeItem(at: layout.transcriptURL(language: sourceLanguage))
+        }
         try FileManager.default.removeItem(at: reportURL)
         let cachedController = ProcessController()
         _ = try await engine(cachedController).run(settings: settings, onLog: { print($0) })
@@ -1065,8 +1242,8 @@ struct EndToEndTest {
                 URL(fileURLWithPath: $0).lastPathComponent == "whisper-cli"
             }
             try require(
-                whisperLaunches.count == 1,
-                "Translation resume performed Whisper work beyond the mandatory diagnostics probe"
+                whisperLaunches.isEmpty,
+                "Translation-only resume unexpectedly launched Whisper"
             )
         }
         try assertSourceUnchanged()

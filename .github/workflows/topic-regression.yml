@@ -69,6 +69,7 @@ jobs:
           RETRY_EVIDENCE: ${{ inputs.retry_evidence }}
         run: |
           python3 - <<'PY'
+          import base64
           import json
           import os
           import re
@@ -88,6 +89,12 @@ jobs:
           if actual != expected:
               raise SystemExit(f"exact SHA mismatch: {actual} != {expected}")
           default_branch = os.environ["DEFAULT_BRANCH"]
+          git_environment = os.environ.copy()
+          git_environment["GIT_CONFIG_COUNT"] = "1"
+          git_environment["GIT_CONFIG_KEY_0"] = "http.https://github.com/.extraheader"
+          git_environment["GIT_CONFIG_VALUE_0"] = "AUTHORIZATION: basic " + base64.b64encode(
+              f"x-access-token:{os.environ['GH_TOKEN']}".encode()
+          ).decode()
           subprocess.run(
               [
                   "git",
@@ -97,6 +104,7 @@ jobs:
                   f"refs/heads/{default_branch}:refs/remotes/origin/{default_branch}",
               ],
               check=True,
+              env=git_environment,
           )
           canonical_base = subprocess.check_output(
               ["git", "merge-base", f"origin/{default_branch}", expected], text=True
