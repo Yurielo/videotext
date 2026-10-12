@@ -9,9 +9,41 @@ struct SimpleTopicsWorkflowRequest: Equatable {
     let approvedRevisionID: String
 }
 
+/// The fixed source-only full-video request exposed to Simple Mode. Keeping
+/// this intent next to the workflow boundary prevents the UI from temporarily
+/// rewriting Advanced selections in order to start the shared operation.
+struct SimpleSourceSubtitleWorkflowRequest: Equatable {
+    let operations: Set<WorkflowOperation>
+    let subtitleSource: SubtitleSourceSelection
+    let subtitleStyle: SubtitleStyleSettings
+    let language: ArtifactLanguage
+    let approvedRevisionID: String
+
+    static func standard(language: ArtifactLanguage, approvedRevisionID: String) -> Self {
+        Self(
+            operations: [.burnSubtitles],
+            subtitleSource: .source,
+            subtitleStyle: .standard,
+            language: language,
+            approvedRevisionID: approvedRevisionID
+        )
+    }
+}
+
 struct ApprovedTranscriptReuseRequirement: Equatable {
     let language: ArtifactLanguage
     let revisionID: String
+    let failureContext: String
+
+    init(
+        language: ArtifactLanguage,
+        revisionID: String,
+        failureContext: String = "Создание тем"
+    ) {
+        self.language = language
+        self.revisionID = revisionID
+        self.failureContext = failureContext
+    }
 }
 
 struct WorkflowExecutionPolicy {
@@ -346,9 +378,94 @@ final class WorkflowViewModel: ObservableObject {
             preserveReviewPreferences: true,
             approvedTranscript: ApprovedTranscriptReuseRequirement(
                 language: request.language,
-                revisionID: request.approvedRevisionID
+                revisionID: request.approvedRevisionID,
+                failureContext: "Создание тем"
             )
         )
+    }
+
+    var simpleSourceSubtitleWorkflowRequest: SimpleSourceSubtitleWorkflowRequest? {
+        guard !isRunning, !isStopping, mediaURL != nil,
+              humanReviewCheckpoint == nil, topicReviewCheckpoint == nil,
+              let projectURL,
+              let manifest = try? store.load(from: projectURL),
+              manifest.humanReviewState?.pendingCheckpoint == nil,
+              manifest.topicReviewState?.pendingCheckpoint == nil,
+              let language = manifest.languageProfile?.effective,
+              let revision = manifest.activeTranscriptRevision(for: language),
+              revision.reviewStatus == .approved else { return nil }
+
+        let layout = ProjectLayout(root: projectURL)
+        guard !simpleHasNonemptyFile(layout.subtitledVideoURL),
+              isSimpleApprovedSourceSubtitleReusable(
+                language: language,
+                revisionID: revision.id,
+                manifest: manifest,
+                projectURL: projectURL
+              ) else { return nil }
+
+        return .standard(language: language, approvedRevisionID: revision.id)
+    }
+
+    var canCreateSourceSubtitledVideoFromAcceptedTranscript: Bool {
+        simpleSourceSubtitleWorkflowRequest != nil
+    }
+
+    /// Starts only the existing shared full-video subtitle operation. The
+    /// fixed request is copied into `WorkflowSettings`; Advanced UI state is
+    /// never used as a transport channel or mutated by this Simple action.
+    @discardableResult
+    func startSimpleSourceSubtitledVideoFromAcceptedTranscript() -> Bool {
+        guard let request = simpleSourceSubtitleWorkflowRequest else { return false }
+        return startRun(
+            operations: request.operations,
+            fillerAnalysisBeforeReviewOverride: false,
+            subtitleStyleOverride: request.subtitleStyle,
+            subtitleSourceOverride: request.subtitleSource,
+            requireReusableTranscription: true,
+            preserveReviewPreferences: true,
+            approvedTranscript: ApprovedTranscriptReuseRequirement(
+                language: request.language,
+                revisionID: request.approvedRevisionID,
+                failureContext: "Создание видео с исходными субтитрами"
+            )
+        )
+    }
+
+    private func isSimpleApprovedSourceSubtitleReusable(
+        language: ArtifactLanguage,
+        revisionID: String,
+        manifest: ProjectManifest,
+        projectURL: URL
+    ) -> Bool {
+        let layout = ProjectLayout(root: projectURL)
+        let immutableURL = layout.subtitleRevisionURL(id: revisionID, language: language)
+        guard let fullSRT = try? Data(contentsOf: layout.fullSRTURL), !fullSRT.isEmpty,
+              let localizedSRT = try? Data(contentsOf: layout.subtitlesURL(language: language)), !localizedSRT.isEmpty,
+              let immutableSRT = try? Data(contentsOf: immutableURL), !immutableSRT.isEmpty,
+              fullSRT == localizedSRT, localizedSRT == immutableSRT,
+              SeminarTextCoreWhisperEvidenceImporter().validateLegacyWhisperJSON(at: layout.whisperJSONURL),
+              let parsed = try? SRTService().loadWithReport(from: layout.fullSRTURL),
+              SRTService().validateTimeline(
+                parsed.cues,
+                mediaDuration: SelectedTimingTimeline.permittedEnd(
+                    projectURL: projectURL,
+                    measuredDuration: manifest.durationSeconds
+                )
+              ).isEmpty,
+              TranscriptionQualityService().recoveryIssue(cues: parsed.cues) == nil else {
+            return false
+        }
+        guard let source = try? SubtitleSourceResolver.resolve(.source, manifest: manifest, projectURL: projectURL),
+              source.language == language,
+              !source.isTranslation,
+              let selectedSRT = try? Data(contentsOf: source.srtURL),
+              selectedSRT == immutableSRT else { return false }
+        return true
+    }
+
+    private func simpleHasNonemptyFile(_ url: URL) -> Bool {
+        ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 0
     }
 
     var translationDirection: (source: ArtifactLanguage, target: ArtifactLanguage)? {
@@ -1110,6 +1227,8 @@ final class WorkflowViewModel: ObservableObject {
         whisperLanguageOverride: String? = nil,
         fillerAnalysisBeforeReviewOverride: Bool? = nil,
         topicHumanReviewOverride: Bool? = nil,
+        subtitleStyleOverride: SubtitleStyleSettings? = nil,
+        subtitleSourceOverride: SubtitleSourceSelection? = nil,
         requireReusableTranscription: Bool = false,
         preserveReviewPreferences: Bool = false,
         approvedTranscript: ApprovedTranscriptReuseRequirement? = nil
@@ -1205,14 +1324,14 @@ final class WorkflowViewModel: ObservableObject {
             rangeEnd: end,
             fragmentName: fragmentName,
             burnFragmentSubtitles: burnFragmentSubtitles,
-            subtitleStyle: subtitleStyle,
+            subtitleStyle: subtitleStyleOverride ?? subtitleStyle,
             selectedTopicID: selectedTopicID.isEmpty ? nil : selectedTopicID,
             whisperModelPath: whisperModelPath,
             whisperLanguage: whisperLanguageOverride ?? (whisperLanguage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "auto" : whisperLanguage),
             transcriptionContext: WhisperTranscriptionContext.normalized(transcriptionContext),
             topicGranularity: topicGranularity,
             artifactLanguage: artifactLanguage,
-            subtitleSource: subtitleSource,
+            subtitleSource: subtitleSourceOverride ?? subtitleSource,
             quoteStart: quoteProvenance ? quoteStartText : nil,
             quoteEnd: quoteProvenance ? quoteEndText : nil,
             speedFactor: speedFactor,
@@ -2814,16 +2933,67 @@ final class WorkflowEngine: @unchecked Sendable {
               active.id == requirement.revisionID,
               active.reviewStatus == .approved,
               let full = try? Data(contentsOf: layout.fullSRTURL), !full.isEmpty,
-              let localized = try? Data(contentsOf: layout.subtitlesURL(language: requirement.language)),
+              let localized = try? Data(contentsOf: layout.subtitlesURL(language: requirement.language)), !localized.isEmpty,
               let immutable = try? Data(contentsOf: layout.subtitleRevisionURL(
                 id: requirement.revisionID,
                 language: requirement.language
-              )),
+              )), !immutable.isEmpty,
               full == localized, localized == immutable else {
             throw WorkflowError.processFailed(
-                "Создание тем остановлено: принятая расшифровка изменилась или больше не утверждена. Темы и повторный Whisper не запускались."
+                "\(requirement.failureContext) остановлено: принятая расшифровка изменилась или больше не утверждена. Повторный Whisper не запускался."
             )
         }
+        guard isApprovedSourceSubtitleReusable(
+            language: requirement.language,
+            revisionID: requirement.revisionID,
+            manifest: manifest,
+            projectURL: projectURL
+        ) else {
+            throw WorkflowError.processFailed(
+                "\(requirement.failureContext) остановлено: утверждённая расшифровка больше не пригодна для безопасного повторного использования. Повторный Whisper не запускался."
+            )
+        }
+    }
+
+    /// This is deliberately stricter than `SubtitleSourceResolver.resolve`:
+    /// Simple mode may start only from the approved source revision, while the
+    /// existing resolver continues to own generic Advanced source selection.
+    /// All source representations must remain byte-identical so a stale local
+    /// SRT cannot silently replace the accepted transcript.
+    private func isApprovedSourceSubtitleReusable(
+        language: ArtifactLanguage,
+        revisionID: String,
+        manifest: ProjectManifest,
+        projectURL: URL
+    ) -> Bool {
+        let layout = ProjectLayout(root: projectURL)
+        let immutableURL = layout.subtitleRevisionURL(id: revisionID, language: language)
+        guard let fullSRT = try? Data(contentsOf: layout.fullSRTURL), !fullSRT.isEmpty,
+              let localizedSRT = try? Data(contentsOf: layout.subtitlesURL(language: language)), !localizedSRT.isEmpty,
+              let immutableSRT = try? Data(contentsOf: immutableURL), !immutableSRT.isEmpty,
+              fullSRT == localizedSRT, localizedSRT == immutableSRT,
+              SeminarTextCoreWhisperEvidenceImporter().validateLegacyWhisperJSON(at: layout.whisperJSONURL),
+              let parsed = try? SRTService().loadWithReport(from: layout.fullSRTURL),
+              SRTService().validateTimeline(
+                parsed.cues,
+                mediaDuration: SelectedTimingTimeline.permittedEnd(
+                    projectURL: projectURL,
+                    measuredDuration: manifest.durationSeconds
+                )
+              ).isEmpty,
+              TranscriptionQualityService().recoveryIssue(cues: parsed.cues) == nil else {
+            return false
+        }
+        do {
+            let source = try SubtitleSourceResolver.resolve(.source, manifest: manifest, projectURL: projectURL)
+            guard source.language == language,
+                  !source.isTranslation,
+                  let selectedSRT = try? Data(contentsOf: source.srtURL),
+                  selectedSRT == immutableSRT else { return false }
+        } catch {
+            return false
+        }
+        return true
     }
 
     private func revisionMatchingWorkingSubtitle(
