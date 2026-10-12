@@ -165,6 +165,7 @@ struct SimpleRenderedControlsProbe {
         try verifyTopicControls(project: scratch.appendingPathComponent("topics"), media: media)
         try verifyTranslationControls(project: scratch.appendingPathComponent("translation"), media: media)
         try verifySourceSubtitledVideoControls(project: scratch.appendingPathComponent("subtitled-video"), media: media)
+        try verifySimpleCutRangeControls(project: scratch.appendingPathComponent("simple-cut-range"), media: media)
         try verifyMixedTopicVariantReopen(project: scratch.appendingPathComponent("mixed-topics"), media: media)
         // Each Source/Translation scenario has its own project. Source review can
         // legitimately invalidate downstream artifacts; the retained fixture is untouched.
@@ -1192,6 +1193,198 @@ struct SimpleRenderedControlsProbe {
             $0.accessibilityIdentifier() == "simple.subtitledVideo.translation.create"
         }, "Reopening a completed translated subtitled video exposed regeneration")
         print("RENDERED_SOURCE_SUBTITLED_VIDEO_CONTROLS_PASS: source and approved target requests, progress/stop/error, source preservation, target open/reopen")
+    }
+
+    private static func verifySimpleCutRangeControls(project: URL, media: URL) throws {
+        _ = try makeProject(project, media: media, source: .ru)
+        let store = ProjectStore()
+        let layout = ProjectLayout(root: project)
+
+        let model = WorkflowViewModel()
+        model.openProject(project)
+        model.selectedOperations = [.transcribe, .topicTimecoding]
+        model.rangeStartText = "00:00:01.000"
+        model.rangeEndText = "00:00:03.000"
+        model.fragmentName = "Advanced fragment name"
+        model.burnFragmentSubtitles = true
+        model.subtitleSource = .approvedTranslation(.en)
+        model.subtitleStyle = SubtitleStyleSettings(
+            textColorHex: "#FF00FF", outlineColorHex: "#000000", fontName: "Georgia", fontSize: 31,
+            outlineWidth: 4, position: .top, backgroundOpacity: 0.6
+        )
+        let advancedOperations = model.selectedOperations
+        let advancedStart = model.rangeStartText
+        let advancedEnd = model.rangeEndText
+        let advancedName = model.fragmentName
+        let advancedBurn = model.burnFragmentSubtitles
+        let advancedSource = model.subtitleSource
+        let advancedStyle = model.subtitleStyle
+
+        guard let zeroRequest = model.simpleCutRangeWorkflowRequest(
+            startText: "00:00:00", endText: "00:00:02"
+        ) else {
+            throw RenderedProbeFailure(message: "Approved source did not expose a Simple zero-start cut request")
+        }
+        try require(zeroRequest.operations == [.cutRange]
+            && zeroRequest.start == 0 && zeroRequest.end == 2
+            && zeroRequest.fragmentName == "Фрагмент"
+            && !zeroRequest.burnFragmentSubtitles
+            && zeroRequest.subtitleSource == .source
+            && zeroRequest.subtitleStyle == .standard
+            && zeroRequest.language == .ru
+            && zeroRequest.approvedRevisionID == "approved-ru",
+            "Simple cut request is not the fixed source-only cutRange request")
+        for invalid in [
+            ("00:00:02", "00:00:02"),
+            ("00:00:03", "00:00:02"),
+            ("-1", "00:00:02"),
+            ("wrong", "00:00:02"),
+            ("00:00:00", "00:00:05")
+        ] {
+            try require(model.simpleCutRangeWorkflowRequest(startText: invalid.0, endText: invalid.1) == nil
+                && !model.simpleCutRangeAvailability(startText: invalid.0, endText: invalid.1).canCreate,
+                "Invalid Simple range \(invalid.0)-\(invalid.1) exposed a request")
+        }
+        try require(model.selectedOperations == advancedOperations
+            && model.rangeStartText == advancedStart && model.rangeEndText == advancedEnd
+            && model.fragmentName == advancedName && model.burnFragmentSubtitles == advancedBurn
+            && model.subtitleSource == advancedSource && model.subtitleStyle == advancedStyle,
+            "Inspecting Simple cut ranges rewrote Advanced cut controls")
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: ContentView(model: model))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        settle(window)
+        try press("simple.goal.fragment", in: window)
+        _ = try element("simple.fragment.panel", in: window)
+        let startField = try element("simple.fragment.start", in: window)
+        let endField = try element("simple.fragment.end", in: window)
+        try require(startField.accessibilityLabel() == "Начало фрагмента"
+            && endField.accessibilityLabel() == "Конец фрагмента",
+            "Simple cut panel did not render human-readable start/end fields")
+        try require(renderedText(try element("simple.fragment.availability", in: window))
+            .contains("утверждёнными исходными субтитрами"),
+            "Simple cut panel did not disclose its accepted source prerequisite")
+        let create = try element("simple.fragment.create", in: window)
+        try require(create.accessibilityRole() == .button
+            && create.accessibilityLabel() == "Создать фрагмент" && create.isAccessibilityEnabled(),
+            "Simple zero-start range has no enabled rendered create action")
+
+        let activationProject = project.appendingPathComponent("activation")
+        _ = try makeProject(activationProject, media: media, source: .ru)
+        let activationHistory = ProjectHistoryStore(indexURL: project.appendingPathComponent("activation-history.json"))
+        let activationStore = ProjectStore(history: activationHistory)
+        let activationController = ProcessController()
+        let activation = WorkflowViewModel(
+            engine: WorkflowEngine(store: activationStore, controller: activationController),
+            store: activationStore,
+            historyStore: activationHistory
+        )
+        activation.openProject(activationProject)
+        activation.selectedOperations = advancedOperations
+        activation.rangeStartText = advancedStart
+        activation.rangeEndText = advancedEnd
+        activation.fragmentName = advancedName
+        activation.burnFragmentSubtitles = advancedBurn
+        activation.subtitleSource = advancedSource
+        activation.subtitleStyle = advancedStyle
+        let activationWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        activationWindow.isReleasedWhenClosed = false
+        activationWindow.contentView = NSHostingView(rootView: ContentView(model: activation))
+        activationWindow.makeKeyAndOrderFront(nil)
+        defer { activationWindow.close() }
+        settle(activationWindow)
+        try press("simple.goal.fragment", in: activationWindow)
+        let activationCreate = try element("simple.fragment.create", in: activationWindow)
+        try require(activationCreate.isAccessibilityEnabled() && activationCreate.accessibilityPerformPress(),
+            "Simple cut CTA did not activate")
+        try require(activation.isRunning && !activation.isStopping,
+            "Simple cut CTA did not enter the shared workflow")
+        try require(activation.selectedOperations == advancedOperations
+            && activation.rangeStartText == advancedStart && activation.rangeEndText == advancedEnd
+            && activation.fragmentName == advancedName && activation.burnFragmentSubtitles == advancedBurn
+            && activation.subtitleSource == advancedSource && activation.subtitleStyle == advancedStyle,
+            "Simple cut CTA rewrote Advanced cut controls")
+        activation.stop()
+        try require(activation.isStopping, "Simple cut CTA did not reuse the shared Stop action")
+        for _ in 0..<200 where activation.isRunning {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        try require(!activation.isRunning && activation.status == "Остановлено"
+            && activationController.launchedExecutables.isEmpty,
+            "Immediate Simple cut cancellation bypassed shared lifecycle")
+        let activationOperations = (try activationStore.load(from: activationProject)).workflow?.operations ?? [:]
+        let forbiddenOperations = [
+            WorkflowOperation.transcribe, .topicTimecoding, .translateTranscript,
+            .burnSubtitles, .burnFragmentSubtitles, .cutTopic, .renderFragment
+        ]
+        try require(forbiddenOperations.allSatisfy { activationOperations[$0.rawValue] == nil },
+            "Simple cut started an operation outside cutRange: \(activationOperations.keys.sorted())")
+        try require(!nodes(activationWindow).contains { $0.accessibilityIdentifier() == "simple.fragment.ready" },
+            "Cancelled Simple cut displayed a false ready result")
+
+        model.progress = WorkflowProgress(operation: .cutRange, operationFraction: 0.3, overallFraction: 0.3,
+            elapsed: 1, estimatedTotal: nil, remaining: nil, isIndeterminate: true)
+        model.isRunning = true
+        settle(window)
+        try require(renderedText(try element("simple.progress.stage", in: window)).contains("Создаём фрагмент"),
+            "Simple cut did not render the shared cutRange progress stage")
+        try require(element("simple.progress.stop", in: window).isAccessibilityEnabled(),
+            "Simple cut progress did not render Stop")
+        try require(!element("simple.fragment.create", in: window).isAccessibilityEnabled(),
+            "Simple cut exposed duplicate create while running")
+        model.isStopping = true
+        settle(window)
+        try require(!element("simple.progress.stop", in: window).isAccessibilityEnabled()
+            && renderedText(try element("simple.progress.stage", in: window)).contains("Останавливаем обработку"),
+            "Simple cut allowed repeated cancellation")
+        model.isStopping = false
+        model.isRunning = false
+        model.status = "Ошибка"
+        settle(window)
+        try require(element("simple.fragment.create", in: window).isAccessibilityEnabled(),
+            "Simple cut failure did not retain an honest retry action")
+
+        let fullVideo = layout.subtitledVideoURL
+        try FileManager.default.createDirectory(at: fullVideo.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("existing full video".utf8).write(to: fullVideo)
+        try store.registerOutput(kind: "subtitled-video", url: fullVideo, in: project)
+        let fragment = layout.fragmentVideoURL(kind: "simple-cut")
+        try FileManager.default.createDirectory(at: fragment.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("ready fragment".utf8).write(to: fragment)
+        try store.registerOutput(kind: "fragment-video", url: fragment, in: project)
+        model.status = "Завершено"
+        let persistedOutputs = try store.load(from: project).outputs
+        let preservedFullVideo = try Data(contentsOf: fullVideo) == Data("existing full video".utf8)
+        try require(persistedOutputs.contains { $0.kind == "subtitled-video" && $0.path == fullVideo.path }
+            && persistedOutputs.contains { $0.kind == "fragment-video" && $0.path == fragment.path }
+            && preservedFullVideo,
+            "Registering the cut result displaced an existing full-video result")
+        model.loadDetectedResults()
+        try require(model.outputs.contains { $0.kind == "fragment-video" },
+            "Registered cut result was not rediscovered")
+        settle(window)
+        _ = try element("simple.fragment.ready", in: window)
+        _ = try element("simple.fragment.open", in: window)
+
+        let reopened = WorkflowViewModel()
+        reopened.openProject(project)
+        let reopenedWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        reopenedWindow.isReleasedWhenClosed = false
+        reopenedWindow.contentView = NSHostingView(rootView: ContentView(model: reopened))
+        reopenedWindow.makeKeyAndOrderFront(nil)
+        defer { reopenedWindow.close() }
+        settle(reopenedWindow)
+        try press("simple.goal.fragment", in: reopenedWindow)
+        _ = try element("simple.fragment.ready", in: reopenedWindow)
+        _ = try element("simple.fragment.open", in: reopenedWindow)
+        try require(!reopened.isRunning, "Reopening a completed Simple cut started a duplicate render")
+        print("RENDERED_SIMPLE_CUT_RANGE_CONTROLS_PASS: valid/invalid ranges, fixed request, stop, result/open/reopen, full-video and Advanced preservation")
     }
 
     private static func removeTopics(from project: URL, media: URL) throws {

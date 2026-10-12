@@ -160,8 +160,12 @@ struct ContentView: View {
     @State private var simpleReviewTarget: SimpleProjectHomeReviewTarget?
     @State private var showsSimpleTextContent = false
     @State private var showsSimpleSubtitledVideo = false
+    @State private var showsSimpleFragment = false
     @State private var simpleSubtitledVideoSource: SimpleSubtitledVideoSource = .source
     @State private var simpleSubtitledVideoActionStarted = false
+    @State private var simpleFragmentStartText = "00:00:00"
+    @State private var simpleFragmentEndText = "00:00:02"
+    @State private var simpleFragmentActionStarted = false
     @State private var simpleTranscription = SimpleTranscriptionPresentation()
     @State private var simpleTranslation = SimpleTranslationPresentation()
 
@@ -260,8 +264,12 @@ struct ContentView: View {
             reviewIssuesOnly = false
             showsSimpleTextContent = false
             showsSimpleSubtitledVideo = false
+            showsSimpleFragment = false
             simpleSubtitledVideoSource = .source
             simpleSubtitledVideoActionStarted = false
+            simpleFragmentStartText = "00:00:00"
+            simpleFragmentEndText = "00:00:02"
+            simpleFragmentActionStarted = false
         }
         .onChange(of: presentationMode) { _, mode in
             if mode != .simple {
@@ -780,6 +788,24 @@ struct ContentView: View {
                     .accessibilityIdentifier("simple.subtitledVideo.panel")
                 }
 
+                if showsSimpleFragment {
+                    VStack(alignment: .leading, spacing: 9) {
+                        HStack {
+                            simpleSectionTitle("Фрагмент видео")
+                            Spacer()
+                            Button("Скрыть") { showsSimpleFragment = false }
+                                .buttonStyle(.borderless)
+                                .accessibilityIdentifier("simple.fragment.collapse")
+                        }
+                        simpleCutRangePanel()
+                    }
+                    .padding(10)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("simple.fragment.panel")
+                }
+
                 simpleSectionTitle("Последние результаты")
                 if state.recentResults.isEmpty {
                     Text("Готовых результатов пока нет")
@@ -1027,6 +1053,8 @@ struct ContentView: View {
                 showsSimpleTextContent = true
             } else if goal == .subtitledVideo {
                 showsSimpleSubtitledVideo = true
+            } else if goal == .fragment {
+                showsSimpleFragment = true
             } else {
                 presentationMode = .advanced
                 selectedResultsTab = 0
@@ -1222,6 +1250,87 @@ struct ContentView: View {
         }
     }
 
+    @ViewBuilder
+    private func simpleCutRangePanel() -> some View {
+        let availability = model.simpleCutRangeAvailability(
+            startText: simpleFragmentStartText,
+            endText: simpleFragmentEndText
+        )
+        VStack(alignment: .leading, spacing: 8) {
+            Text("По времени")
+                .font(.subheadline.weight(.semibold))
+            HStack(alignment: .top, spacing: 12) {
+                simpleFragmentTimeField("Начало", text: $simpleFragmentStartText, identifier: "simple.fragment.start")
+                simpleFragmentTimeField("Конец", text: $simpleFragmentEndText, identifier: "simple.fragment.end")
+            }
+            Text(availability.message)
+                .font(.caption)
+                .foregroundStyle(availability.canCreate ? Color.secondary : Color.red)
+                .accessibilityIdentifier("simple.fragment.availability")
+            if simpleFragmentActionStarted, model.status == "Ошибка" {
+                Text(model.alert?.message ?? "Фрагмент не создан. Исправьте проблему и повторите попытку.")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier("simple.fragment.error")
+            }
+            Button("Создать фрагмент") {
+                simpleFragmentActionStarted = model.startSimpleCutRangeFromAcceptedTranscript(
+                    startText: simpleFragmentStartText,
+                    endText: simpleFragmentEndText
+                )
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!availability.canCreate)
+            .accessibilityIdentifier("simple.fragment.create")
+
+            if let output = simpleLatestFragmentOutput {
+                HStack(spacing: 10) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Последний фрагмент готов")
+                            .fontWeight(.semibold)
+                        Text("Готово")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Открыть") { openSimpleResult(output.path) }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("simple.fragment.open")
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("simple.fragment.ready")
+            }
+        }
+    }
+
+    private func simpleFragmentTimeField(
+        _ title: String,
+        text: Binding<String>,
+        identifier: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption.bold())
+            TextField("ЧЧ:ММ:СС", text: text)
+                .monospacedDigit()
+                .accessibilityLabel("\(title) фрагмента")
+                .accessibilityIdentifier(identifier)
+        }
+    }
+
+    private var simpleLatestFragmentOutput: ProjectOutput? {
+        model.outputs
+            .filter {
+                $0.kind == "fragment-video"
+                    && $0.isGeneratedMedia
+                    && FileManager.default.fileExists(atPath: $0.path)
+            }
+            .sorted { $0.createdAt > $1.createdAt }
+            .first
+    }
+
     private func simpleTranslatedSubtitledVideoOutput(language: ArtifactLanguage) -> ProjectOutput? {
         model.outputs.first {
             $0.kind == "subtitled-video-\(language.rawValue)"
@@ -1374,6 +1483,7 @@ struct ContentView: View {
         if model.isStopping { return "Останавливаем обработку" }
         if model.progress.operation == .translateTranscript { return "Создаём перевод" }
         if model.progress.operation == .burnSubtitles { return "Создаём видео с субтитрами" }
+        if model.progress.operation == .cutRange { return "Создаём фрагмент" }
         return SimpleTranscriptionPresentation.stage(operation: model.progress.operation, isStopping: false)
     }
 
@@ -1417,6 +1527,9 @@ struct ContentView: View {
 
     private func simpleCurrentState(_ state: SimpleProjectHomeState) -> String {
         if model.isRunning {
+            if model.progress.operation == .cutRange {
+                return model.isStopping ? "Останавливаем обработку" : "Создаём фрагмент"
+            }
             return SimpleTranscriptionPresentation.stage(operation: model.progress.operation, isStopping: model.isStopping)
         }
         if model.status == "Остановлено" { return "Обработка остановлена" }
