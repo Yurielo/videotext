@@ -182,7 +182,8 @@ struct SimpleProjectHomeStateService {
             artifacts: [transcription, topics, translation],
             recentResults: userFacingResults(
                 artifacts: [transcription, topics, translation],
-                outputs: discoveredOutputs
+                outputs: discoveredOutputs,
+                fragments: manifest?.fragments ?? []
             )
         )
     }
@@ -364,7 +365,8 @@ struct SimpleProjectHomeStateService {
 
     private func userFacingResults(
         artifacts: [SimpleProjectHomeArtifact],
-        outputs: [ProjectOutput]
+        outputs: [ProjectOutput],
+        fragments: [FragmentRecord]
     ) -> [SimpleProjectHomeResult] {
         let readableArtifacts = artifacts.compactMap { artifact -> SimpleProjectHomeResult? in
             guard artifact.readiness == .ready, let path = artifact.openOutputPath else { return nil }
@@ -375,19 +377,49 @@ struct SimpleProjectHomeStateService {
                 isGeneratedMedia: false
             )
         }
-        let media = outputs.filter { $0.isGeneratedMedia && isNonemptyFile(at: $0.path) }.map {
-            SimpleProjectHomeResult(
-                title: $0.title,
-                path: $0.path,
-                createdAt: $0.createdAt,
-                isGeneratedMedia: true
-            )
-        }
-        return Dictionary(grouping: readableArtifacts + media, by: \.path)
+        // A fragment is one user-facing result even when its persisted record
+        // has technical source, subtitled, and processed media paths. Prefer its
+        // finished representation, then retain all other generated media from
+        // discovery. This reconciles an opened project's manifest with a fresh
+        // result scan without adding or changing any persisted result record.
+        let fragmentPaths = Set(fragments.flatMap { fragment in
+            [fragment.videoPath, fragment.subtitledVideoPath, fragment.processedVideoPath].compactMap { $0 }
+        })
+        let discoveredMedia = outputs
+            .filter { $0.isGeneratedMedia && !fragmentPaths.contains($0.path) && isNonemptyFile(at: $0.path) }
+            .map { output in
+                SimpleProjectHomeResult(
+                    title: output.title,
+                    path: output.path,
+                    createdAt: output.createdAt,
+                    isGeneratedMedia: true
+                )
+            }
+        let persistedFragments = fragments.compactMap(fragmentResult)
+        return Dictionary(grouping: readableArtifacts + discoveredMedia + persistedFragments, by: \.path)
             .compactMap { $0.value.first }
             .sorted { $0.createdAt > $1.createdAt }
             .prefix(6)
             .map { $0 }
+    }
+
+    private func fragmentResult(_ fragment: FragmentRecord) -> SimpleProjectHomeResult? {
+        let candidates: [(path: String?, kind: String)] = [
+            (fragment.processedVideoPath, "processed-fragment-video"),
+            (fragment.subtitledVideoPath, fragment.language.map { "fragment-subtitled-video-\($0.rawValue)" } ?? "fragment-subtitled-video"),
+            (fragment.videoPath, "fragment-video")
+        ]
+        guard let candidate = candidates.first(where: { path, _ in
+            path.map(isNonemptyFile) == true
+        }), let path = candidate.path else {
+            return nil
+        }
+        return SimpleProjectHomeResult(
+            title: ProjectOutput(id: path, kind: candidate.kind, path: path, createdAt: fragment.createdAt).title,
+            path: path,
+            createdAt: fragment.createdAt,
+            isGeneratedMedia: true
+        )
     }
 
     private func fileDate(at path: String) -> Date {
