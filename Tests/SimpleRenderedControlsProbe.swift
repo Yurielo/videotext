@@ -230,6 +230,7 @@ struct SimpleRenderedControlsProbe {
         try verifyTranslationControls(project: scratch.appendingPathComponent("translation"), media: media)
         try verifySourceSubtitledVideoControls(project: scratch.appendingPathComponent("subtitled-video"), media: media)
         try verifySimpleCutRangeControls(project: scratch.appendingPathComponent("simple-cut-range"), media: media)
+        try verifySimpleTopicCutControls(project: scratch.appendingPathComponent("simple-topic-cut"), media: media)
         try verifyMixedTopicVariantReopen(project: scratch.appendingPathComponent("mixed-topics"), media: media)
         // Each Source/Translation scenario has its own project. Source review can
         // legitimately invalidate downstream artifacts; the retained fixture is untouched.
@@ -303,11 +304,20 @@ struct SimpleRenderedControlsProbe {
                 boundaryReason: "Start of fixture", cueIds: [1, 2])]
         )
         try TopicFileService().save(topics, projectURL: project, language: source, granularity: .normal, updateLegacyFiles: true)
+        let topicRevisionID = "approved-topics"
+        let approvedTopicsURL = layout.topicRevisionJSONURL(id: topicRevisionID)
+        let approvedTopicsTextURL = layout.topicRevisionTextURL(id: topicRevisionID)
+        try FileManager.default.createDirectory(at: approvedTopicsURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(contentsOf: layout.topicsURL(language: source, granularity: .normal))
+            .write(to: approvedTopicsURL, options: .atomic)
+        try Data(contentsOf: layout.topicsTextURL(language: source, granularity: .normal))
+            .write(to: approvedTopicsTextURL, options: .atomic)
         let topic = TopicRevision(
-            id: "approved-topics", language: source, granularity: .normal, parentRevisionID: nil,
-            jsonPath: layout.topicsURL(language: source, granularity: .normal).path,
-            textPath: layout.topicsTextURL(language: source, granularity: .normal).path,
-            contentHash: StableTopicHash.string("fixture-topics"), status: .approved, createdAt: Date()
+            id: topicRevisionID, language: source, granularity: .normal, parentRevisionID: nil,
+            jsonPath: approvedTopicsURL.path,
+            textPath: approvedTopicsTextURL.path,
+            contentHash: StableTopicHash.string(try String(contentsOf: approvedTopicsURL, encoding: .utf8)),
+            status: .approved, createdAt: Date()
         )
         manifest.topicRevisions = [topic]
         manifest.topicReviewState = TopicReviewState(enabled: true, activeRevisionIDs: [topic.variantKey: topic.id], pendingCheckpoint: nil)
@@ -1469,6 +1479,144 @@ struct SimpleRenderedControlsProbe {
         _ = try element("simple.fragment.open", in: reopenedWindow)
         try require(!reopened.isRunning, "Reopening a completed Simple cut started a duplicate render")
         print("RENDERED_SIMPLE_CUT_RANGE_CONTROLS_PASS: valid/invalid ranges, fixed request, stop, result/open/reopen, full-video and Advanced preservation")
+    }
+
+    private static func verifySimpleTopicCutControls(project: URL, media: URL) throws {
+        let unavailableProject = project.appendingPathComponent("unavailable")
+        try removeTopics(from: unavailableProject, media: media)
+        let unavailable = WorkflowViewModel()
+        unavailable.openProject(unavailableProject)
+        let unavailableWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        unavailableWindow.isReleasedWhenClosed = false
+        unavailableWindow.contentView = NSHostingView(rootView: ContentView(model: unavailable))
+        unavailableWindow.makeKeyAndOrderFront(nil)
+        defer { unavailableWindow.close() }
+        settle(unavailableWindow)
+        try press("simple.goal.fragment", in: unavailableWindow)
+        _ = try element("simple.fragment.topic.unavailable", in: unavailableWindow)
+        try require(!element("simple.fragment.topic.create", in: unavailableWindow).isAccessibilityEnabled(),
+            "Simple topic cut exposed a create action without an approved topic snapshot")
+
+        _ = try makeProject(project, media: media, source: .ru)
+        let store = ProjectStore()
+        let layout = ProjectLayout(root: project)
+        let model = WorkflowViewModel()
+        model.openProject(project)
+        model.selectedOperations = [.transcribe, .topicTimecoding]
+        model.selectedTopicID = "advanced-topic"
+        model.artifactLanguage = .en
+        model.topicGranularity = .detailed
+        let advancedOperations = model.selectedOperations
+        let advancedTopicID = model.selectedTopicID
+        let advancedLanguage = model.artifactLanguage
+        let advancedGranularity = model.topicGranularity
+
+        let options = model.simpleApprovedTopicOptions
+        try require(options.count == 1
+            && options[0].id == "topic-1"
+            && options[0].title == "Approved fixture topic"
+            && options[0].start == 0 && options[0].end == 4,
+            "Simple topic picker did not expose exactly the approved immutable topic range")
+        guard let request = model.simpleTopicCutWorkflowRequest(topicID: options[0].id) else {
+            throw RenderedProbeFailure(message: "Approved Simple topic did not expose a cut request")
+        }
+        try require(request.operations == [.cutTopic]
+            && request.topicID == options[0].id
+            && request.language == .ru && request.granularity == .normal
+            && request.topicRevisionID == "approved-topics"
+            && request.approvedRevisionID == "approved-ru"
+            && request.subtitleSource == .source && request.subtitleStyle == .standard,
+            "Simple topic cut request is not the fixed approved source-only cutTopic request")
+        try require(model.simpleTopicCutWorkflowRequest(topicID: "missing-topic") == nil
+            && !model.simpleTopicCutAvailability(topicID: "missing-topic").canCreate,
+            "Unknown topic exposed a Simple cut request")
+        try require(model.selectedOperations == advancedOperations
+            && model.selectedTopicID == advancedTopicID
+            && model.artifactLanguage == advancedLanguage
+            && model.topicGranularity == advancedGranularity,
+            "Inspecting Simple topic choices rewrote Advanced bindings")
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: ContentView(model: model))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        settle(window)
+        try press("simple.goal.fragment", in: window)
+        _ = try element("simple.fragment.topic.picker", in: window)
+        try require(!element("simple.fragment.topic.create", in: window).isAccessibilityEnabled()
+            && renderedText(try element("simple.fragment.topic.availability", in: window)).contains("Выберите утверждённую тему"),
+            "Simple topic cut defaulted a topic or exposed an enabled creation action")
+        try require(model.simpleTopicCutAvailability(topicID: options[0].id).canCreate,
+            "Explicit approved topic was not eligible for Simple creation")
+        try require(model.startSimpleTopicCutFromAcceptedTranscript(topicID: options[0].id),
+            "Simple topic adapter did not activate the shared cutTopic workflow")
+        try require(model.isRunning && !model.isStopping,
+            "Simple topic create action did not enter the shared workflow")
+        try require(model.selectedOperations == advancedOperations
+            && model.selectedTopicID == advancedTopicID
+            && model.artifactLanguage == advancedLanguage
+            && model.topicGranularity == advancedGranularity,
+            "Simple topic create action rewrote Advanced bindings")
+        model.stop()
+        try require(model.isStopping, "Simple topic cut did not reuse the shared Stop action")
+        for _ in 0..<200 where model.isRunning {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        try require(!model.isRunning && model.status == "Остановлено",
+            "Simple topic cancellation bypassed shared lifecycle")
+        let operationRecords = (try store.load(from: project)).workflow?.operations ?? [:]
+        let forbidden = [
+            WorkflowOperation.transcribe, .topicTimecoding, .translateTranscript,
+            .burnSubtitles, .burnFragmentSubtitles, .cutRange, .renderFragment
+        ]
+        try require(forbidden.allSatisfy { operationRecords[$0.rawValue] == nil },
+            "Simple topic cut started an operation outside cutTopic: \(operationRecords.keys.sorted())")
+        try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.fragment.topic.ready" },
+            "Cancelled Simple topic cut displayed a false ready result")
+
+        model.progress = WorkflowProgress(operation: .cutTopic, operationFraction: 0.3, overallFraction: 0.3,
+            elapsed: 1, estimatedTotal: nil, remaining: nil, isIndeterminate: true)
+        model.isRunning = true
+        settle(window)
+        try require(renderedText(try element("simple.progress.stage", in: window)).contains("Создаём фрагмент")
+            && element("simple.progress.stop", in: window).isAccessibilityEnabled()
+            && !element("simple.fragment.topic.create", in: window).isAccessibilityEnabled(),
+            "Simple topic cut did not show shared progress and duplicate-create protection")
+        model.isStopping = true
+        settle(window)
+        try require(!element("simple.progress.stop", in: window).isAccessibilityEnabled()
+            && renderedText(try element("simple.progress.stage", in: window)).contains("Останавливаем обработку"),
+            "Simple topic cut allowed repeated cancellation")
+        model.isStopping = false
+        model.isRunning = false
+
+        let fragment = layout.fragmentVideoURL(kind: "simple-topic")
+        try FileManager.default.createDirectory(at: fragment.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("ready topic fragment".utf8).write(to: fragment)
+        try store.registerOutput(kind: "fragment-video", url: fragment, in: project)
+        model.status = "Завершено"
+        model.loadDetectedResults()
+        settle(window)
+        _ = try element("simple.fragment.topic.ready", in: window)
+        _ = try element("simple.fragment.topic.open", in: window)
+
+        let reopened = WorkflowViewModel()
+        reopened.openProject(project)
+        let reopenedWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        reopenedWindow.isReleasedWhenClosed = false
+        reopenedWindow.contentView = NSHostingView(rootView: ContentView(model: reopened))
+        reopenedWindow.makeKeyAndOrderFront(nil)
+        defer { reopenedWindow.close() }
+        settle(reopenedWindow)
+        try press("simple.goal.fragment", in: reopenedWindow)
+        _ = try element("simple.fragment.topic.ready", in: reopenedWindow)
+        _ = try element("simple.fragment.topic.open", in: reopenedWindow)
+        try require(!reopened.isRunning, "Reopening a completed Simple topic cut started duplicate processing")
+        print("RENDERED_SIMPLE_TOPIC_CUT_CONTROLS_PASS: unavailable, explicit approved selection, fixed request, progress/stop, result/open/reopen, Advanced preservation")
     }
 
     private static func removeTopics(from project: URL, media: URL) throws {

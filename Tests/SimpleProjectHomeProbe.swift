@@ -7,6 +7,7 @@ struct SimpleProjectHomeProbe {
         try verifiesSimpleNavigationContract()
         try verifiesApprovedAndPendingStates()
         try verifiesUserFacingResultResolution()
+        try verifiesPersistedFragmentsRemainInRecentResults()
         try verifiesReadableTextDoesNotFallBackToSupportFiles()
         try verifiesSelectedTopicVariantUsesItsOwnTXT()
         try verifiesApprovedCorrectionTargetsInBothDirections()
@@ -219,6 +220,69 @@ struct SimpleProjectHomeProbe {
         try expect(pendingTranslation.artifact(.translation).readiness == .needsReview, "Pending Translation Review показан как готовый")
         try expect(pendingTranslation.artifact(.translation).reviewTarget == .translation, "Pending Translation потерял correction target")
         try expect(pendingTranslation.artifact(.translation).openOutputPath == nil, "Pending перевод ошибочно доступен для открытия")
+    }
+
+    private static func verifiesPersistedFragmentsRemainInRecentResults() throws {
+        let service = SimpleProjectHomeStateService()
+        let projectURL = try makeProject("persisted-fragments")
+        defer { removeProject(projectURL) }
+        let layout = ProjectLayout(root: projectURL)
+        let topicVideo = layout.fragmentVideoURL(kind: "topic-approved")
+        let topicSubtitled = layout.fragmentSubtitledVideoURL(kind: "topic-approved")
+        let rangeVideo = layout.fragmentVideoURL(kind: "range")
+        let sourceSubtitled = layout.subtitledVideoURL
+        let translatedSubtitled = layout.subtitledVideoURL(language: .en)
+        for url in [topicVideo, topicSubtitled, rangeVideo, sourceSubtitled, translatedSubtitled] {
+            try writeText("media", to: url)
+        }
+
+        let topicFragment = FragmentRecord(
+            id: "topic-approved", name: "Введение", start: 0, end: 20,
+            createdAt: Date(timeIntervalSince1970: 40), videoPath: topicVideo.path,
+            subtitlePath: layout.fragmentSRTURL(kind: "topic-approved").path,
+            subtitledVideoPath: topicSubtitled.path, ffprobeReportPath: nil,
+            style: .standard, language: .ru, topicGranularity: .normal, topicID: "topic-1"
+        )
+        let rangeFragment = FragmentRecord(
+            id: "range", name: "Диапазон", start: 20, end: 30,
+            createdAt: Date(timeIntervalSince1970: 30), videoPath: rangeVideo.path,
+            subtitlePath: layout.fragmentSRTURL(kind: "range").path,
+            subtitledVideoPath: nil, ffprobeReportPath: nil, style: .standard
+        )
+        var manifest = baseManifest(language: .ru)
+        manifest.fragments = [topicFragment, rangeFragment]
+        let outputs = [
+            output(kind: "fragment-video", path: topicVideo.path, date: 40),
+            output(kind: "fragment-subtitled-video-ru", path: topicSubtitled.path, date: 40),
+            output(kind: "fragment-video", path: rangeVideo.path, date: 30),
+            output(kind: "subtitled-video", path: sourceSubtitled.path, date: 20),
+            output(kind: "subtitled-video-en", path: translatedSubtitled.path, date: 10),
+            output(kind: "fragment-video", path: projectURL.appendingPathComponent("cancelled.mp4").path, date: 50)
+        ]
+
+        let immediate = service.make(projectURL: projectURL, manifest: manifest, topicsDetail: nil, discoveredOutputs: outputs)
+        let topicEntries = immediate.recentResults.filter { $0.path == topicSubtitled.path || $0.path == topicVideo.path }
+        try expect(topicEntries.count == 1, "Один topic fragment не должен дублироваться source/subtitled файлами")
+        try expect(topicEntries.first?.path == topicSubtitled.path, "Recent results должен открывать завершённый topic fragment")
+        try expect(immediate.recentResults.contains(where: { $0.path == rangeVideo.path }), "Фрагмент по времени исчез из recent results")
+        try expect(immediate.recentResults.contains(where: { $0.path == sourceSubtitled.path }), "Source subtitled video исчез из recent results")
+        try expect(immediate.recentResults.contains(where: { $0.path == translatedSubtitled.path }), "Translated subtitled video исчез из recent results")
+        try expect(!immediate.recentResults.contains(where: { $0.path.hasSuffix("cancelled.mp4") }), "Отменённый или несуществующий fragment показан готовым")
+
+        // Reopen must derive the same user-facing fragment from persisted manifest
+        // state even when a fresh result scan does not return a fragment output.
+        let reopened = service.make(
+            projectURL: projectURL,
+            manifest: manifest,
+            topicsDetail: nil,
+            discoveredOutputs: [
+                output(kind: "subtitled-video-en", path: translatedSubtitled.path, date: 10),
+                output(kind: "subtitled-video", path: sourceSubtitled.path, date: 20)
+            ]
+        )
+        try expect(reopened.recentResults.contains(where: { $0.path == topicSubtitled.path }), "Persisted topic fragment исчез после reopen")
+        try expect(reopened.recentResults.filter { $0.path == topicSubtitled.path }.count == 1, "Topic fragment продублировался после reopen")
+        try expect(reopened.recentResults.contains(where: { $0.path == rangeVideo.path }), "Range fragment исчез после reopen")
     }
 
     private static func verifiesReadableTextDoesNotFallBackToSupportFiles() throws {
