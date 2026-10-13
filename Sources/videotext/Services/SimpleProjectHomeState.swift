@@ -181,6 +181,8 @@ struct SimpleProjectHomeStateService {
             currentState: projectState(checkpoint: checkpoint, topicCheckpoint: topicCheckpoint, manifest: manifest),
             artifacts: [transcription, topics, translation],
             recentResults: userFacingResults(
+                projectURL: projectURL,
+                manifest: manifest,
                 artifacts: [transcription, topics, translation],
                 outputs: discoveredOutputs,
                 fragments: manifest?.fragments ?? []
@@ -364,6 +366,8 @@ struct SimpleProjectHomeStateService {
     }
 
     private func userFacingResults(
+        projectURL: URL,
+        manifest: ProjectManifest?,
         artifacts: [SimpleProjectHomeArtifact],
         outputs: [ProjectOutput],
         fragments: [FragmentRecord]
@@ -395,15 +399,22 @@ struct SimpleProjectHomeStateService {
                     isGeneratedMedia: true
                 )
             }
-        let persistedFragments = fragments.compactMap(fragmentResult)
-        return Dictionary(grouping: readableArtifacts + discoveredMedia + persistedFragments, by: \.path)
-            .compactMap { $0.value.first }
-            .sorted { $0.createdAt > $1.createdAt }
+        let persistedFragments = fragments.compactMap { fragmentResult($0, projectURL: projectURL, manifest: manifest) }
+        let deduplicated = Dictionary(grouping: readableArtifacts + discoveredMedia + persistedFragments, by: \.path)
+            .compactMap { _, results in results.max { lhs, rhs in
+                lhs.createdAt == rhs.createdAt ? lhs.title < rhs.title : lhs.createdAt < rhs.createdAt
+            } }
+            .sorted { $0.createdAt == $1.createdAt ? $0.path < $1.path : $0.createdAt > $1.createdAt }
+        return disambiguateFragmentLabels(in: deduplicated)
             .prefix(6)
             .map { $0 }
     }
 
-    private func fragmentResult(_ fragment: FragmentRecord) -> SimpleProjectHomeResult? {
+    private func fragmentResult(
+        _ fragment: FragmentRecord,
+        projectURL: URL,
+        manifest: ProjectManifest?
+    ) -> SimpleProjectHomeResult? {
         let candidates: [(path: String?, kind: String)] = [
             (fragment.processedVideoPath, "processed-fragment-video"),
             (fragment.subtitledVideoPath, fragment.language.map { "fragment-subtitled-video-\($0.rawValue)" } ?? "fragment-subtitled-video"),
@@ -415,11 +426,105 @@ struct SimpleProjectHomeStateService {
             return nil
         }
         return SimpleProjectHomeResult(
-            title: ProjectOutput(id: path, kind: candidate.kind, path: path, createdAt: fragment.createdAt).title,
+            title: fragmentLabel(fragment, projectURL: projectURL, manifest: manifest),
             path: path,
             createdAt: fragment.createdAt,
             isGeneratedMedia: true
         )
+    }
+
+    /// Fragment records deliberately keep their original range. Resolve a topic
+    /// title only from the active approved snapshot when that snapshot still
+    /// describes the exact stored range; otherwise retain the record's own
+    /// historical name instead of inventing current provenance.
+    private func fragmentLabel(
+        _ fragment: FragmentRecord,
+        projectURL: URL,
+        manifest: ProjectManifest?
+    ) -> String {
+        let range = "\(displayTime(fragment.start))–\(displayTime(fragment.end))"
+        if let title = approvedTopicTitle(for: fragment, projectURL: projectURL, manifest: manifest) {
+            return "\(title) · \(range)"
+        }
+        if fragment.topicID != nil {
+            let recordedName = fragment.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !recordedName.isEmpty, recordedName != "Фрагмент" {
+                return "\(recordedName) · \(range)"
+            }
+        }
+        return "Фрагмент · \(range)"
+    }
+
+    private func approvedTopicTitle(
+        for fragment: FragmentRecord,
+        projectURL: URL,
+        manifest: ProjectManifest?
+    ) -> String? {
+        guard let manifest,
+              let topicID = fragment.topicID,
+              let language = fragment.language,
+              let granularity = fragment.topicGranularity,
+              let activeID = manifest.topicReviewState?.activeRevisionIDs["\(language.rawValue).\(granularity.rawValue)"],
+              let revision = manifest.topicRevisions?.first(where: { $0.id == activeID }),
+              revision.status == .approved,
+              revision.language == language,
+              revision.granularity == granularity else {
+            return nil
+        }
+        let expectedURL = ProjectLayout(root: projectURL).topicRevisionJSONURL(id: revision.id)
+        let revisionURL = URL(fileURLWithPath: revision.jsonPath)
+        guard revisionURL.standardizedFileURL.path == expectedURL.standardizedFileURL.path,
+              let data = try? Data(contentsOf: revisionURL), !data.isEmpty else {
+            return nil
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let file = try? decoder.decode(TopicsFile.self, from: data),
+              file.status == .ready,
+              file.granularity == granularity,
+              let topic = file.topics.first(where: {
+                  $0.id == topicID && $0.start == fragment.start && $0.end == fragment.end
+              }) else {
+            return nil
+        }
+        let title = topic.title.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+        return title.isEmpty ? nil : title
+    }
+
+    private func displayTime(_ interval: TimeInterval) -> String {
+        let milliseconds = Int((max(0, interval) * 1000).rounded())
+        let hours = milliseconds / 3_600_000
+        let minutes = (milliseconds % 3_600_000) / 60_000
+        let seconds = (milliseconds % 60_000) / 1000
+        let remainder = milliseconds % 1000
+        return String(format: "%02d:%02d:%02d.%03d", hours, minutes, seconds, remainder)
+    }
+
+    private func disambiguateFragmentLabels(
+        in results: [SimpleProjectHomeResult]
+    ) -> [SimpleProjectHomeResult] {
+        let labels = Dictionary(grouping: results.enumerated().filter { $0.element.isGeneratedMedia }, by: { $0.element.title })
+        var disambiguated = results
+        for (_, entries) in labels where entries.count > 1 {
+            for (ordinal, entry) in entries.sorted(by: { lhs, rhs in
+                lhs.element.createdAt == rhs.element.createdAt
+                    ? lhs.element.path < rhs.element.path
+                    : lhs.element.createdAt > rhs.element.createdAt
+            }).enumerated() {
+                let created = fragmentCreationLabel(entry.element.createdAt)
+                let suffix = ordinal == 0 ? created : "\(created) · \(ordinal + 1)"
+                disambiguated[entry.offset].title = "\(entry.element.title) · \(suffix)"
+            }
+        }
+        return disambiguated
+    }
+
+    private func fragmentCreationLabel(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ru_RU")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "dd.MM.yyyy HH:mm:ss"
+        return "создан \(formatter.string(from: date)) UTC"
     }
 
     private func fileDate(at path: String) -> Date {

@@ -250,6 +250,32 @@ struct SimpleProjectHomeProbe {
             subtitledVideoPath: nil, ffprobeReportPath: nil, style: .standard
         )
         var manifest = baseManifest(language: .ru)
+        let approvedTopic = TopicSegment(
+            id: "topic-1", title: "Введение", start: 0, end: 20,
+            summary: "", keywords: [], sourceCueStart: 0, sourceCueEnd: 0, cueIds: []
+        )
+        let approvedFile = TopicsFile(
+            adapter: "probe", createdAt: Date(timeIntervalSince1970: 1), sourceSRT: "full.srt",
+            topics: [approvedTopic]
+        )
+        let approvedID = "approved-topic-fragments"
+        let approvedURL = layout.topicRevisionJSONURL(id: approvedID)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let approvedData = try encoder.encode(approvedFile)
+        try FileManager.default.createDirectory(at: approvedURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try approvedData.write(to: approvedURL, options: .atomic)
+        let approvedRevision = TopicRevision(
+            id: approvedID, language: .ru, granularity: .normal, parentRevisionID: nil,
+            jsonPath: approvedURL.path, textPath: layout.topicRevisionTextURL(id: approvedID).path,
+            contentHash: "approved-fixture",
+            status: .approved, createdAt: Date(timeIntervalSince1970: 1)
+        )
+        manifest.topicRevisions = [approvedRevision]
+        manifest.topicReviewState = TopicReviewState(
+            enabled: true, activeRevisionIDs: [approvedRevision.variantKey: approvedID], pendingCheckpoint: nil
+        )
         manifest.fragments = [topicFragment, rangeFragment]
         let outputs = [
             output(kind: "fragment-video", path: topicVideo.path, date: 40),
@@ -264,6 +290,8 @@ struct SimpleProjectHomeProbe {
         let topicEntries = immediate.recentResults.filter { $0.path == topicSubtitled.path || $0.path == topicVideo.path }
         try expect(topicEntries.count == 1, "Один topic fragment не должен дублироваться source/subtitled файлами")
         try expect(topicEntries.first?.path == topicSubtitled.path, "Recent results должен открывать завершённый topic fragment")
+        try expect(topicEntries.first?.title == "Введение · 00:00:00.000–00:00:20.000", "Topic fragment не получил title и точный approved range")
+        try expect(immediate.recentResults.first(where: { $0.path == rangeVideo.path })?.title == "Фрагмент · 00:00:20.000–00:00:30.000", "Range fragment не получил различимый label из stored range")
         try expect(immediate.recentResults.contains(where: { $0.path == rangeVideo.path }), "Фрагмент по времени исчез из recent results")
         try expect(immediate.recentResults.contains(where: { $0.path == sourceSubtitled.path }), "Source subtitled video исчез из recent results")
         try expect(immediate.recentResults.contains(where: { $0.path == translatedSubtitled.path }), "Translated subtitled video исчез из recent results")
@@ -283,6 +311,23 @@ struct SimpleProjectHomeProbe {
         try expect(reopened.recentResults.contains(where: { $0.path == topicSubtitled.path }), "Persisted topic fragment исчез после reopen")
         try expect(reopened.recentResults.filter { $0.path == topicSubtitled.path }.count == 1, "Topic fragment продублировался после reopen")
         try expect(reopened.recentResults.contains(where: { $0.path == rangeVideo.path }), "Range fragment исчез после reopen")
+        try expect(reopened.recentResults.first(where: { $0.path == topicSubtitled.path })?.title == "Введение · 00:00:00.000–00:00:20.000", "Topic label изменился после reopen")
+
+        // Distinct persisted artifacts with an otherwise identical label receive
+        // only a stable creation-time suffix; their Open paths stay independent.
+        let duplicateVideo = layout.fragmentVideoURL(kind: "same-range")
+        try writeText("second media", to: duplicateVideo)
+        var sameRange = rangeFragment
+        sameRange.id = "same-range"
+        sameRange.videoPath = duplicateVideo.path
+        sameRange.createdAt = Date(timeIntervalSince1970: 31)
+        manifest.fragments = [rangeFragment, sameRange]
+        let sameLabelState = service.make(projectURL: projectURL, manifest: manifest, topicsDetail: nil, discoveredOutputs: [])
+        let sameRangeResults = sameLabelState.recentResults.filter { $0.path == rangeVideo.path || $0.path == duplicateVideo.path }
+        try expect(sameRangeResults.count == 2 && Set(sameRangeResults.map(\.title)).count == 2,
+                   "Different FragmentRecord с одинаковым диапазоном должны иметь различимые labels")
+        try expect(Set(sameRangeResults.map(\.path)) == Set([rangeVideo.path, duplicateVideo.path]),
+                   "Distinct fragment labels изменили Open mapping")
     }
 
     private static func verifiesReadableTextDoesNotFallBackToSupportFiles() throws {

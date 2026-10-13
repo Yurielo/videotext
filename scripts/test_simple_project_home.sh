@@ -43,7 +43,7 @@ required_state = {
     "topic TXT": "topicsTextURL(language: language, granularity: granularity)",
     "translated transcript TXT": "transcriptURL(language: target)",
     "user-facing result filter": "isGeneratedMedia && !fragmentPaths.contains($0.path) && isNonemptyFile(at: $0.path)",
-    "persisted fragment presentation": "let persistedFragments = fragments.compactMap(fragmentResult)",
+    "persisted fragment presentation": "let persistedFragments = fragments.compactMap",
 }
 missing = [name for name, snippet in required_state.items() if snippet not in state]
 if missing:

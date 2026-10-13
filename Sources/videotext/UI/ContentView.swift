@@ -11,6 +11,32 @@ private enum SimpleSubtitledVideoSource: String, CaseIterable, Identifiable {
     var id: Self { self }
 }
 
+/// Local UI state only: an unselected picker is neutral until the user asks to
+/// create a topic fragment. It does not alter workflow state or persisted data.
+struct SimpleTopicFragmentValidation: Equatable {
+    private(set) var createAttemptedWithoutSelection = false
+
+    var showsSelectionError: Bool { createAttemptedWithoutSelection }
+
+    @discardableResult
+    mutating func beginCreate(selectedTopicID: String?) -> Bool {
+        guard selectedTopicID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            createAttemptedWithoutSelection = true
+            return false
+        }
+        createAttemptedWithoutSelection = false
+        return true
+    }
+
+    mutating func didSelectTopic() {
+        createAttemptedWithoutSelection = false
+    }
+
+    mutating func reset() {
+        createAttemptedWithoutSelection = false
+    }
+}
+
 private enum SimpleProjectHomeGoal: String, CaseIterable, Identifiable {
     case textContent
     case subtitledVideo
@@ -168,6 +194,7 @@ struct ContentView: View {
     @State private var simpleFragmentActionStarted = false
     @State private var simpleSelectedTopicFragmentID: String?
     @State private var simpleTopicFragmentActionStarted = false
+    @State private var simpleTopicFragmentValidation = SimpleTopicFragmentValidation()
     @State private var simpleTranscription = SimpleTranscriptionPresentation()
     @State private var simpleTranslation = SimpleTranslationPresentation()
 
@@ -274,6 +301,7 @@ struct ContentView: View {
             simpleFragmentActionStarted = false
             simpleSelectedTopicFragmentID = nil
             simpleTopicFragmentActionStarted = false
+            simpleTopicFragmentValidation.reset()
         }
         .onChange(of: presentationMode) { _, mode in
             if mode != .simple {
@@ -1258,11 +1286,16 @@ struct ContentView: View {
     @ViewBuilder
     private func simpleCutTopicPanel() -> some View {
         let options = model.simpleApprovedTopicOptions
-        let availability = model.simpleTopicCutAvailability(topicID: simpleSelectedTopicFragmentID ?? "")
-        let canCreate = !options.isEmpty && availability.canCreate
+        let selectedTopicID = simpleSelectedTopicFragmentID ?? ""
+        let availability = model.simpleTopicCutAvailability(topicID: selectedTopicID)
+        let hasSelection = !selectedTopicID.isEmpty
+        // Missing selection is a local form state, rather than a workflow error.
+        // Keep Create enabled while an approved-topic list is available so the
+        // user receives validation only after explicitly requesting creation.
+        let canAttemptCreate = !options.isEmpty && !model.isRunning && !model.isStopping
         let availabilityMessage = options.isEmpty
             ? "Нет доступных утверждённых тем. Сначала создайте и утвердите темы для принятой расшифровки."
-            : availability.message
+            : (!hasSelection ? "Выберите тему, чтобы создать фрагмент." : availability.message)
 
         VStack(alignment: .leading, spacing: 8) {
             Text("По теме")
@@ -1284,12 +1317,19 @@ struct ContentView: View {
                 }
                 .onChange(of: simpleSelectedTopicFragmentID) { _, _ in
                     simpleTopicFragmentActionStarted = false
+                    simpleTopicFragmentValidation.reset()
                 }
                 .accessibilityIdentifier("simple.fragment.topic.picker")
                 Text(availabilityMessage)
                     .font(.caption)
-                    .foregroundStyle(canCreate ? Color.secondary : Color.red)
+                    .foregroundStyle(.secondary)
                     .accessibilityIdentifier("simple.fragment.topic.availability")
+                if simpleTopicFragmentValidation.showsSelectionError && !hasSelection {
+                    Text("Выберите утверждённую тему, затем создайте фрагмент.")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("simple.fragment.topic.validation")
+                }
             }
             if simpleTopicFragmentActionStarted, model.status == "Ошибка" {
                 Text(model.alert?.message ?? "Фрагмент по теме не создан. Исправьте проблему и повторите попытку.")
@@ -1298,11 +1338,14 @@ struct ContentView: View {
                     .accessibilityIdentifier("simple.fragment.topic.error")
             }
             Button("Создать фрагмент") {
-                guard let topicID = simpleSelectedTopicFragmentID else { return }
+                guard simpleTopicFragmentValidation.beginCreate(selectedTopicID: simpleSelectedTopicFragmentID),
+                      let topicID = simpleSelectedTopicFragmentID else {
+                    return
+                }
                 simpleTopicFragmentActionStarted = model.startSimpleTopicCutFromAcceptedTranscript(topicID: topicID)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(!canCreate)
+            .disabled(!canAttemptCreate)
             .accessibilityIdentifier("simple.fragment.topic.create")
 
             if let output = simpleLatestFragmentOutput {
