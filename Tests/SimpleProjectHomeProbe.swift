@@ -328,6 +328,18 @@ struct SimpleProjectHomeProbe {
                    "Different FragmentRecord с одинаковым диапазоном должны иметь различимые labels")
         try expect(Set(sameRangeResults.map(\.path)) == Set([rangeVideo.path, duplicateVideo.path]),
                    "Distinct fragment labels изменили Open mapping")
+        let reopenedSameLabelState = service.make(
+            projectURL: projectURL,
+            manifest: manifest,
+            topicsDetail: nil,
+            discoveredOutputs: []
+        )
+        let reopenedSameRangeResults = reopenedSameLabelState.recentResults.filter {
+            $0.path == rangeVideo.path || $0.path == duplicateVideo.path
+        }
+        try expect(reopenedSameRangeResults.count == 2
+            && Set(reopenedSameRangeResults.map(\.title)) == Set(sameRangeResults.map(\.title)),
+                   "Creation-time suffix для одинаковых fragment labels изменился после reopen")
     }
 
     private static func verifiesReadableTextDoesNotFallBackToSupportFiles() throws {
