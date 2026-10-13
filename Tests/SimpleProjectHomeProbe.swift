@@ -251,7 +251,7 @@ struct SimpleProjectHomeProbe {
         )
         var manifest = baseManifest(language: .ru)
         let approvedTopic = TopicSegment(
-            id: "topic-1", title: "Введение", start: 0, end: 20,
+            id: "topic-1", title: "Переименованная тема", start: 0, end: 20,
             summary: "", keywords: [], sourceCueStart: 0, sourceCueEnd: 0, cueIds: []
         )
         let approvedFile = TopicsFile(
@@ -290,7 +290,7 @@ struct SimpleProjectHomeProbe {
         let topicEntries = immediate.recentResults.filter { $0.path == topicSubtitled.path || $0.path == topicVideo.path }
         try expect(topicEntries.count == 1, "Один topic fragment не должен дублироваться source/subtitled файлами")
         try expect(topicEntries.first?.path == topicSubtitled.path, "Recent results должен открывать завершённый topic fragment")
-        try expect(topicEntries.first?.title == "Введение · 00:00:00.000–00:00:20.000", "Topic fragment не получил title и точный approved range")
+        try expect(topicEntries.first?.title == "Введение · 00:00:00.000–00:00:20.000", "Topic fragment должен сохранить title, записанный при создании, а не новое active название")
         try expect(immediate.recentResults.first(where: { $0.path == rangeVideo.path })?.title == "Фрагмент · 00:00:20.000–00:00:30.000", "Range fragment не получил различимый label из stored range")
         try expect(immediate.recentResults.contains(where: { $0.path == rangeVideo.path }), "Фрагмент по времени исчез из recent results")
         try expect(immediate.recentResults.contains(where: { $0.path == sourceSubtitled.path }), "Source subtitled video исчез из recent results")
@@ -311,7 +311,7 @@ struct SimpleProjectHomeProbe {
         try expect(reopened.recentResults.contains(where: { $0.path == topicSubtitled.path }), "Persisted topic fragment исчез после reopen")
         try expect(reopened.recentResults.filter { $0.path == topicSubtitled.path }.count == 1, "Topic fragment продублировался после reopen")
         try expect(reopened.recentResults.contains(where: { $0.path == rangeVideo.path }), "Range fragment исчез после reopen")
-        try expect(reopened.recentResults.first(where: { $0.path == topicSubtitled.path })?.title == "Введение · 00:00:00.000–00:00:20.000", "Topic label изменился после reopen")
+        try expect(reopened.recentResults.first(where: { $0.path == topicSubtitled.path })?.title == "Введение · 00:00:00.000–00:00:20.000", "Topic label изменился после reopen или Topic Review edit")
 
         // Distinct persisted artifacts with an otherwise identical label receive
         // only a stable creation-time suffix; their Open paths stay independent.
