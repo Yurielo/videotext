@@ -882,9 +882,19 @@ struct ContentView: View {
             topicLanguage: model.artifactLanguage,
             topicGranularity: model.topicGranularity
         )
-        if selectedState.artifact(.topics).readiness == .ready { return selectedState }
-        // A reopened project may have a newer, unapproved legacy topic variant.
-        // Prefer an existing readable approved TXT in Simple without changing Advanced's selection.
+        let selectedKey = manifest?.languageProfile?.effective.map {
+            "\($0.rawValue).\(model.topicGranularity.rawValue)"
+        }
+        // If a selected active revision exists but is nonready, shared state has
+        // rejected that snapshot. Do not substitute a different variant because
+        // it would make unrelated topics actionable after a provenance failure.
+        guard selectedState.artifact(.topics).readiness != .ready,
+              selectedKey.flatMap({ manifest?.topicReviewState?.activeRevisionIDs[$0] }) == nil else {
+            return selectedState
+        }
+        // A legacy reopen can retain a non-active UI granularity while a separate
+        // approved variant is the only active one. That is not a failed selected
+        // snapshot, so presenting the active readable variant remains valid.
         for granularity in [TopicGranularity.normal, .coarse, .detailed]
             where granularity != model.topicGranularity {
             let candidate = service.make(
