@@ -340,9 +340,6 @@ struct SimpleProjectHomeStateService {
             projectURL: projectURL,
             language: language,
             granularity: granularity
-        ), let immutableTextURL = ApprovedTopicSnapshotResolver.readableImmutableTextURL(
-            revision: snapshot.revision,
-            projectURL: projectURL
         ) else {
             return artifact(
                 .topics,
@@ -350,6 +347,19 @@ struct SimpleProjectHomeStateService {
                 "Темы недоступны",
                 language: language,
                 topicGranularity: granularity
+            )
+        }
+        guard let immutableTextURL = ApprovedTopicSnapshotResolver.readableImmutableTextURL(
+            revision: snapshot.revision,
+            projectURL: projectURL
+        ) else {
+            return artifact(
+                .topics,
+                .missing,
+                "Текст тем недоступен",
+                language: language,
+                topicGranularity: granularity,
+                isUsableForTopicCut: true
             )
         }
         let detail = detail ?? "Готовы"

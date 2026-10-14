@@ -531,7 +531,14 @@ struct SimpleProjectHomeProbe {
         )
 
         try FileManager.default.removeItem(at: URL(fileURLWithPath: revision.textPath))
-        try expectUnavailable(topicsArtifact(manifest), "Отсутствующий immutable TXT стал actionable")
+        let missingText = topicsArtifact(manifest)
+        try expect(
+            missingText.readiness == .missing
+                && missingText.isUsableForTopicCut
+                && missingText.openOutputPath == nil
+                && missingText.detail == "Текст тем недоступен",
+            "Отсутствующий immutable TXT должен блокировать только Open, сохраняя Topic Cut capability"
+        )
     }
 
     private static func verifiesApprovedCorrectionTargetsInBothDirections() throws {
