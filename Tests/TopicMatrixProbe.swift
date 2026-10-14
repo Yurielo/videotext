@@ -173,6 +173,16 @@ struct TopicMatrixProbe {
             "сводка не использует языковой SRT для topic signature"
         )
 
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: 3600)],
+            ofItemAtPath: layout.subtitlesURL(language: .ru).path
+        )
+        let newerMtimeSummary = ProjectResultSummaryService().summarize(projectURL: root)
+        try require(
+            newerMtimeSummary.artifact(.topics)?.availability == .ready,
+            "совпадающая sourceSignature стала stale только из-за mtime"
+        )
+
         try SRTService().writePreservingIDs(
             [SubtitleCue(id: 1, start: 0, end: 2, text: "Изменённый источник тем.")],
             to: layout.subtitlesURL(language: .ru)

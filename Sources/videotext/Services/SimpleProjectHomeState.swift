@@ -86,6 +86,9 @@ struct SimpleProjectHomeArtifact: Identifiable, Equatable {
     var topicGranularity: TopicGranularity?
     var openOutputPath: String?
     var reviewTarget: SimpleProjectHomeReviewTarget?
+    /// Transient presentation capability. Only the canonical immutable
+    /// approved-topic resolver may make a topic artifact actionable for cuts.
+    var isUsableForTopicCut = false
 
     var displayTitle: String {
         switch kind {
@@ -130,8 +133,90 @@ struct SimpleProjectHomeState {
                 language: nil,
                 topicGranularity: nil,
                 openOutputPath: nil,
-                reviewTarget: nil
+                reviewTarget: nil,
+                isUsableForTopicCut: false
             )
+    }
+}
+
+struct ApprovedTopicSnapshot {
+    let revision: TopicRevision
+    let file: TopicsFile
+}
+
+/// One fail-closed resolver shared by Simple readiness and workflow execution.
+/// It accepts only the active approved revision for the exact requested variant
+/// and only its immutable JSON inside the current project.
+struct ApprovedTopicSnapshotResolver {
+    private struct Unavailable: LocalizedError {
+        var errorDescription: String? { "Утверждённый набор тем недоступен." }
+    }
+
+    static func resolve(
+        manifest: ProjectManifest,
+        projectURL: URL,
+        language: ArtifactLanguage,
+        granularity: TopicGranularity
+    ) throws -> ApprovedTopicSnapshot {
+        let key = "\(language.rawValue).\(granularity.rawValue)"
+        guard let activeID = manifest.topicReviewState?.activeRevisionIDs[key] else {
+            throw Unavailable()
+        }
+        let matches = (manifest.topicRevisions ?? []).filter { $0.id == activeID }
+        guard matches.count == 1, let revision = matches.first,
+              revision.language == language,
+              revision.granularity == granularity,
+              revision.status == .approved else {
+            throw Unavailable()
+        }
+
+        let layout = ProjectLayout(root: projectURL)
+        let expectedJSON = layout.topicRevisionJSONURL(id: revision.id)
+        guard isCanonicalProjectFile(revision.jsonPath, expected: expectedJSON, projectURL: projectURL),
+              let immutableData = try? Data(contentsOf: expectedJSON), !immutableData.isEmpty,
+              StableTopicHash.string(String(decoding: immutableData, as: UTF8.self)) == revision.contentHash else {
+            throw Unavailable()
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let file = try? decoder.decode(TopicsFile.self, from: immutableData),
+              file.status == .ready,
+              file.granularity == granularity else {
+            throw Unavailable()
+        }
+
+        return ApprovedTopicSnapshot(revision: revision, file: file)
+    }
+
+    static func readableImmutableTextURL(
+        revision: TopicRevision,
+        projectURL: URL
+    ) -> URL? {
+        let expected = ProjectLayout(root: projectURL).topicRevisionTextURL(id: revision.id)
+        guard isCanonicalProjectFile(revision.textPath, expected: expected, projectURL: projectURL),
+              let text = try? String(contentsOf: expected, encoding: .utf8),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return expected
+    }
+
+    private static func isCanonicalProjectFile(
+        _ storedPath: String,
+        expected: URL,
+        projectURL: URL
+    ) -> Bool {
+        let stored = URL(fileURLWithPath: storedPath).standardizedFileURL
+        let canonicalExpected = expected.standardizedFileURL
+        guard stored.path == canonicalExpected.path,
+              (try? canonicalExpected.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else {
+            return false
+        }
+        let resolvedRoot = projectURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let resolvedFile = canonicalExpected.resolvingSymlinksInPath().standardizedFileURL.path
+        let prefix = resolvedRoot.hasSuffix("/") ? resolvedRoot : resolvedRoot + "/"
+        return resolvedFile.hasPrefix(prefix)
     }
 }
 
@@ -243,19 +328,29 @@ struct SimpleProjectHomeStateService {
             return artifact(.topics, .missing, "Язык тем не определён")
         }
         let variantKey = "\(language.rawValue).\(granularity.rawValue)"
-        let hasApprovedTopics = manifest?.topicReviewState?.activeRevisionIDs[variantKey].flatMap { revisionID in
-            manifest?.topicRevisions?.first(where: { $0.id == revisionID })
-        }.map { $0.status == .approved } ?? false
-        guard hasApprovedTopics else {
+        guard let manifest,
+              manifest.topicReviewState?.activeRevisionIDs[variantKey] != nil else {
             if operationFailed(.topicTimecoding, manifest: manifest) {
                 return artifact(.topics, .failed, "Темы не созданы", language: language)
             }
             return artifact(.topics, .missing, "Не созданы", language: language)
         }
-        guard let openOutputPath = readableTextPath(
-            ProjectLayout(root: projectURL).topicsTextURL(language: language, granularity: granularity)
+        guard let snapshot = try? ApprovedTopicSnapshotResolver.resolve(
+            manifest: manifest,
+            projectURL: projectURL,
+            language: language,
+            granularity: granularity
+        ), let immutableTextURL = ApprovedTopicSnapshotResolver.readableImmutableTextURL(
+            revision: snapshot.revision,
+            projectURL: projectURL
         ) else {
-            return artifact(.topics, .missing, "Текст тем недоступен", language: language)
+            return artifact(
+                .topics,
+                .missing,
+                "Темы недоступны",
+                language: language,
+                topicGranularity: granularity
+            )
         }
         let detail = detail ?? "Готовы"
         return artifact(
@@ -264,7 +359,8 @@ struct SimpleProjectHomeStateService {
             detail,
             language: language,
             topicGranularity: granularity,
-            openOutputPath: openOutputPath
+            openOutputPath: immutableTextURL.path,
+            isUsableForTopicCut: true
         )
     }
 
@@ -334,7 +430,8 @@ struct SimpleProjectHomeStateService {
         language: ArtifactLanguage? = nil,
         topicGranularity: TopicGranularity? = nil,
         openOutputPath: String? = nil,
-        reviewTarget: SimpleProjectHomeReviewTarget? = nil
+        reviewTarget: SimpleProjectHomeReviewTarget? = nil,
+        isUsableForTopicCut: Bool = false
     ) -> SimpleProjectHomeArtifact {
         SimpleProjectHomeArtifact(
             kind: kind,
@@ -343,7 +440,8 @@ struct SimpleProjectHomeStateService {
             language: language,
             topicGranularity: topicGranularity,
             openOutputPath: openOutputPath,
-            reviewTarget: reviewTarget
+            reviewTarget: reviewTarget,
+            isUsableForTopicCut: isUsableForTopicCut
         )
     }
 

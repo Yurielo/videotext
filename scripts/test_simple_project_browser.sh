@@ -22,6 +22,7 @@ swiftc \
   "${ROOT}/Sources/videotext/Core/Models.swift" \
   "${ROOT}/Sources/videotext/Core/ProjectLayout.swift" \
   "${ROOT}/Sources/videotext/Core/ArtifactModels.swift" \
+  "${ROOT}/Sources/videotext/Core/StableTopicHash.swift" \
   "${ROOT}/Sources/videotext/Services/SRTService.swift" \
   "${ROOT}/Sources/videotext/Services/ProjectHistoryStore.swift" \
   "${ROOT}/Sources/videotext/Services/ProjectStore.swift" \

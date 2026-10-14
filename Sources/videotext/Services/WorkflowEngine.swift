@@ -169,11 +169,6 @@ struct ApprovedTopicSelectionRequirement: Equatable {
     let topicID: String
 }
 
-struct ApprovedTopicSnapshot {
-    let revision: TopicRevision
-    let file: TopicsFile
-}
-
 struct WorkflowExecutionPolicy {
     var requireReusableTranscription = false
     var preserveReviewPreferences = false
@@ -4964,40 +4959,12 @@ final class WorkflowEngine: @unchecked Sendable {
         language: ArtifactLanguage,
         granularity: TopicGranularity
     ) throws -> ApprovedTopicSnapshot {
-        let key = "\(language.rawValue).\(granularity.rawValue)"
-        guard let activeID = manifest.topicReviewState?.activeRevisionIDs[key],
-              let revision = manifest.topicRevisions?.first(where: { $0.id == activeID }),
-              revision.id == activeID,
-              revision.language == language,
-              revision.granularity == granularity,
-              revision.status == .approved else {
-            throw WorkflowError.processFailed("Выбранная тема не входит в утверждённый набор.")
-        }
-
-        let layout = ProjectLayout(root: projectURL)
-        let immutableURL = URL(fileURLWithPath: revision.jsonPath)
-        guard immutableURL.standardizedFileURL.path == layout.topicRevisionJSONURL(id: revision.id).standardizedFileURL.path,
-              let immutableData = try? Data(contentsOf: immutableURL), !immutableData.isEmpty,
-              StableTopicHash.string(String(decoding: immutableData, as: UTF8.self)) == revision.contentHash else {
-            throw WorkflowError.processFailed("Утверждённый снимок темы отсутствует или изменён.")
-        }
-
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        guard let file = try? decoder.decode(TopicsFile.self, from: immutableData),
-              file.status == .ready,
-              file.granularity == granularity else {
-            throw WorkflowError.processFailed("Утверждённый снимок темы не читается.")
-        }
-
-        // A matching working artifact is valid to retain for normal reopen;
-        // when it differs, the immutable snapshot below remains authoritative.
-        let workingURL = layout.topicsURL(language: language, granularity: granularity)
-        if let workingData = try? Data(contentsOf: workingURL), !workingData.isEmpty,
-           workingData == immutableData {
-            return ApprovedTopicSnapshot(revision: revision, file: file)
-        }
-        return ApprovedTopicSnapshot(revision: revision, file: file)
+        try ApprovedTopicSnapshotResolver.resolve(
+            manifest: manifest,
+            projectURL: projectURL,
+            language: language,
+            granularity: granularity
+        )
     }
 
     /// `.cutTopic` is fail-closed even for Advanced callers: no implicit first
