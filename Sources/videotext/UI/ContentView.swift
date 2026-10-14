@@ -879,34 +879,9 @@ struct ContentView: View {
             manifest: manifest,
             topicsDetail: model.resultSummary.artifact(.topics)?.detail,
             discoveredOutputs: outputs,
-            topicLanguage: model.artifactLanguage,
-            topicGranularity: model.topicGranularity
+            topicLanguage: manifest?.languageProfile?.effective,
+            topicGranularity: .normal
         )
-        let selectedKey = manifest?.languageProfile?.effective.map {
-            "\($0.rawValue).\(model.topicGranularity.rawValue)"
-        }
-        // If a selected active revision exists but is nonready, shared state has
-        // rejected that snapshot. Do not substitute a different variant because
-        // it would make unrelated topics actionable after a provenance failure.
-        guard selectedState.artifact(.topics).readiness != .ready,
-              selectedKey.flatMap({ manifest?.topicReviewState?.activeRevisionIDs[$0] }) == nil else {
-            return selectedState
-        }
-        // A legacy reopen can retain a non-active UI granularity while a separate
-        // approved variant is the only active one. That is not a failed selected
-        // snapshot, so presenting the active readable variant remains valid.
-        for granularity in [TopicGranularity.normal, .coarse, .detailed]
-            where granularity != model.topicGranularity {
-            let candidate = service.make(
-                projectURL: projectURL,
-                manifest: manifest,
-                topicsDetail: nil,
-                discoveredOutputs: outputs,
-                topicLanguage: model.artifactLanguage,
-                topicGranularity: granularity
-            )
-            if candidate.artifact(.topics).readiness == .ready { return candidate }
-        }
         return selectedState
     }
 
@@ -934,7 +909,8 @@ struct ContentView: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(simpleArtifactColor(artifact.readiness))
                 .accessibilityIdentifier("simple.\(section).\(artifact.kind.rawValue).status")
-            if let path = artifact.openOutputPath {
+            if let path = artifact.openOutputPath,
+               artifact.kind != .topics || artifact.isUsableForTopicCut {
                 Button("Открыть") {
                     openSimpleResult(path)
                 }
@@ -1295,6 +1271,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private func simpleCutTopicPanel() -> some View {
+        let topicsArtifact = simpleHomeState.artifact(.topics)
         let options = model.simpleApprovedTopicOptions
         let selectedTopicID = simpleSelectedTopicFragmentID ?? ""
         let availability = model.simpleTopicCutAvailability(topicID: selectedTopicID)
@@ -1310,7 +1287,12 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("По теме")
                 .font(.subheadline.weight(.semibold))
-            if options.isEmpty {
+            if !topicsArtifact.isUsableForTopicCut {
+                Text(topicsArtifact.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("simple.fragment.topic.unavailable")
+            } else if options.isEmpty {
                 Text(availabilityMessage)
                     .font(.caption)
                     .foregroundStyle(.red)
@@ -1341,41 +1323,43 @@ struct ContentView: View {
                         .accessibilityIdentifier("simple.fragment.topic.validation")
                 }
             }
-            if simpleTopicFragmentActionStarted, model.status == "Ошибка" {
-                Text(model.alert?.message ?? "Фрагмент по теме не создан. Исправьте проблему и повторите попытку.")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .accessibilityIdentifier("simple.fragment.topic.error")
-            }
-            Button("Создать фрагмент") {
-                guard simpleTopicFragmentValidation.beginCreate(selectedTopicID: simpleSelectedTopicFragmentID),
-                      let topicID = simpleSelectedTopicFragmentID else {
-                    return
+            if topicsArtifact.isUsableForTopicCut {
+                if simpleTopicFragmentActionStarted, model.status == "Ошибка" {
+                    Text(model.alert?.message ?? "Фрагмент по теме не создан. Исправьте проблему и повторите попытку.")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("simple.fragment.topic.error")
                 }
-                simpleTopicFragmentActionStarted = model.startSimpleTopicCutFromAcceptedTranscript(topicID: topicID)
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(!canAttemptCreate)
-            .accessibilityIdentifier("simple.fragment.topic.create")
-
-            if let output = simpleLatestFragmentOutput {
-                HStack(spacing: 10) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Последний фрагмент готов")
-                            .fontWeight(.semibold)
-                        Text("Готово")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                Button("Создать фрагмент") {
+                    guard simpleTopicFragmentValidation.beginCreate(selectedTopicID: simpleSelectedTopicFragmentID),
+                          let topicID = simpleSelectedTopicFragmentID else {
+                        return
                     }
-                    Spacer()
-                    Button("Открыть") { openSimpleResult(output.path) }
-                        .buttonStyle(.bordered)
-                        .accessibilityIdentifier("simple.fragment.topic.open")
+                    simpleTopicFragmentActionStarted = model.startSimpleTopicCutFromAcceptedTranscript(topicID: topicID)
                 }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("simple.fragment.topic.ready")
+                .buttonStyle(.borderedProminent)
+                .disabled(!canAttemptCreate)
+                .accessibilityIdentifier("simple.fragment.topic.create")
+
+                if let output = simpleLatestFragmentOutput {
+                    HStack(spacing: 10) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Последний фрагмент готов")
+                                .fontWeight(.semibold)
+                            Text("Готово")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Открыть") { openSimpleResult(output.path) }
+                            .buttonStyle(.bordered)
+                            .accessibilityIdentifier("simple.fragment.topic.open")
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("simple.fragment.topic.ready")
+                }
             }
         }
     }
