@@ -1546,9 +1546,23 @@ struct SimpleRenderedControlsProbe {
         settle(window)
         try press("simple.goal.fragment", in: window)
         _ = try element("simple.fragment.topic.picker", in: window)
-        try require(!element("simple.fragment.topic.create", in: window).isAccessibilityEnabled()
-            && renderedText(try element("simple.fragment.topic.availability", in: window)).contains("Выберите утверждённую тему"),
-            "Simple topic cut defaulted a topic or exposed an enabled creation action")
+        try require(element("simple.fragment.topic.create", in: window).isAccessibilityEnabled()
+            && renderedText(try element("simple.fragment.topic.availability", in: window)).contains("Выберите тему, чтобы создать фрагмент")
+            && !nodes(window).contains { $0.accessibilityIdentifier() == "simple.fragment.topic.validation" },
+            "Simple topic selection showed validation before an attempted Create")
+        try press("simple.fragment.topic.create", in: window)
+        try require(renderedText(try element("simple.fragment.topic.validation", in: window)).contains("Выберите утверждённую тему"),
+            "Simple topic Create without selection did not show local validation")
+        var selectionValidation = SimpleTopicFragmentValidation()
+        try require(!selectionValidation.showsSelectionError
+            && !selectionValidation.beginCreate(selectedTopicID: nil)
+            && selectionValidation.showsSelectionError,
+            "Missing topic selection did not become local validation after Create")
+        selectionValidation.didSelectTopic()
+        try require(!selectionValidation.showsSelectionError
+            && selectionValidation.beginCreate(selectedTopicID: options[0].id)
+            && !selectionValidation.showsSelectionError,
+            "Selecting an approved topic did not clear local validation")
         try require(model.simpleTopicCutAvailability(topicID: options[0].id).canCreate,
             "Explicit approved topic was not eligible for Simple creation")
         try require(model.startSimpleTopicCutFromAcceptedTranscript(topicID: options[0].id),
@@ -1615,8 +1629,11 @@ struct SimpleRenderedControlsProbe {
         try press("simple.goal.fragment", in: reopenedWindow)
         _ = try element("simple.fragment.topic.ready", in: reopenedWindow)
         _ = try element("simple.fragment.topic.open", in: reopenedWindow)
+        try press("simple.fragment.topic.create", in: reopenedWindow)
+        _ = try element("simple.fragment.topic.validation", in: reopenedWindow)
+        _ = try element("simple.fragment.topic.ready", in: reopenedWindow)
         try require(!reopened.isRunning, "Reopening a completed Simple topic cut started duplicate processing")
-        print("RENDERED_SIMPLE_TOPIC_CUT_CONTROLS_PASS: unavailable, explicit approved selection, fixed request, progress/stop, result/open/reopen, Advanced preservation")
+        print("RENDERED_SIMPLE_TOPIC_CUT_CONTROLS_PASS: unavailable, local validation, explicit approved selection, fixed request, progress/stop, result/open/reopen, Advanced preservation")
     }
 
     private static func removeTopics(from project: URL, media: URL) throws {

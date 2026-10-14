@@ -396,9 +396,12 @@ struct SimpleProjectHomeStateService {
                 )
             }
         let persistedFragments = fragments.compactMap(fragmentResult)
-        return Dictionary(grouping: readableArtifacts + discoveredMedia + persistedFragments, by: \.path)
-            .compactMap { $0.value.first }
-            .sorted { $0.createdAt > $1.createdAt }
+        let deduplicated = Dictionary(grouping: readableArtifacts + discoveredMedia + persistedFragments, by: \.path)
+            .compactMap { _, results in results.max { lhs, rhs in
+                lhs.createdAt == rhs.createdAt ? lhs.title < rhs.title : lhs.createdAt < rhs.createdAt
+            } }
+            .sorted { $0.createdAt == $1.createdAt ? $0.path < $1.path : $0.createdAt > $1.createdAt }
+        return disambiguateFragmentLabels(in: deduplicated)
             .prefix(6)
             .map { $0 }
     }
@@ -415,11 +418,60 @@ struct SimpleProjectHomeStateService {
             return nil
         }
         return SimpleProjectHomeResult(
-            title: ProjectOutput(id: path, kind: candidate.kind, path: path, createdAt: fragment.createdAt).title,
+            title: fragmentLabel(fragment),
             path: path,
             createdAt: fragment.createdAt,
             isGeneratedMedia: true
         )
+    }
+
+    /// A fragment has no stored topic-revision ID. Its name is captured with the
+    /// fragment, so it is the only title that can safely represent its original
+    /// approved selection after later Topic Review edits. Do not query the active
+    /// revision here: a reused topic ID and unchanged range could relabel history.
+    private func fragmentLabel(_ fragment: FragmentRecord) -> String {
+        let range = "\(displayTime(fragment.start))–\(displayTime(fragment.end))"
+        let recordedName = fragment.name.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+        if fragment.topicID != nil, !recordedName.isEmpty, recordedName != "Фрагмент" {
+            return "\(recordedName) · \(range)"
+        }
+        return "Фрагмент · \(range)"
+    }
+
+    private func displayTime(_ interval: TimeInterval) -> String {
+        let milliseconds = Int((max(0, interval) * 1000).rounded())
+        let hours = milliseconds / 3_600_000
+        let minutes = (milliseconds % 3_600_000) / 60_000
+        let seconds = (milliseconds % 60_000) / 1000
+        let remainder = milliseconds % 1000
+        return String(format: "%02d:%02d:%02d.%03d", hours, minutes, seconds, remainder)
+    }
+
+    private func disambiguateFragmentLabels(
+        in results: [SimpleProjectHomeResult]
+    ) -> [SimpleProjectHomeResult] {
+        let labels = Dictionary(grouping: results.enumerated().filter { $0.element.isGeneratedMedia }, by: { $0.element.title })
+        var disambiguated = results
+        for (_, entries) in labels where entries.count > 1 {
+            for (ordinal, entry) in entries.sorted(by: { lhs, rhs in
+                lhs.element.createdAt == rhs.element.createdAt
+                    ? lhs.element.path < rhs.element.path
+                    : lhs.element.createdAt > rhs.element.createdAt
+            }).enumerated() {
+                let created = fragmentCreationLabel(entry.element.createdAt)
+                let suffix = ordinal == 0 ? created : "\(created) · \(ordinal + 1)"
+                disambiguated[entry.offset].title = "\(entry.element.title) · \(suffix)"
+            }
+        }
+        return disambiguated
+    }
+
+    private func fragmentCreationLabel(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ru_RU")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "dd.MM.yyyy HH:mm:ss"
+        return "создан \(formatter.string(from: date)) UTC"
     }
 
     private func fileDate(at path: String) -> Date {
