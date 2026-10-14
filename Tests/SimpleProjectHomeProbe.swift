@@ -78,12 +78,21 @@ struct SimpleProjectHomeProbe {
         try expect(ready.artifact(.transcription).detail == "Русский", "Неверная подпись RU source")
         try expect(ready.artifact(.topics).readiness == .ready, "Утверждённые темы не показаны готовыми")
         try expect(ready.artifact(.topics).reviewTarget == nil, "Approved Topics correction должен оставаться Advanced-only")
-        try expect(ready.artifact(.topics).detail == "тем: 7", "Home не использует существующий summary тем")
+        try expect(ready.artifact(.topics).detail == "тем: 1", "Home должен считать темы из immutable approved snapshot")
         try expect(ready.artifact(.topics).isUsableForTopicCut, "Approved immutable topics не стали доступны для Topic Cut")
         try expect(
             ready.artifact(.topics).openOutputPath == layout.topicRevisionTextURL(id: topic.id).path,
             "Темы должны открывать immutable approved TXT"
         )
+        try writeText("mutable topics with a different count", to: layout.topicsTextURL(language: .ru, granularity: .normal))
+        let divergentWorkingSummary = service.make(
+            projectURL: projectURL,
+            manifest: manifest,
+            topicsDetail: "тем: 99",
+            discoveredOutputs: []
+        )
+        try expect(divergentWorkingSummary.artifact(.topics).detail == "тем: 1",
+            "Mutable topics summary изменил число тем immutable approved snapshot")
 
         try FileManager.default.removeItem(at: layout.transcriptURL)
         let unavailableTranscript = service.make(
@@ -445,6 +454,7 @@ struct SimpleProjectHomeProbe {
         try expect(topics.openOutputPath == translatedCoarse.textPath, "Selected topic variant должен открыть immutable TXT")
         try expect(topics.isUsableForTopicCut, "Selected approved variant не получил Topic Cut capability")
         try expect(topics.displayTitle == "Темы RU · Крупный", "Simple mode должен явно называть выбранный variant тем")
+        try expect(topics.detail == "тем: 1", "Selected variant показал mutable summary вместо immutable topic count")
     }
 
     private static func verifiesStrictApprovedTopicSnapshotReadiness() throws {

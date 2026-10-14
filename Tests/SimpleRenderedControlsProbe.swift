@@ -228,6 +228,7 @@ struct SimpleRenderedControlsProbe {
         try verifyCreationControls(project: scratch.appendingPathComponent("new-source"), media: media)
         try verifyTopicControls(project: scratch.appendingPathComponent("topics"), media: media)
         try verifyInvalidTopicSnapshotPresentation(project: scratch.appendingPathComponent("invalid-topics"), media: media)
+        try verifyMissingImmutableTopicTextPresentation(project: scratch.appendingPathComponent("missing-topic-text"), media: media)
         try verifyTranslationControls(project: scratch.appendingPathComponent("translation"), media: media)
         try verifySourceSubtitledVideoControls(project: scratch.appendingPathComponent("subtitled-video"), media: media)
         try verifySimpleCutRangeControls(project: scratch.appendingPathComponent("simple-cut-range"), media: media)
@@ -846,6 +847,7 @@ struct SimpleRenderedControlsProbe {
 
         let model = WorkflowViewModel()
         model.openProject(project)
+        model.topicGranularity = .coarse
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -859,6 +861,11 @@ struct SimpleRenderedControlsProbe {
         try require(renderedText(topicsStatus) != "Готово"
             && !nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.topics.open" },
             "Simple exposed an unverified topic snapshot as ready or openable")
+        let textRecovery = try element("simple.textContent.topics.unavailable", in: window)
+        try require(renderedText(textRecovery).contains("Восстановите файлы проекта")
+            && !nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.topics.create" }
+            && !model.canCreateTopicsFromAcceptedTranscript,
+            "Invalid active normal snapshot exposed topic regeneration with coarse Advanced selection")
 
         try press("simple.goal.fragment", in: window)
         let recovery = try element("simple.fragment.topic.unavailable", in: window)
@@ -891,6 +898,43 @@ struct SimpleRenderedControlsProbe {
         ].contains($0.accessibilityIdentifier() ?? "") },
             "Reopening exposed topic-cut controls without immutable provenance")
         print("RENDERED_INVALID_TOPIC_SNAPSHOT_PASS: recovery, no open/cut controls, reopen")
+    }
+
+    private static func verifyMissingImmutableTopicTextPresentation(project: URL, media: URL) throws {
+        let manifest = try makeProject(project, media: media, source: .ru)
+        guard let revision = manifest.topicRevisions?.first else {
+            throw RenderedProbeFailure(message: "Missing-text fixture has no approved topic revision")
+        }
+        try FileManager.default.removeItem(at: URL(fileURLWithPath: revision.textPath))
+
+        let model = WorkflowViewModel()
+        model.openProject(project)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: ContentView(model: model))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        settle(window)
+
+        try press("simple.goal.textContent", in: window)
+        let topicRow = try element("simple.textContent.topics.row", in: window)
+        try require(renderedText(topicRow).contains("Текст тем недоступен")
+            && !nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.topics.open" },
+            "Missing immutable topic TXT did not block Open with truthful status")
+        let textRecovery = try element("simple.textContent.topics.unavailable", in: window)
+        try require(renderedText(textRecovery).contains("Текст тем недоступен для открытия")
+            && renderedText(textRecovery).contains("не блокирует создание фрагмента"),
+            "Missing immutable TXT recovery copy incorrectly blocks Topic Cut")
+        try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.topics.create" },
+            "Missing immutable topic TXT exposed topic regeneration")
+
+        try press("simple.goal.fragment", in: window)
+        _ = try element("simple.fragment.topic.picker", in: window)
+        try require(element("simple.fragment.topic.create", in: window).isAccessibilityEnabled()
+            && !nodes(window).contains { $0.accessibilityIdentifier() == "simple.fragment.topic.unavailable" },
+            "Valid immutable topic JSON lost Topic Cut when only its TXT is missing")
+        print("RENDERED_MISSING_TOPIC_TEXT_PASS: no Open/regeneration, Topic Cut remains available")
     }
 
     private static func verifyTranslationControls(project: URL, media: URL) throws {

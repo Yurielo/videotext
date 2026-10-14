@@ -970,7 +970,14 @@ struct ContentView: View {
                     .accessibilityElement(children: .combine)
                     .accessibilityIdentifier("simple.\(section).topics.advancedHandoff")
             } else if artifact.readiness == .missing || artifact.readiness == .failed {
-                if !simpleSourceTranscriptIsApproved {
+                if simpleHasActiveNormalTopicRevision {
+                    Text(artifact.isUsableForTopicCut
+                        ? "Текст тем недоступен для открытия. Восстановите файл. Отсутствие текста само по себе не блокирует создание фрагмента по утверждённой теме."
+                        : "Утверждённые темы недоступны. Восстановите файлы проекта или откройте корректный проект.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("simple.\(section).topics.unavailable")
+                } else if !simpleSourceTranscriptIsApproved {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Сначала утвердите расшифровку, затем можно создать темы.")
                             .font(.caption)
@@ -1050,6 +1057,14 @@ struct ContentView: View {
               let manifest = try? ProjectStore().load(from: projectURL),
               let language = manifest.languageProfile?.effective else { return false }
         return manifest.activeTranscriptRevision(for: language)?.reviewStatus == .approved
+    }
+
+    private var simpleHasActiveNormalTopicRevision: Bool {
+        guard let projectURL = model.projectURL,
+              let manifest = try? ProjectStore().load(from: projectURL),
+              let language = manifest.languageProfile?.effective else { return false }
+        let key = "\(language.rawValue).\(TopicGranularity.normal.rawValue)"
+        return manifest.topicReviewState?.activeRevisionIDs[key] != nil
     }
 
     private var simpleTopicGranularityNeedsChoice: Bool {
@@ -1341,25 +1356,25 @@ struct ContentView: View {
                 .disabled(!canAttemptCreate)
                 .accessibilityIdentifier("simple.fragment.topic.create")
 
-                if let output = simpleLatestFragmentOutput {
-                    HStack(spacing: 10) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Последний фрагмент готов")
-                                .fontWeight(.semibold)
-                            Text("Готово")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("Открыть") { openSimpleResult(output.path) }
-                            .buttonStyle(.bordered)
-                            .accessibilityIdentifier("simple.fragment.topic.open")
+            }
+            if let output = simpleLatestFragmentOutput {
+                HStack(spacing: 10) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Последний фрагмент готов")
+                            .fontWeight(.semibold)
+                        Text("Готово")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("simple.fragment.topic.ready")
+                    Spacer()
+                    Button("Открыть") { openSimpleResult(output.path) }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("simple.fragment.topic.open")
                 }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("simple.fragment.topic.ready")
             }
         }
     }

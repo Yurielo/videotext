@@ -362,7 +362,7 @@ struct SimpleProjectHomeStateService {
                 isUsableForTopicCut: true
             )
         }
-        let detail = detail ?? "Готовы"
+        let detail = "тем: \(snapshot.file.topics.count)"
         return artifact(
             .topics,
             .ready,

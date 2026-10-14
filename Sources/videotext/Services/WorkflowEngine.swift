@@ -447,6 +447,14 @@ final class WorkflowViewModel: ObservableObject {
               let revision = manifest.activeTranscriptRevision(for: language),
               revision.reviewStatus == .approved else { return nil }
 
+        // An active topic revision is an existing approved result. If its
+        // snapshot is unavailable, Simple must not replace it by generating
+        // new topics; the project needs recovery in Advanced instead.
+        let normalVariantKey = "\(language.rawValue).\(TopicGranularity.normal.rawValue)"
+        let selectedVariantKey = "\(language.rawValue).\(topicGranularity.rawValue)"
+        guard manifest.topicReviewState?.activeRevisionIDs[normalVariantKey] == nil,
+              manifest.topicReviewState?.activeRevisionIDs[selectedVariantKey] == nil else { return nil }
+
         let layout = ProjectLayout(root: projectURL)
         let immutableURL = layout.subtitleRevisionURL(id: revision.id, language: language)
         guard let fullSRT = try? Data(contentsOf: layout.fullSRTURL), !fullSRT.isEmpty,
