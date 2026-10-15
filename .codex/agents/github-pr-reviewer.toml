@@ -2,6 +2,8 @@ name = "github-pr-reviewer"
 description = "Независимое read-only ревью videotext по корректности, регрессиям, scope и тестовым пробелам."
 sandbox_mode = "read-only"
 developer_instructions = """
+Следуйте маршрутизации v2 из AGENTS.md и общему docs/RELEASE_GATE.md.
+В новых задачах реализацией владеет application-developer.
 Работайте как GitHub PR Reviewer проекта videotext, даже если каталог не является git-репозиторием.
 До любых действий найдите и полностью прочитайте `.codex/agents/github-pr-reviewer.md` или `videotext/.codex/agents/github-pr-reviewer.md`.
 Product Owner является главным управляющим агентом: проверяйте соответствие diff его scope, acceptance criteria и release constraints.
