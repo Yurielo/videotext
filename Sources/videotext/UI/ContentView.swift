@@ -735,8 +735,9 @@ struct ContentView: View {
 
     private var simpleProjectHome: some View {
         let state = simpleHomeState
-        return ScrollView {
-            VStack(alignment: .leading, spacing: 17) {
+        return ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 17) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(state.mediaName)
                         .font(.title2.bold())
@@ -771,10 +772,18 @@ struct ContentView: View {
                     columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)],
                     spacing: 8
                 ) {
-                    simpleGoalCard(.textContent, icon: "text.alignleft")
-                    simpleGoalCard(.subtitledVideo, icon: "captions.bubble")
-                    simpleGoalCard(.fragment, icon: "scissors")
-                    simpleGoalCard(.processVideo, icon: "slider.horizontal.3")
+                    simpleGoalCard(.textContent, icon: "text.alignleft", reveal: { goal in
+                        proxy.scrollTo(goal.rawValue, anchor: .top)
+                    })
+                    simpleGoalCard(.subtitledVideo, icon: "captions.bubble", reveal: { goal in
+                        proxy.scrollTo(goal.rawValue, anchor: .top)
+                    })
+                    simpleGoalCard(.fragment, icon: "scissors", reveal: { goal in
+                        proxy.scrollTo(goal.rawValue, anchor: .top)
+                    })
+                    simpleGoalCard(.processVideo, icon: "slider.horizontal.3", reveal: { goal in
+                        proxy.scrollTo(goal.rawValue, anchor: .top)
+                    })
                 }
                 .frame(maxWidth: 680, alignment: .leading)
                 .accessibilityElement(children: .contain)
@@ -789,6 +798,7 @@ struct ContentView: View {
                                 .buttonStyle(.borderless)
                                 .accessibilityIdentifier("simple.textContent.collapse")
                         }
+                        simpleTopicsRecoveryMessage(state.artifact(.topics), section: "textContent")
                         ForEach(state.artifacts.filter {
                             $0.kind == .transcription || $0.kind == .topics || $0.kind == .translation
                         }) { artifact in
@@ -800,6 +810,7 @@ struct ContentView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("simple.textContent.panel")
+                    .id(SimpleProjectHomeGoal.textContent.rawValue)
                 }
 
                 if showsSimpleSubtitledVideo {
@@ -818,6 +829,7 @@ struct ContentView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("simple.subtitledVideo.panel")
+                    .id(SimpleProjectHomeGoal.subtitledVideo.rawValue)
                 }
 
                 if showsSimpleFragment {
@@ -837,6 +849,7 @@ struct ContentView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("simple.fragment.panel")
+                    .id(SimpleProjectHomeGoal.fragment.rawValue)
                 }
 
                 simpleSectionTitle("Последние результаты")
@@ -850,9 +863,10 @@ struct ContentView: View {
                         }
                     }
                 }
+                }
+                .frame(maxWidth: 920, alignment: .leading)
+                .padding(18)
             }
-            .frame(maxWidth: 920, alignment: .leading)
-            .padding(18)
         }
     }
 
@@ -891,69 +905,71 @@ struct ContentView: View {
     }
 
     private func simpleArtifactRow(_ artifact: SimpleProjectHomeArtifact, section: String) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: simpleArtifactIcon(artifact.readiness))
-                .foregroundStyle(simpleArtifactColor(artifact.readiness))
-                .frame(width: 18)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(artifact.displayTitle)
-                    .fontWeight(.semibold)
-                    .accessibilityIdentifier("simple.\(section).\(artifact.kind.rawValue).title")
-                Text(artifact.detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: 230, alignment: .leading)
-            .fixedSize(horizontal: true, vertical: false)
-            Text(artifact.readiness.title)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(simpleArtifactColor(artifact.readiness))
-                .accessibilityIdentifier("simple.\(section).\(artifact.kind.rawValue).status")
-            if let path = artifact.openOutputPath,
-               artifact.kind != .topics || artifact.isUsableForTopicCut {
-                Button("Открыть") {
-                    openSimpleResult(path)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 10) {
+                Image(systemName: simpleArtifactIcon(artifact.readiness))
+                    .foregroundStyle(simpleArtifactColor(artifact.readiness))
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(artifact.displayTitle)
+                        .fontWeight(.semibold)
+                        .accessibilityIdentifier("simple.\(section).\(artifact.kind.rawValue).title")
+                    Text(artifact.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.bordered)
-                .accessibilityIdentifier("simple.\(section).\(artifact.kind.rawValue).open")
-            }
-            if let target = artifact.reviewTarget, target != .topics,
-               let language = artifact.language {
-                Button("Исправить") {
-                    openSimpleReview(target, language: language)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(!model.canOpenHumanReview(language: language))
-                .accessibilityIdentifier("simple.\(section).\(artifact.kind.rawValue).correct")
-            }
-            if artifact.kind == .transcription,
-               artifact.readiness == .missing || artifact.readiness == .failed {
-                if let language = model.simpleTranscriptionLockedLanguage {
-                    Label("Язык проекта: \(language.russianTitle)", systemImage: "lock")
-                        .font(.subheadline)
-                        .accessibilityElement(children: .combine)
-                        .accessibilityIdentifier("simple.\(section).transcription.projectLanguage")
-                } else {
-                    Picker("Язык", selection: $model.whisperLanguage) {
-                        Text("RU").tag("ru")
-                        Text("EN").tag("en")
-                        Text("Авто").tag("auto")
+                .frame(maxWidth: 230, alignment: .leading)
+                .fixedSize(horizontal: true, vertical: false)
+                Text(artifact.readiness.title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(simpleArtifactColor(artifact.readiness))
+                    .accessibilityIdentifier("simple.\(section).\(artifact.kind.rawValue).status")
+                if let path = artifact.openOutputPath,
+                   artifact.kind != .topics || artifact.isUsableForTopicCut {
+                    Button("Открыть") {
+                        openSimpleResult(path)
                     }
-                    .pickerStyle(.segmented)
-                    .frame(width: 210)
-                    .disabled(model.isRunning || model.humanReviewCheckpoint != nil || model.topicReviewCheckpoint != nil)
-                    .accessibilityLabel("Язык расшифровки")
-                    .accessibilityIdentifier("simple.\(section).transcription.language")
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("simple.\(section).\(artifact.kind.rawValue).open")
                 }
-                Button("Создать расшифровку") {
-                    startSimpleTranscription()
+                if let target = artifact.reviewTarget, target != .topics,
+                   let language = artifact.language {
+                    Button("Исправить") {
+                        openSimpleReview(target, language: language)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!model.canOpenHumanReview(language: language))
+                    .accessibilityIdentifier("simple.\(section).\(artifact.kind.rawValue).correct")
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(!model.canStartSimpleTranscription)
-                .accessibilityIdentifier("simple.\(section).transcription.create")
+                if artifact.kind == .transcription,
+                   artifact.readiness == .missing || artifact.readiness == .failed {
+                    if let language = model.simpleTranscriptionLockedLanguage {
+                        Label("Язык проекта: \(language.russianTitle)", systemImage: "lock")
+                            .font(.subheadline)
+                            .accessibilityElement(children: .combine)
+                            .accessibilityIdentifier("simple.\(section).transcription.projectLanguage")
+                    } else {
+                        Picker("Язык", selection: $model.whisperLanguage) {
+                            Text("RU").tag("ru")
+                            Text("EN").tag("en")
+                            Text("Авто").tag("auto")
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 210)
+                        .disabled(model.isRunning || model.humanReviewCheckpoint != nil || model.topicReviewCheckpoint != nil)
+                        .accessibilityLabel("Язык расшифровки")
+                        .accessibilityIdentifier("simple.\(section).transcription.language")
+                    }
+                    Button("Создать расшифровку") {
+                        startSimpleTranscription()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!model.canStartSimpleTranscription)
+                    .accessibilityIdentifier("simple.\(section).transcription.create")
+                }
+                simpleTranslationActions(artifact, section: section)
             }
             simpleTopicsActions(artifact, section: section)
-            simpleTranslationActions(artifact, section: section)
         }
         .padding(.vertical, 3)
         .accessibilityElement(children: .contain)
@@ -971,12 +987,7 @@ struct ContentView: View {
                     .accessibilityIdentifier("simple.\(section).topics.advancedHandoff")
             } else if artifact.readiness == .missing || artifact.readiness == .failed {
                 if simpleHasActiveNormalTopicRevision {
-                    Text(artifact.isUsableForTopicCut
-                        ? "Текст тем недоступен для открытия. Восстановите файл. Отсутствие текста само по себе не блокирует создание фрагмента по утверждённой теме."
-                        : "Утверждённые темы недоступны. Восстановите файлы проекта или откройте корректный проект.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("simple.\(section).topics.unavailable")
+                    EmptyView()
                 } else if !simpleSourceTranscriptIsApproved {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Сначала утвердите расшифровку, затем можно создать темы.")
@@ -1017,6 +1028,21 @@ struct ContentView: View {
                     .accessibilityIdentifier("simple.\(section).topics.create")
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func simpleTopicsRecoveryMessage(_ artifact: SimpleProjectHomeArtifact, section: String) -> some View {
+        if (artifact.readiness == .missing || artifact.readiness == .failed),
+           simpleHasActiveNormalTopicRevision {
+            Text(artifact.isUsableForTopicCut
+                ? "Текст тем недоступен для открытия. Восстановите файл. Отсутствие текста само по себе не блокирует создание фрагмента по утверждённой теме."
+                : "Утверждённые темы недоступны. Восстановите файлы проекта или откройте корректный проект.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("simple.\(section).topics.unavailable")
         }
     }
 
@@ -1081,7 +1107,11 @@ struct ContentView: View {
         return existingCanonicalVariants.count > 1
     }
 
-    private func simpleGoalCard(_ goal: SimpleProjectHomeGoal, icon: String) -> some View {
+    private func simpleGoalCard(
+        _ goal: SimpleProjectHomeGoal,
+        icon: String,
+        reveal: @escaping (SimpleProjectHomeGoal) -> Void
+    ) -> some View {
         Button {
             if goal == .textContent {
                 showsSimpleTextContent = true
@@ -1092,7 +1122,9 @@ struct ContentView: View {
             } else {
                 presentationMode = .advanced
                 selectedResultsTab = 0
+                return
             }
+            DispatchQueue.main.async { reveal(goal) }
         } label: {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: icon)
@@ -1303,10 +1335,18 @@ struct ContentView: View {
             Text("По теме")
                 .font(.subheadline.weight(.semibold))
             if !topicsArtifact.isUsableForTopicCut {
-                Text(topicsArtifact.detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("simple.fragment.topic.unavailable")
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(topicsArtifact.detail)
+                    if simpleHasActiveNormalTopicRevision {
+                        Text("Утверждённые темы недоступны. Восстановите файлы проекта или откройте корректный проект.")
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("simple.fragment.topic.unavailable")
             } else if options.isEmpty {
                 Text(availabilityMessage)
                     .font(.caption)
