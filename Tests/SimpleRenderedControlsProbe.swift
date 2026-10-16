@@ -236,6 +236,7 @@ struct SimpleRenderedControlsProbe {
         try verifyMissingImmutableTopicTextPresentation(project: scratch.appendingPathComponent("missing-topic-text"), media: media)
         try verifyTranslationControls(project: scratch.appendingPathComponent("translation"), media: media)
         try verifySourceSubtitledVideoControls(project: scratch.appendingPathComponent("subtitled-video"), media: media)
+        try verifySimpleAudioEnhancementControls(project: scratch.appendingPathComponent("simple-audio-enhancement"), media: media)
         try verifySimpleCutRangeControls(project: scratch.appendingPathComponent("simple-cut-range"), media: media)
         try verifySimpleTopicCutControls(project: scratch.appendingPathComponent("simple-topic-cut"), media: media)
         try verifyFailedTopicCutHasNoReady(project: scratch.appendingPathComponent("failed-topic-cut"), media: media)
@@ -1406,6 +1407,81 @@ struct SimpleRenderedControlsProbe {
             $0.accessibilityIdentifier() == "simple.subtitledVideo.translation.create"
         }, "Reopening a completed translated subtitled video exposed regeneration")
         print("RENDERED_SOURCE_SUBTITLED_VIDEO_CONTROLS_PASS: source and approved target requests, progress/stop/error, source preservation, target open/reopen")
+    }
+
+    private static func verifySimpleAudioEnhancementControls(project: URL, media: URL) throws {
+        _ = try makeProject(project, media: media, source: .ru)
+        let store = ProjectStore()
+        let layout = ProjectLayout(root: project)
+        let model = WorkflowViewModel()
+        model.openProject(project)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: ContentView(model: model))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        settle(window)
+
+        try press("simple.goal.processVideo", in: window)
+        _ = try element("simple.processVideo.panel", in: window)
+        let create = try element("simple.processVideo.audio.create", in: window)
+        try require(create.isAccessibilityEnabled(),
+            "Simple audio enhancement did not expose its executable existing operation")
+        _ = try element("simple.processVideo.audio.profile", in: window)
+        _ = try element("simple.processVideo.speed.create", in: window)
+        _ = try element("simple.processVideo.blur.enabled", in: window)
+        _ = try element("simple.processVideo.watermark.select", in: window)
+        _ = try element("simple.processVideo.watermark.create", in: window)
+        _ = try element("simple.processVideo.filler.analyze", in: window)
+        try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.processVideo.advancedHandoff" },
+            "Simple processing panel handed supported operations off to Advanced")
+
+        let outputKinds = [
+            "enhanced-video",
+            "speed-adjusted-video",
+            "blurred-video",
+            "watermarked-video",
+            "filler-muted-video"
+        ]
+        for kind in outputKinds {
+            let output = layout.videoDirectory.appendingPathComponent("\(kind)-fixture.mp4")
+            try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: media, to: output)
+            try store.registerOutput(kind: kind, url: output, in: project)
+        }
+        model.loadDetectedResults()
+        model.blurEnabled = true
+        settle(window)
+        _ = try element("simple.processVideo.audio.ready", in: window)
+        _ = try element("simple.processVideo.audio.open", in: window)
+        _ = try element("simple.processVideo.speed.ready", in: window)
+        _ = try element("simple.processVideo.speed.open", in: window)
+        _ = try element("simple.processVideo.blur.ready", in: window)
+        _ = try element("simple.processVideo.blur.open", in: window)
+        _ = try element("simple.processVideo.watermark.ready", in: window)
+        _ = try element("simple.processVideo.watermark.open", in: window)
+        _ = try element("simple.processVideo.filler.ready", in: window)
+        _ = try element("simple.processVideo.filler.open", in: window)
+        try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.processVideo.audio.create" },
+            "Existing enhanced video exposed a duplicate Simple creation action")
+
+        let reopened = WorkflowViewModel()
+        reopened.openProject(project)
+        let reopenedWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        reopenedWindow.isReleasedWhenClosed = false
+        reopenedWindow.contentView = NSHostingView(rootView: ContentView(model: reopened))
+        reopenedWindow.makeKeyAndOrderFront(nil)
+        defer { reopenedWindow.close() }
+        settle(reopenedWindow)
+        reopened.blurEnabled = true
+        try press("simple.goal.processVideo", in: reopenedWindow)
+        _ = try element("simple.processVideo.audio.open", in: reopenedWindow)
+        _ = try element("simple.processVideo.blur.open", in: reopenedWindow)
+        _ = try element("simple.processVideo.watermark.open", in: reopenedWindow)
+        try require(!reopened.isRunning, "Reopening enhanced-video result started processing")
+        print("RENDERED_SIMPLE_PROCESSING_CONTROLS_PASS: supported actions, result/open/reopen")
     }
 
     private static func verifySimpleCutRangeControls(project: URL, media: URL) throws {

@@ -187,6 +187,7 @@ struct ContentView: View {
     @State private var showsSimpleTextContent = false
     @State private var showsSimpleSubtitledVideo = false
     @State private var showsSimpleFragment = false
+    @State private var showsSimpleProcessing = false
     @State private var simpleSubtitledVideoSource: SimpleSubtitledVideoSource = .source
     @State private var simpleSubtitledVideoActionStarted = false
     @State private var simpleFragmentStartText = "00:00:00"
@@ -297,6 +298,7 @@ struct ContentView: View {
             showsSimpleTextContent = false
             showsSimpleSubtitledVideo = false
             showsSimpleFragment = false
+            showsSimpleProcessing = false
             simpleSubtitledVideoSource = .source
             simpleSubtitledVideoActionStarted = false
             simpleFragmentStartText = "00:00:00"
@@ -857,6 +859,25 @@ struct ContentView: View {
                     .id(SimpleProjectHomeGoal.fragment.rawValue)
                 }
 
+                if showsSimpleProcessing {
+                    VStack(alignment: .leading, spacing: 9) {
+                        HStack {
+                            simpleSectionTitle("Обработать видео")
+                            Spacer()
+                            Button("Скрыть") { showsSimpleProcessing = false }
+                                .buttonStyle(.borderless)
+                                .accessibilityIdentifier("simple.processVideo.collapse")
+                        }
+                        simpleAudioEnhancementPanel()
+                    }
+                    .padding(10)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("simple.processVideo.panel")
+                    .id(SimpleProjectHomeGoal.processVideo.rawValue)
+                }
+
                 simpleSectionTitle("Последние результаты")
                 if state.recentResults.isEmpty {
                     Text("Готовых результатов пока нет")
@@ -1125,9 +1146,7 @@ struct ContentView: View {
             } else if goal == .fragment {
                 showsSimpleFragment = true
             } else {
-                presentationMode = .advanced
-                selectedResultsTab = 0
-                return
+                showsSimpleProcessing = true
             }
             DispatchQueue.main.async { reveal(goal) }
         } label: {
@@ -1154,6 +1173,194 @@ struct ContentView: View {
         .buttonStyle(.plain)
         .accessibilityLabel(goal.title)
         .accessibilityIdentifier("simple.goal.\(goal.rawValue)")
+    }
+
+    @ViewBuilder
+    private func simpleAudioEnhancementPanel() -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("Улучшение звука")
+                .font(.subheadline.weight(.semibold))
+            Text("Создаёт отдельное видео с улучшенным звуком. Исходное видео не изменяется.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Picker("Профиль", selection: $model.audioEnhancementProfile) {
+                ForEach(AudioEnhancementProfile.allCases) { profile in
+                    Text(profile.title).tag(profile)
+                }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("simple.processVideo.audio.profile")
+
+            if let output = simpleLatestOutput(kind: "enhanced-video") {
+                HStack(spacing: 10) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Видео с улучшенным звуком")
+                            .fontWeight(.semibold)
+                        Text("Готово")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Открыть") { openSimpleResult(output.path) }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("simple.processVideo.audio.open")
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("simple.processVideo.audio.ready")
+            } else {
+                Button("Создать видео с улучшенным звуком") {
+                    model.enhanceAudio()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.projectURL == nil || model.isRunning || model.isStopping)
+                .accessibilityIdentifier("simple.processVideo.audio.create")
+            }
+
+            Divider()
+
+            Text("Скорость")
+                .font(.subheadline.weight(.semibold))
+            Picker("Источник скорости", selection: $model.speedSource) {
+                ForEach(SpeedSourceKind.allCases) { source in
+                    Text(source.title).tag(source)
+                }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("simple.processVideo.speed.source")
+            HStack {
+                Slider(value: $model.speedFactor, in: 0.5...2, step: 0.05)
+                Text("\(model.speedFactor, specifier: "%.2f")x")
+                    .monospacedDigit()
+                    .frame(width: 48, alignment: .trailing)
+            }
+            Button("Создать видео с изменённой скоростью") { model.createSpeedAdjustedVideo() }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.projectURL == nil || model.isRunning || model.isStopping)
+                .accessibilityIdentifier("simple.processVideo.speed.create")
+            if let output = simpleLatestOutput(kind: "speed-adjusted-video") {
+                simpleProcessingOpenResult("Видео с изменённой скоростью", output: output, identifier: "simple.processVideo.speed")
+            }
+
+            Divider()
+
+            Text("Статический blur")
+                .font(.subheadline.weight(.semibold))
+            Toggle("Размыть область в правом верхнем углу", isOn: $model.blurEnabled)
+                .accessibilityIdentifier("simple.processVideo.blur.enabled")
+            if model.blurEnabled {
+                Picker("Источник blur", selection: $model.blurSource) {
+                    ForEach(SpeedSourceKind.allCases) { source in
+                        Text(source.title).tag(source)
+                    }
+                }
+                .pickerStyle(.segmented)
+                HStack {
+                    Text("Интенсивность")
+                    Slider(value: $model.blurIntensity, in: 1...30, step: 1)
+                    Text("\(Int(model.blurIntensity))")
+                        .monospacedDigit()
+                        .frame(width: 24, alignment: .trailing)
+                }
+                Button("Создать видео с blur") { model.createBlurredVideo() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.projectURL == nil || model.isRunning || model.isStopping)
+                    .accessibilityIdentifier("simple.processVideo.blur.create")
+                Text("Для выбора другой области blur используйте расширенный режим до создания файла.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("simple.processVideo.blur.advancedDetail")
+                if let output = simpleLatestOutput(kind: "blurred-video") {
+                    simpleProcessingOpenResult("Видео с blur", output: output, identifier: "simple.processVideo.blur")
+                }
+            }
+
+            Divider()
+
+            Text("Watermark")
+                .font(.subheadline.weight(.semibold))
+            HStack {
+                Button("Выбрать изображение") { model.watermarkImageURL = openWatermarkImage() }
+                    .accessibilityIdentifier("simple.processVideo.watermark.select")
+                if let imageURL = model.watermarkImageURL {
+                    Text(imageURL.lastPathComponent)
+                        .font(.caption)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            Picker("Положение watermark", selection: $model.watermarkPosition) {
+                ForEach(WatermarkPosition.allCases) { position in
+                    Text(position.title).tag(position)
+                }
+            }
+            Button("Создать видео с watermark") { model.createWatermarkedVideo() }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.projectURL == nil || model.watermarkImageURL == nil || model.isRunning || model.isStopping)
+                .accessibilityIdentifier("simple.processVideo.watermark.create")
+            if let output = simpleLatestOutput(kind: "watermarked-video") {
+                simpleProcessingOpenResult("Видео с watermark", output: output, identifier: "simple.processVideo.watermark")
+            }
+
+            Divider()
+
+            Text("Слова-паразиты")
+                .font(.subheadline.weight(.semibold))
+            Button("Найти слова-паразиты") { model.analyzeFillerWords() }
+                .buttonStyle(.bordered)
+                .disabled(model.projectURL == nil || model.isRunning || model.isStopping)
+                .accessibilityIdentifier("simple.processVideo.filler.analyze")
+            if model.fillerCandidates.isEmpty {
+                Text("Сначала выполните анализ. Если кандидатов нет, видео без удаления слов не создаётся.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Кандидатов: \(model.fillerCandidates.count)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Выбрать уверенные") { model.selectHighConfidenceFillers() }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("simple.processVideo.filler.selectHighConfidence")
+                Button("Создать видео без выбранных слов") {
+                    model.fillerMode = .muteSelected
+                    model.muteFillerWords()
+                }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(
+                        model.isRunning || model.isStopping
+                            || model.selectedFillerCandidateIDs.isEmpty
+                    )
+                    .accessibilityIdentifier("simple.processVideo.filler.create")
+            }
+            if let output = simpleLatestOutput(kind: "filler-muted-video") {
+                simpleProcessingOpenResult("Видео без выбранных слов", output: output, identifier: "simple.processVideo.filler")
+            }
+        }
+    }
+
+    private func simpleProcessingOpenResult(
+        _ title: String,
+        output: ProjectOutput,
+        identifier: String
+    ) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            Text(title).font(.caption.weight(.semibold))
+            Spacer()
+            Button("Открыть") { openSimpleResult(output.path) }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("\(identifier).open")
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("\(identifier).ready")
+    }
+
+    private func simpleLatestOutput(kind: String) -> ProjectOutput? {
+        model.outputs
+            .filter { $0.kind == kind && $0.isGeneratedMedia && FileManager.default.fileExists(atPath: $0.path) }
+            .sorted { $0.createdAt > $1.createdAt }
+            .first
     }
 
     @ViewBuilder
