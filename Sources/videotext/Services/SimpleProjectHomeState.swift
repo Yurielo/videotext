@@ -504,7 +504,9 @@ struct SimpleProjectHomeStateService {
                 )
             }
         let persistedFragments = fragments.compactMap(fragmentResult)
-        let deduplicated = Dictionary(grouping: readableArtifacts + discoveredMedia + persistedFragments, by: \.path)
+        let allResults: [SimpleProjectHomeResult] = readableArtifacts + discoveredMedia + persistedFragments
+        let groupedByPath: [String: [SimpleProjectHomeResult]] = Dictionary(grouping: allResults, by: \.path)
+        let deduplicated = groupedByPath
             .compactMap { _, results in results.max { lhs, rhs in
                 lhs.createdAt == rhs.createdAt ? lhs.title < rhs.title : lhs.createdAt < rhs.createdAt
             } }
