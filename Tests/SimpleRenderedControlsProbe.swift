@@ -1743,12 +1743,16 @@ struct SimpleRenderedControlsProbe {
             RunLoop.current.run(until: Date().addingTimeInterval(0.01))
             if !observedDiagnostics && model.progress.operation == .diagnostics {
                 window.contentView?.layoutSubtreeIfNeeded()
+                let activePicker = try element("simple.fragment.topic.picker", in: window)
                 try require(renderedText(try element("simple.fragment.topic.availability", in: window)).contains("Дождитесь завершения")
                     && element("simple.progress.stop", in: window).isAccessibilityEnabled()
                     && nodes(window).contains { $0.accessibilityIdentifier() == "simple.fragment.topic.progress" }
                     && !nodes(window).contains {
-                        ["simple.fragment.topic.unavailable", "simple.fragment.topic.create", "simple.fragment.topic.picker"].contains($0.accessibilityIdentifier() ?? "")
-                    }, "Topic cut diagnostics stage showed false unavailable topics or duplicate Create")
+                        ["simple.fragment.topic.unavailable", "simple.fragment.topic.create"].contains($0.accessibilityIdentifier() ?? "")
+                    }
+                    && !activePicker.isAccessibilityEnabled()
+                    && ((activePicker.accessibilityValue() as? String)?.contains("Approved fixture topic") == true),
+                    "Topic cut diagnostics stage lost its selected approved topic or showed false unavailable topics")
                 observedDiagnostics = true
             }
         }
@@ -1785,6 +1789,19 @@ struct SimpleRenderedControlsProbe {
             "Simple topic cut reran ASR or started an unrelated operation: \(operationRecords.keys.sorted())")
         try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.fragment.topic.ready" },
             "Cancelled Simple topic cut displayed a false ready result")
+
+        model.isRunning = true
+        model.isStopping = false
+        model.progress = WorkflowProgress(operation: .cutRange, operationFraction: 0.3, overallFraction: 0.3,
+            elapsed: 1, estimatedTotal: nil, remaining: nil, isIndeterminate: false)
+        settle(window)
+        try require(renderedText(try element("simple.fragment.topic.availability", in: window)).contains("Дождитесь завершения")
+            && !nodes(window).contains { $0.accessibilityIdentifier() == "simple.fragment.topic.progress" }
+            && !nodes(window).contains { $0.accessibilityIdentifier() == "simple.fragment.topic.picker" },
+            "A later unrelated workflow was presented as the previous topic cut")
+        model.isRunning = false
+        model.progress = .idle
+        settle(window)
 
         // A prior valid media result must remain openable while a second real
         // cut runs. The second run uses production WorkflowEngine and ffmpeg.
@@ -1864,15 +1881,18 @@ struct SimpleRenderedControlsProbe {
         let availability = renderedText(try element("simple.fragment.topic.availability", in: window))
         let stage = renderedText(try element("simple.progress.stage", in: window))
         let stop = try element("simple.progress.stop", in: window)
+        let picker = try element("simple.fragment.topic.picker", in: window)
         _ = try element("simple.fragment.topic.progress", in: window)
         try require(availability.contains(stopping ? "Останавливаем обработку" : "Дождитесь завершения")
             && stage.contains(stopping ? "Останавливаем обработку" : "Создаём фрагмент")
             && stop.isAccessibilityEnabled() == !stopping,
             "Running topic cut omitted truthful progress/Stop state")
         try require(!nodes(window).contains {
-            ["simple.fragment.topic.unavailable", "simple.fragment.topic.create", "simple.fragment.topic.picker"].contains($0.accessibilityIdentifier() ?? "")
+            ["simple.fragment.topic.unavailable", "simple.fragment.topic.create"].contains($0.accessibilityIdentifier() ?? "")
                 || ($0.accessibilityLabel() ?? "").contains("Нет доступных утверждённых тем")
-        }, "Running topic cut showed false unavailable topics or duplicate Create")
+        } && !picker.isAccessibilityEnabled()
+            && ((picker.accessibilityValue() as? String)?.contains("Approved fixture topic") == true),
+            "Running topic cut lost its selected approved topic or showed false unavailable topics")
         try require(nodes(window).contains { $0.accessibilityIdentifier() == "simple.fragment.topic.ready" } == previousResult
             && nodes(window).contains { $0.accessibilityIdentifier() == "simple.fragment.topic.open" } == previousResult,
             "Running topic cut lost a previous Ready/Open result or showed false Ready")

@@ -193,7 +193,9 @@ struct ContentView: View {
     @State private var simpleFragmentEndText = "00:00:02"
     @State private var simpleFragmentActionStarted = false
     @State private var simpleSelectedTopicFragmentID: String?
+    @State private var simpleSelectedTopicFragmentTitle: String?
     @State private var simpleTopicFragmentActionStarted = false
+    @State private var simpleTopicCutIsActive = false
     @State private var simpleTopicFragmentValidation = SimpleTopicFragmentValidation()
     @State private var simpleTranscription = SimpleTranscriptionPresentation()
     @State private var simpleTranslation = SimpleTranslationPresentation()
@@ -278,7 +280,8 @@ struct ContentView: View {
             if checkpoint == nil { simpleReviewTarget = nil }
             updateSimpleHumanReview()
         }
-        .onChange(of: model.isRunning) { _, _ in
+        .onChange(of: model.isRunning) { _, isRunning in
+            if !isRunning { simpleTopicCutIsActive = false }
             updateSimpleHumanReview()
         }
         .onChange(of: model.alert?.id) { _, _ in
@@ -300,7 +303,9 @@ struct ContentView: View {
             simpleFragmentEndText = "00:00:02"
             simpleFragmentActionStarted = false
             simpleSelectedTopicFragmentID = nil
+            simpleSelectedTopicFragmentTitle = nil
             simpleTopicFragmentActionStarted = false
+            simpleTopicCutIsActive = false
             simpleTopicFragmentValidation.reset()
         }
         .onChange(of: presentationMode) { _, mode in
@@ -1323,8 +1328,9 @@ struct ContentView: View {
         let selectedTopicID = simpleSelectedTopicFragmentID ?? ""
         let availability = model.simpleTopicCutAvailability(topicID: selectedTopicID)
         let hasSelection = !selectedTopicID.isEmpty
-        let topicCutIsActive = simpleTopicFragmentActionStarted
+        let topicCutIsActive = simpleTopicCutIsActive
             && (model.isRunning || model.isStopping)
+        let anotherWorkflowIsActive = (model.isRunning || model.isStopping) && !topicCutIsActive
         // Missing selection is a local form state, rather than a workflow error.
         // Keep Create enabled while an approved-topic list is available so the
         // user receives validation only after explicitly requesting creation.
@@ -1350,12 +1356,23 @@ struct ContentView: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("simple.fragment.topic.unavailable")
             } else if topicCutIsActive {
+                Picker("Тема", selection: .constant(simpleSelectedTopicFragmentID)) {
+                    Text(simpleSelectedTopicFragmentTitle ?? selectedTopicID)
+                        .tag(simpleSelectedTopicFragmentID)
+                }
+                .disabled(true)
+                .accessibilityIdentifier("simple.fragment.topic.picker")
                 Text(availability.message)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("simple.fragment.topic.availability")
                 ProgressView(value: min(max(model.progress.operationFraction, 0), 1), total: 1)
                     .accessibilityIdentifier("simple.fragment.topic.progress")
+            } else if anotherWorkflowIsActive {
+                Text(availability.message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("simple.fragment.topic.availability")
             } else if options.isEmpty {
                 Text(availabilityMessage)
                     .font(.caption)
@@ -1373,6 +1390,10 @@ struct ContentView: View {
                 }
                 .onChange(of: simpleSelectedTopicFragmentID) { _, _ in
                     simpleTopicFragmentActionStarted = false
+                    simpleTopicCutIsActive = false
+                    simpleSelectedTopicFragmentTitle = options.first(where: { $0.id == simpleSelectedTopicFragmentID }).map {
+                        "\($0.title) · \(TimecodeParser.display($0.start))–\(TimecodeParser.display($0.end))"
+                    }
                     simpleTopicFragmentValidation.reset()
                 }
                 .accessibilityIdentifier("simple.fragment.topic.picker")
@@ -1399,7 +1420,9 @@ struct ContentView: View {
                           let topicID = simpleSelectedTopicFragmentID else {
                         return
                     }
-                    simpleTopicFragmentActionStarted = model.startSimpleTopicCutFromAcceptedTranscript(topicID: topicID)
+                    let started = model.startSimpleTopicCutFromAcceptedTranscript(topicID: topicID)
+                    simpleTopicFragmentActionStarted = started
+                    simpleTopicCutIsActive = started
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!canAttemptCreate)
