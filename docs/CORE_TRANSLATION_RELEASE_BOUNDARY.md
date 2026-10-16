@@ -1,17 +1,24 @@
 # Core Release Translation Boundary
 
-The current release exposes the core path only: media, bundled SeminarText,
-`full.srt`, `transcript.txt`, subtitles, fragments, and persisted projects.
+The accepted release supports an explicit bidirectional EN↔RU translation
+operation for an approved source revision. `WorkflowOperation.translateTranscript`
+is enabled by `translationEnabledForCurrentRelease = true`. The translated
+transcript and subtitle artifacts become user-facing only after Translation
+Review approves them; pending or failed translation must never be presented as
+approved output or silently substituted with the source language.
 
-`WorkflowOperation.translateTranscript` and `WorkflowOperation.createDubbing`
-are disabled at the release boundary. The workflow rejects either operation
-before project creation or provider invocation. The UI removes translation from
-the selectable operations and truthfully marks dubbing unavailable because it
-depends on translation.
+Translation reuses the existing `TranslationAdapter`, TranslateGemma providers,
+selected-timing translation code, cache, artifacts, schema and Human Translation
+Review. It preserves source timing, cue IDs, provenance and project integrity.
+The supported targets are EN→RU and RU→EN only. Translation is requested
+explicitly; opening Simple Mode or an approved project does not repeat it.
 
-No translation implementation was removed. The retained future entry point is
-`WorkflowOperation.translateTranscript`; `TranslationAdapter`, TranslateGemma
-providers, selected-timing translation code, cache, artifacts, schema, and
-Human Translation Review remain in place. Re-enabling translation requires a
-separate product decision, restoring the release-boundary enablement, and
-running its own translation-specific acceptance and release gates.
+`WorkflowOperation.createDubbing` remains disabled through
+`dubbingEnabledForCurrentRelease = false`. Dubbing/TTS is outside the accepted
+product scope and the UI must describe it as unavailable rather than treating
+translation as a substitute.
+
+Earlier core-only releases disabled both translation and dubbing at this
+boundary. That historical restriction no longer describes the current
+translation setting; it remains relevant only when interpreting older release
+evidence.
