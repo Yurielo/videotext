@@ -1323,6 +1323,8 @@ struct ContentView: View {
         let selectedTopicID = simpleSelectedTopicFragmentID ?? ""
         let availability = model.simpleTopicCutAvailability(topicID: selectedTopicID)
         let hasSelection = !selectedTopicID.isEmpty
+        let topicCutIsActive = simpleTopicFragmentActionStarted
+            && (model.isRunning || model.isStopping)
         // Missing selection is a local form state, rather than a workflow error.
         // Keep Create enabled while an approved-topic list is available so the
         // user receives validation only after explicitly requesting creation.
@@ -1347,6 +1349,13 @@ struct ContentView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("simple.fragment.topic.unavailable")
+            } else if topicCutIsActive {
+                Text(availability.message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("simple.fragment.topic.availability")
+                ProgressView(value: min(max(model.progress.operationFraction, 0), 1), total: 1)
+                    .accessibilityIdentifier("simple.fragment.topic.progress")
             } else if options.isEmpty {
                 Text(availabilityMessage)
                     .font(.caption)
@@ -1378,7 +1387,7 @@ struct ContentView: View {
                         .accessibilityIdentifier("simple.fragment.topic.validation")
                 }
             }
-            if topicsArtifact.isUsableForTopicCut {
+            if topicsArtifact.isUsableForTopicCut && !topicCutIsActive {
                 if simpleTopicFragmentActionStarted, model.status == "Ошибка" {
                     Text(model.alert?.message ?? "Фрагмент по теме не создан. Исправьте проблему и повторите попытку.")
                         .font(.caption)
