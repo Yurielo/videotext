@@ -17,6 +17,7 @@ legacy = (
     "backend-developer", "frontend-developer", "database-architect",
     "jira-sprint-planner", "confluence-doc-writer",
 )
+legacy_release_invariant = "два последовательных полностью успешных E2E"
 sections = (
     "Назначение", "Может менять", "Не может менять", "Обязательные проверки",
     "Критерии готовности", "Взаимодействие", "Неприкосновенное QA-правило",
@@ -55,6 +56,8 @@ try:
             require("docs/RELEASE_GATE.md" in contract, f"{role}: missing shared gate")
         else:
             require(role in routing, f"{role}: missing compatibility routing")
+            require(legacy_release_invariant in contract,
+                    f"{role}: missing legacy release invariant")
     for role in ("product-owner", "github-pr-reviewer", "jira-sprint-planner"):
         data = tomllib.loads(read(f".codex/agents/{role}.toml"))
         require(data.get("sandbox_mode") == "read-only", f"{role}: read-only lost")
