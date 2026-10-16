@@ -199,9 +199,3 @@ private struct ProbeFailure: LocalizedError {
     var message: String
     var errorDescription: String? { message }
 }
-
-// The focused browser probe never creates topic artifacts. SRTService links
-// against this helper for unrelated speed-adjustment code in the full target.
-enum StableTopicHash {
-    static func string(_ value: String) -> String { value }
-}

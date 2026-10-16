@@ -10,6 +10,7 @@ struct SimpleProjectHomeProbe {
         try verifiesPersistedFragmentsRemainInRecentResults()
         try verifiesReadableTextDoesNotFallBackToSupportFiles()
         try verifiesSelectedTopicVariantUsesItsOwnTXT()
+        try verifiesStrictApprovedTopicSnapshotReadiness()
         try verifiesApprovedCorrectionTargetsInBothDirections()
         print("SIMPLE_PROJECT_HOME_PROBE_PASS")
     }
@@ -45,7 +46,7 @@ struct SimpleProjectHomeProbe {
         try writeText("Исходная расшифровка", to: layout.transcriptURL)
         try writeText("Темы", to: layout.topicsTextURL(language: .ru, granularity: .normal))
         let source = sourceRevision(language: .ru, status: .approved)
-        let topic = topicRevision(status: .approved)
+        let topic = try topicRevision(projectURL: projectURL, status: .approved)
         var manifest = baseManifest(language: .ru)
         manifest.transcriptRevisions = [source]
         manifest.humanReviewState = HumanReviewState(
@@ -77,11 +78,21 @@ struct SimpleProjectHomeProbe {
         try expect(ready.artifact(.transcription).detail == "Русский", "Неверная подпись RU source")
         try expect(ready.artifact(.topics).readiness == .ready, "Утверждённые темы не показаны готовыми")
         try expect(ready.artifact(.topics).reviewTarget == nil, "Approved Topics correction должен оставаться Advanced-only")
-        try expect(ready.artifact(.topics).detail == "тем: 7", "Home не использует существующий summary тем")
+        try expect(ready.artifact(.topics).detail == "тем: 1", "Home должен считать темы из immutable approved snapshot")
+        try expect(ready.artifact(.topics).isUsableForTopicCut, "Approved immutable topics не стали доступны для Topic Cut")
         try expect(
-            ready.artifact(.topics).openOutputPath == layout.topicsTextURL(language: .ru, granularity: .normal).path,
-            "Темы должны открывать выбранный topics TXT, а не JSON"
+            ready.artifact(.topics).openOutputPath == layout.topicRevisionTextURL(id: topic.id).path,
+            "Темы должны открывать immutable approved TXT"
         )
+        try writeText("mutable topics with a different count", to: layout.topicsTextURL(language: .ru, granularity: .normal))
+        let divergentWorkingSummary = service.make(
+            projectURL: projectURL,
+            manifest: manifest,
+            topicsDetail: "тем: 99",
+            discoveredOutputs: []
+        )
+        try expect(divergentWorkingSummary.artifact(.topics).detail == "тем: 1",
+            "Mutable topics summary изменил число тем immutable approved snapshot")
 
         try FileManager.default.removeItem(at: layout.transcriptURL)
         let unavailableTranscript = service.make(
@@ -266,10 +277,15 @@ struct SimpleProjectHomeProbe {
         let approvedData = try encoder.encode(approvedFile)
         try FileManager.default.createDirectory(at: approvedURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try approvedData.write(to: approvedURL, options: .atomic)
+        try "approved topics".write(
+            to: layout.topicRevisionTextURL(id: approvedID),
+            atomically: true,
+            encoding: .utf8
+        )
         let approvedRevision = TopicRevision(
             id: approvedID, language: .ru, granularity: .normal, parentRevisionID: nil,
             jsonPath: approvedURL.path, textPath: layout.topicRevisionTextURL(id: approvedID).path,
-            contentHash: "approved-fixture",
+            contentHash: StableTopicHash.string(String(decoding: approvedData, as: UTF8.self)),
             status: .approved, createdAt: Date(timeIntervalSince1970: 1)
         )
         manifest.topicRevisions = [approvedRevision]
@@ -359,7 +375,8 @@ struct SimpleProjectHomeProbe {
             createdAt: Date(),
             reviewStatus: .approved
         )
-        let topic = topicRevision(status: .approved)
+        let topic = try topicRevision(projectURL: projectURL, status: .approved)
+        try FileManager.default.removeItem(at: layout.topicRevisionTextURL(id: topic.id))
         var manifest = baseManifest(language: .ru)
         manifest.transcriptRevisions = [source, translation]
         manifest.humanReviewState = HumanReviewState(
@@ -399,18 +416,14 @@ struct SimpleProjectHomeProbe {
         defer { removeProject(projectURL) }
         let layout = ProjectLayout(root: projectURL)
         let source = sourceRevision(language: .en, status: .approved)
-        let translatedCoarse = TopicRevision(
+        let translatedCoarse = try topicRevision(
+            projectURL: projectURL,
             id: "topics-ru-coarse",
             language: .ru,
             granularity: .coarse,
-            parentRevisionID: nil,
-            jsonPath: layout.topicsURL(language: .ru, granularity: .coarse).path,
-            textPath: layout.topicsTextURL(language: .ru, granularity: .coarse).path,
-            contentHash: "topics-ru-coarse",
-            status: .approved,
-            createdAt: Date()
+            status: .approved
         )
-        try writeText("Темы на русском", to: layout.topicsTextURL(language: .ru, granularity: .coarse))
+        try writeText("Изменяемый рабочий текст", to: layout.topicsTextURL(language: .ru, granularity: .coarse))
         var manifest = baseManifest(language: .en)
         manifest.transcriptRevisions = [source]
         manifest.humanReviewState = HumanReviewState(
@@ -438,8 +451,104 @@ struct SimpleProjectHomeProbe {
         )
         let topics = state.artifact(.topics)
         try expect(topics.readiness == .ready, "Selected translated/coarse topics variant не показан готовым")
-        try expect(topics.openOutputPath == layout.topicsTextURL(language: .ru, granularity: .coarse).path, "Selected topic variant должен открыть свой TXT")
+        try expect(topics.openOutputPath == translatedCoarse.textPath, "Selected topic variant должен открыть immutable TXT")
+        try expect(topics.isUsableForTopicCut, "Selected approved variant не получил Topic Cut capability")
         try expect(topics.displayTitle == "Темы RU · Крупный", "Simple mode должен явно называть выбранный variant тем")
+        try expect(topics.detail == "тем: 1", "Selected variant показал mutable summary вместо immutable topic count")
+    }
+
+    private static func verifiesStrictApprovedTopicSnapshotReadiness() throws {
+        let service = SimpleProjectHomeStateService()
+        let projectURL = try makeProject("strict-topic-snapshot")
+        defer { removeProject(projectURL) }
+        let layout = ProjectLayout(root: projectURL)
+        let revision = try topicRevision(projectURL: projectURL, status: .approved)
+        var manifest = baseManifest(language: .ru)
+        manifest.topicRevisions = [revision]
+        manifest.topicReviewState = TopicReviewState(
+            enabled: true,
+            activeRevisionIDs: [revision.variantKey: revision.id],
+            pendingCheckpoint: nil
+        )
+
+        func topicsArtifact(
+            _ manifest: ProjectManifest,
+            project: URL = projectURL,
+            granularity: TopicGranularity = .normal
+        ) -> SimpleProjectHomeArtifact {
+            service.make(
+                projectURL: project,
+                manifest: manifest,
+                topicsDetail: "тем: 1",
+                discoveredOutputs: [],
+                topicLanguage: .ru,
+                topicGranularity: granularity
+            ).artifact(.topics)
+        }
+
+        let ready = topicsArtifact(manifest)
+        try expect(ready.readiness == .ready && ready.isUsableForTopicCut, "Локальный immutable snapshot не распознан")
+        try expect(ready.openOutputPath == revision.textPath, "Ready topics открывают не immutable TXT")
+
+        try writeText("mutable working topics diverged", to: layout.topicsTextURL(language: .ru, granularity: .normal))
+        try writeText("mutable working JSON diverged", to: layout.topicsURL(language: .ru, granularity: .normal))
+        try writeText("1\n00:00:00,000 --> 00:00:02,000\nsource\n", to: layout.fullSRTURL)
+        let future = Date(timeIntervalSinceNow: 3600)
+        for url in [
+            layout.topicsTextURL(language: .ru, granularity: .normal),
+            layout.topicsURL(language: .ru, granularity: .normal),
+            layout.fullSRTURL
+        ] {
+            try FileManager.default.setAttributes([.modificationDate: future], ofItemAtPath: url.path)
+        }
+        let afterMutableChanges = topicsArtifact(manifest)
+        try expect(
+            afterMutableChanges.readiness == .ready
+                && afterMutableChanges.isUsableForTopicCut
+                && afterMutableChanges.openOutputPath == revision.textPath,
+            "Working topics/SRT divergence или mtime деавторизовали immutable snapshot"
+        )
+
+        var notApproved = manifest
+        notApproved.topicRevisions?[0].status = .pending
+        try expectUnavailable(topicsArtifact(notApproved), "Неутверждённая revision стала actionable")
+
+        var wrongVariant = manifest
+        wrongVariant.topicRevisions?[0].granularity = .coarse
+        try expectUnavailable(topicsArtifact(wrongVariant), "Revision другого variant стала actionable")
+
+        var ambiguous = manifest
+        ambiguous.topicRevisions?.append(revision)
+        try expectUnavailable(topicsArtifact(ambiguous), "Неоднозначные revisions стали actionable")
+
+        var external = manifest
+        external.topicRevisions?[0].jsonPath = layout.topicsURL(language: .ru, granularity: .normal).path
+        external.topicRevisions?[0].textPath = layout.topicsTextURL(language: .ru, granularity: .normal).path
+        try expectUnavailable(topicsArtifact(external), "External/mutable paths стали immutable snapshot")
+
+        let originalJSON = try Data(contentsOf: URL(fileURLWithPath: revision.jsonPath))
+        try Data("altered".utf8).write(to: URL(fileURLWithPath: revision.jsonPath), options: .atomic)
+        try expectUnavailable(topicsArtifact(manifest), "Изменённый immutable JSON стал actionable")
+        try originalJSON.write(to: URL(fileURLWithPath: revision.jsonPath), options: .atomic)
+
+        let copiedProject = try makeProject("copied-topic-snapshot")
+        defer { removeProject(copiedProject) }
+        try FileManager.default.removeItem(at: copiedProject)
+        try FileManager.default.copyItem(at: projectURL, to: copiedProject)
+        try expectUnavailable(
+            topicsArtifact(manifest, project: copiedProject),
+            "Копия проекта с путями immutable snapshot из другого проекта стала actionable"
+        )
+
+        try FileManager.default.removeItem(at: URL(fileURLWithPath: revision.textPath))
+        let missingText = topicsArtifact(manifest)
+        try expect(
+            missingText.readiness == .missing
+                && missingText.isUsableForTopicCut
+                && missingText.openOutputPath == nil
+                && missingText.detail == "Текст тем недоступен",
+            "Отсутствующий immutable TXT должен блокировать только Open, сохраняя Topic Cut capability"
+        )
     }
 
     private static func verifiesApprovedCorrectionTargetsInBothDirections() throws {
@@ -514,17 +623,64 @@ struct SimpleProjectHomeProbe {
         )
     }
 
-    private static func topicRevision(status: TopicRevisionStatus) -> TopicRevision {
-        TopicRevision(
-            id: "topics-ru-normal",
-            language: .ru,
-            granularity: .normal,
+    private static func topicRevision(
+        projectURL: URL,
+        id: String = "topics-ru-normal",
+        language: ArtifactLanguage = .ru,
+        granularity: TopicGranularity = .normal,
+        status: TopicRevisionStatus
+    ) throws -> TopicRevision {
+        let layout = ProjectLayout(root: projectURL)
+        let file = TopicsFile(
+            adapter: "probe",
+            createdAt: Date(timeIntervalSince1970: 1),
+            sourceSRT: layout.fullSRTURL.path,
+            sourceSignature: "probe",
+            status: .ready,
+            granularity: granularity,
+            topics: [TopicSegment(
+                id: "topic-1",
+                title: "Тема",
+                start: 0,
+                end: 2,
+                summary: "Описание",
+                keywords: ["тема"],
+                confidence: 1,
+                boundaryReason: "probe",
+                sourceCueStart: 1,
+                sourceCueEnd: 1,
+                cueIds: [1]
+            )]
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(file)
+        let jsonURL = layout.topicRevisionJSONURL(id: id)
+        let textURL = layout.topicRevisionTextURL(id: id)
+        try FileManager.default.createDirectory(at: jsonURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: jsonURL, options: .atomic)
+        try "approved topics".write(to: textURL, atomically: true, encoding: .utf8)
+        return TopicRevision(
+            id: id,
+            language: language,
+            granularity: granularity,
             parentRevisionID: nil,
-            jsonPath: "/tmp/topics.json",
-            textPath: "/tmp/topics.txt",
-            contentHash: "topics",
+            jsonPath: jsonURL.path,
+            textPath: textURL.path,
+            contentHash: StableTopicHash.string(String(decoding: data, as: UTF8.self)),
             status: status,
             createdAt: Date()
+        )
+    }
+
+    private static func expectUnavailable(_ artifact: SimpleProjectHomeArtifact, _ message: String) throws {
+        try expect(
+            artifact.readiness != .ready
+                && !artifact.isUsableForTopicCut
+                && artifact.openOutputPath == nil
+                && artifact.detail == "Темы недоступны",
+            message
         )
     }
 

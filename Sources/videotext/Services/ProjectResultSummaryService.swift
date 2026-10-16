@@ -164,11 +164,8 @@ struct ProjectResultSummaryService {
                       let source = try? String(contentsOf: sourceURL, encoding: .utf8) else { return false }
                 return file.sourceSignature == StableTopicHash.string(source)
             }
-            guard let matchingSource else {
+            guard matchingSource != nil else {
                 return summary(.topics, .partial, "\(topicDescription(topics.count)); содержимое SRT изменилось")
-            }
-            if !isAtLeastAsNew(layout.topicsURL, as: matchingSource) {
-                return summary(.topics, .partial, "\(topicDescription(topics.count)); SRT изменён позднее")
             }
             if file.status == .draft {
                 return summary(.topics, .partial, "\(topicDescription(topics.count)); черновой режим")

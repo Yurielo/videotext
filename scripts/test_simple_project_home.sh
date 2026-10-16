@@ -15,6 +15,7 @@ SWIFT_SOURCES=(
   "${ROOT}/Sources/videotext/Core/Models.swift"
   "${ROOT}/Sources/videotext/Core/ProjectLayout.swift"
   "${ROOT}/Sources/videotext/Core/ArtifactModels.swift"
+  "${ROOT}/Sources/videotext/Core/StableTopicHash.swift"
   "${ROOT}/Sources/videotext/Services/SimpleProjectHomeState.swift"
 )
 
@@ -40,7 +41,7 @@ ui = pathlib.Path(sys.argv[2]).read_text()
 
 required_state = {
     "source transcript TXT": "ProjectLayout(root: projectURL).transcriptURL",
-    "topic TXT": "topicsTextURL(language: language, granularity: granularity)",
+    "immutable approved topic TXT": "topicRevisionTextURL(id: revision.id)",
     "translated transcript TXT": "transcriptURL(language: target)",
     "user-facing result filter": "isGeneratedMedia && !fragmentPaths.contains($0.path) && isNonemptyFile(at: $0.path)",
     "persisted fragment presentation": "let persistedFragments = fragments.compactMap",
