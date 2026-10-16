@@ -1012,7 +1012,7 @@ struct ContentView: View {
                     .accessibilityElement(children: .combine)
                     .accessibilityIdentifier("simple.\(section).topics.advancedHandoff")
             } else if artifact.readiness == .missing || artifact.readiness == .failed {
-                if simpleHasActiveNormalTopicRevision {
+                if simpleHasCanonicalActiveNormalTopicRevision {
                     EmptyView()
                 } else if !simpleSourceTranscriptIsApproved {
                     VStack(alignment: .leading, spacing: 3) {
@@ -1060,7 +1060,7 @@ struct ContentView: View {
     @ViewBuilder
     private func simpleTopicsRecoveryMessage(_ artifact: SimpleProjectHomeArtifact, section: String) -> some View {
         if (artifact.readiness == .missing || artifact.readiness == .failed),
-           simpleHasActiveNormalTopicRevision {
+           simpleHasCanonicalActiveNormalTopicRevision {
             Text(artifact.isUsableForTopicCut
                 ? "Текст тем недоступен для открытия. Восстановите файл. Отсутствие текста само по себе не блокирует создание фрагмента по утверждённой теме."
                 : "Утверждённые темы недоступны. Восстановите файлы проекта или откройте корректный проект.")
@@ -1111,12 +1111,24 @@ struct ContentView: View {
         return manifest.activeTranscriptRevision(for: language)?.reviewStatus == .approved
     }
 
-    private var simpleHasActiveNormalTopicRevision: Bool {
+    private var simpleHasCanonicalActiveNormalTopicRevision: Bool {
         guard let projectURL = model.projectURL,
               let manifest = try? ProjectStore().load(from: projectURL),
               let language = manifest.languageProfile?.effective else { return false }
         let key = "\(language.rawValue).\(TopicGranularity.normal.rawValue)"
-        return manifest.topicReviewState?.activeRevisionIDs[key] != nil
+        guard let activeID = manifest.topicReviewState?.activeRevisionIDs[key] else { return false }
+        guard let revisions = manifest.topicRevisions,
+              revisions.filter({ $0.id == activeID }).count == 1,
+              let revision = revisions.first(where: { $0.id == activeID }),
+              revision.language == language,
+              revision.granularity == .normal,
+              revision.status == .approved else {
+            return true
+        }
+        let expected = ProjectLayout(root: projectURL).topicRevisionJSONURL(id: revision.id)
+            .standardizedFileURL.path
+        let stored = URL(fileURLWithPath: revision.jsonPath).standardizedFileURL.path
+        return stored == expected
     }
 
     private var simpleTopicGranularityNeedsChoice: Bool {
@@ -1552,7 +1564,7 @@ struct ContentView: View {
             if !topicsArtifact.isUsableForTopicCut {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(topicsArtifact.detail)
-                    if simpleHasActiveNormalTopicRevision {
+                    if simpleHasCanonicalActiveNormalTopicRevision {
                         Text("Утверждённые темы недоступны. Восстановите файлы проекта или откройте корректный проект.")
                     }
                 }

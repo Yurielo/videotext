@@ -233,6 +233,7 @@ struct SimpleRenderedControlsProbe {
         try verifyCreationControls(project: scratch.appendingPathComponent("new-source"), media: media)
         try verifyTopicControls(project: scratch.appendingPathComponent("topics"), media: media)
         try verifyInvalidTopicSnapshotPresentation(project: scratch.appendingPathComponent("invalid-topics"), media: media)
+        try verifyRelocatedTopicSnapshotPresentation(project: scratch.appendingPathComponent("relocated-topics"), media: media)
         try verifyMissingImmutableTopicTextPresentation(project: scratch.appendingPathComponent("missing-topic-text"), media: media)
         try verifyTranslationControls(project: scratch.appendingPathComponent("translation"), media: media)
         try verifySourceSubtitledVideoControls(project: scratch.appendingPathComponent("subtitled-video"), media: media)
@@ -933,6 +934,37 @@ struct SimpleRenderedControlsProbe {
         print("RENDERED_INVALID_TOPIC_SNAPSHOT_PASS: visible recovery in both panels, no open/cut/regeneration, reopen")
     }
 
+    private static func verifyRelocatedTopicSnapshotPresentation(project: URL, media: URL) throws {
+        var manifest = try makeProject(project, media: media, source: .ru)
+        guard var revision = manifest.topicRevisions?.first else {
+            throw RenderedProbeFailure(message: "Relocated-snapshot fixture has no approved topic revision")
+        }
+        revision.jsonPath = "/former-project/Texts/Topics/Revisions/\(revision.id).json"
+        revision.textPath = "/former-project/Texts/Topics/Revisions/\(revision.id).txt"
+        manifest.topicRevisions = [revision]
+        try ProjectStore().save(manifest, to: project)
+
+        let model = WorkflowViewModel()
+        model.openProject(project)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: ContentView(model: model))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        settle(window)
+
+        try press("simple.goal.textContent", in: window)
+        let create = try element("simple.textContent.topics.create", in: window)
+        try require(create.isAccessibilityEnabled() && model.canCreateTopicsFromAcceptedTranscript,
+                    "Relocated stale topic snapshot did not expose enabled regeneration")
+        try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.topics.unavailable" },
+                    "Relocated stale topic snapshot incorrectly rendered canonical-corruption recovery")
+        try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.topics.open" },
+                    "Relocated stale topic snapshot exposed an unverified topic result")
+        print("RENDERED_RELOCATED_TOPIC_SNAPSHOT_PASS: enabled regeneration without snapshot open/recovery")
+    }
+
     private static func verifyMissingImmutableTopicTextPresentation(project: URL, media: URL) throws {
         let manifest = try makeProject(project, media: media, source: .ru)
         guard let revision = manifest.topicRevisions?.first else {
@@ -1437,18 +1469,18 @@ struct SimpleRenderedControlsProbe {
         try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.processVideo.advancedHandoff" },
             "Simple processing panel handed supported operations off to Advanced")
 
-        let outputKinds = [
-            "enhanced-video",
-            "speed-adjusted-video",
-            "blurred-video",
-            "watermarked-video",
-            "filler-muted-video"
+        let outputs: [(kind: String, url: URL)] = [
+            ("enhanced-video", layout.enhancedVideoURL(id: "fixture")),
+            ("speed-adjusted-video", layout.speedAdjustedVideoURL(source: .fullVideo, language: .ru, factor: 1.25)),
+            ("blurred-video", layout.blurredVideoURL(source: .fullVideo, id: "fixture")),
+            ("watermarked-video", layout.watermarkedVideoURL(source: .fullVideo, id: "fixture")),
+            ("filler-muted-video", layout.fillerMutedVideoURL(id: "fixture"))
         ]
-        for kind in outputKinds {
-            let output = layout.videoDirectory.appendingPathComponent("\(kind)-fixture.mp4")
+        for outputRecord in outputs {
+            let output = outputRecord.url
             try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
             try FileManager.default.copyItem(at: media, to: output)
-            try store.registerOutput(kind: kind, url: output, in: project)
+            try store.registerOutput(kind: outputRecord.kind, url: output, in: project)
         }
         model.loadDetectedResults()
         model.blurEnabled = true
