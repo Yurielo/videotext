@@ -1,74 +1,34 @@
-# Роли разработки videotext
+# Роли VideoText v2
 
-Эта папка содержит специализированные инструкции агентов. Одноименный `.toml`
-регистрирует custom agent в Codex, а `.md` хранит его подробный проектный
-контракт. Корневой `AGENTS.md` задает маршрутизацию для всех задач внутри
-проекта; этот файл служит кратким индексом и контрактом передачи работы.
+Основных ролей пять. Product Owner работает в основном контексте координатора;
+количество отдельных запусков зависит от риска задачи.
 
-## Роли
+| ID | Контракт |
+| --- | --- |
+| product-owner | [product-owner.md](product-owner.md) |
+| application-developer | [application-developer.md](application-developer.md) |
+| qa-test-engineer | [qa-test-engineer.md](qa-test-engineer.md) |
+| github-pr-reviewer | [github-pr-reviewer.md](github-pr-reviewer.md) |
+| ci-cd-engineer | [ci-cd-engineer.md](ci-cd-engineer.md) |
 
-- [`backend-developer.md`](backend-developer.md) - workflow, сервисы, адаптеры,
-  внешние CLI, SRT/topics и строгая backend-валидация.
-- [`frontend-developer.md`](frontend-developer.md) - SwiftUI, состояния,
-  прогресс/ETA, уведомления, результаты и редактирование тем.
-- [`database-architect.md`](database-architect.md) - файловые схемы, история,
-  кэш, миграции и обратная совместимость проектов.
-- [`qa-test-engineer.md`](qa-test-engineer.md) - test matrix, probes,
-  интеграционные проверки, E2E и release gate.
-- [`ci-cd-engineer.md`](ci-cd-engineer.md) - сборка, упаковка, codesign,
-  smoke-проверка и выдача `.app`.
-- [`github-pr-reviewer.md`](github-pr-reviewer.md) - независимое read-only
-  ревью рисков и тестовых пробелов.
-- [`product-owner.md`](product-owner.md) - пользовательская ценность, scope,
-  acceptance criteria и release readiness.
-- [`jira-sprint-planner.md`](jira-sprint-planner.md) - этапы, зависимости,
-  владельцы и Definition of Done.
-- [`confluence-doc-writer.md`](confluence-doc-writer.md) - архитектура,
-  инструкции, QA-отчеты и release notes.
+Переходные роли, не входящие в основной маршрут:
+[backend-developer.md](backend-developer.md),
+[frontend-developer.md](frontend-developer.md),
+[database-architect.md](database-architect.md),
+[jira-sprint-planner.md](jira-sprint-planner.md),
+[confluence-doc-writer.md](confluence-doc-writer.md).
+Они сохраняются для уже выданных handoff. Имена Jira/Confluence не предоставляют
+доступа к внешним сервисам.
 
-## Как включаются роли
+Маршрутизация: [AGENTS.md](../../AGENTS.md).
+Общий gate: [RELEASE_GATE.md](../../docs/RELEASE_GATE.md).
+Переход: [TRANSITION.md](../../docs/agents/TRANSITION.md).
+Справочники: [pipeline](../../docs/agents/pipeline.md),
+[SwiftUI](../../docs/agents/swiftui.md),
+[persistence](../../docs/agents/persistence.md).
 
-1. Координатор читает `AGENTS.md`.
-2. `Product Owner` является главным управляющим агентом: он первым фиксирует
-   пользовательский результат, scope, acceptance criteria и решает, каких
-   профильных агентов запускать по надобности.
-3. Codex загружает соответствующий `.toml`, после чего агент читает парный
-   Markdown-файл полностью.
-4. Для многомодульной реализации используются реальные субагенты с
-   непересекающимися областями записи, если они доступны в среде.
-5. Ревьюер и QA не принимают реализацию на доверии: они читают diff и результаты
-   тестов независимо.
-6. CI/CD получает handoff только после QA; документация обновляется по
-   фактическому результату.
-7. CI/CD использует deterministic `LEVEL_A`/`LEVEL_B` classifier. Hosted macOS
-   требуется только для `LEVEL_B`; локальные продуктовые gates обязательны для
-   обоих уровней согласно [`docs/CI_COST_POLICY.md`](../../docs/CI_COST_POLICY.md).
-
-Роли не являются постоянно работающими фоновыми процессами. Они активируются
-на конкретную задачу координатором, а TOML-конфигурация и `AGENTS.md` делают
-этот порядок частью дальнейшей разработки.
-
-## Контракт handoff
-
-Каждая передача между ролями содержит:
-
-- цель и acceptance criteria;
-- владельца и разрешенные файлы;
-- измененные файлы и ключевые решения;
-- команды проверок с фактическим результатом;
-- незакрытые риски и следующий владелец.
-
-Если агент обнаружил проблему вне своей области, он не делает скрытую правку,
-а передает минимальное воспроизведение профильной роли.
-
-## Проверка комплекта
-
-Из корня проекта:
-
-```bash
-scripts/check_agents.sh
-```
-
-Проверка подтверждает наличие всех девяти пар `.toml`/`.md`, валидность
-обязательных полей TOML, ссылки из `AGENTS.md` и неприкосновенное правило двух
-чистых E2E.
+Проверка из любого рабочего каталога: scripts/check_agents.sh
+(путь к скрипту должен указывать на нужный checkout).
+Проверяются пять основных и пять переходных регистраций, TOML, контракты,
+ссылки и обязательный release gate. Родительская папка не изменяется и
+не обязана содержать дубликат конфигурации.

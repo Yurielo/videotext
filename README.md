@@ -118,11 +118,15 @@ dispatch, controlled infrastructure retry и billing hard stop описаны в
 
 ## Разработка с агентами
 
-Проектный [`AGENTS.md`](AGENTS.md) подключает девять специализированных ролей
-из [`.codex/agents/`](.codex/agents/README.md) к дальнейшей разработке.
-Координатор выбирает ведущую роль по типу задачи, разделяет области записи,
-подключает независимые QA/review/release-роли и применяет обязательный
-release-gate перед выдачей `.app`.
+Проектный [`AGENTS.md`](AGENTS.md) задает пять основных ролей:
+Product Owner / координатор, Application Developer, QA Engineer,
+Code Reviewer и Release Engineer. Координатор выбирает минимальный полезный
+набор по риску задачи; один исполнитель владеет сквозной реализацией.
+Пять прежних ролей сохранены для совместимости с уже выданными handoff.
+Контракты находятся в [`.codex/agents/`](.codex/agents/README.md),
+общий release-gate в [`docs/RELEASE_GATE.md`](docs/RELEASE_GATE.md).
+[План перехода](docs/agents/TRANSITION.md) сохраняет текущие задачи
+и предусматривает наблюдение на пяти следующих задачах.
 
 Целостность интеграции проверяется командой:
 
