@@ -225,6 +225,11 @@ struct SimpleRenderedControlsProbe {
             NSNumber(value: true),
             forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface")
         )
+        if CommandLine.arguments.contains("--topic-cut-only") {
+            try verifySimpleTopicCutControls(project: scratch.appendingPathComponent("simple-topic-cut"), media: media)
+            try verifyFailedTopicCutHasNoReady(project: scratch.appendingPathComponent("failed-topic-cut"), media: media)
+            return
+        }
         try verifyCreationControls(project: scratch.appendingPathComponent("new-source"), media: media)
         try verifyTopicControls(project: scratch.appendingPathComponent("topics"), media: media)
         try verifyInvalidTopicSnapshotPresentation(project: scratch.appendingPathComponent("invalid-topics"), media: media)
@@ -233,6 +238,7 @@ struct SimpleRenderedControlsProbe {
         try verifySourceSubtitledVideoControls(project: scratch.appendingPathComponent("subtitled-video"), media: media)
         try verifySimpleCutRangeControls(project: scratch.appendingPathComponent("simple-cut-range"), media: media)
         try verifySimpleTopicCutControls(project: scratch.appendingPathComponent("simple-topic-cut"), media: media)
+        try verifyFailedTopicCutHasNoReady(project: scratch.appendingPathComponent("failed-topic-cut"), media: media)
         try verifyMixedTopicVariantReopen(project: scratch.appendingPathComponent("mixed-topics"), media: media)
         // Each Source/Translation scenario has its own project. Source review can
         // legitimately invalidate downstream artifacts; the retained fixture is untouched.
@@ -1631,7 +1637,12 @@ struct SimpleRenderedControlsProbe {
         _ = try makeProject(project, media: media, source: .ru)
         let store = ProjectStore()
         let layout = ProjectLayout(root: project)
-        let canonicalManifest = try store.load(from: project)
+        var canonicalManifest = try store.load(from: project)
+        // This lifecycle fixture represents a single approved source. The
+        // generic UI fixture also carries a pending decoy with identical SRT
+        // bytes, which would be chosen as the latest matching review revision.
+        canonicalManifest.transcriptRevisions?.removeAll { $0.id.hasPrefix("decoy-newer-") }
+        try store.save(canonicalManifest, to: project)
         let canonicalSnapshot = try ApprovedTopicSnapshotResolver.resolve(
             manifest: canonicalManifest,
             projectURL: project,
@@ -1648,6 +1659,9 @@ struct SimpleRenderedControlsProbe {
         )
         let model = WorkflowViewModel()
         model.openProject(project)
+        // This scenario verifies cutting an already approved source without
+        // scheduling another source review checkpoint.
+        model.sourceHumanReviewEnabled = false
         model.selectedOperations = [.transcribe, .topicTimecoding]
         model.selectedTopicID = "advanced-topic"
         model.artifactLanguage = .en
@@ -1708,12 +1722,44 @@ struct SimpleRenderedControlsProbe {
             && selectionValidation.beginCreate(selectedTopicID: options[0].id)
             && !selectionValidation.showsSelectionError,
             "Selecting an approved topic did not clear local validation")
+        try selectApprovedTopic(in: window)
+        try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.fragment.topic.validation" },
+            "Rendered topic selection did not clear local validation")
         try require(model.simpleTopicCutAvailability(topicID: options[0].id).canCreate,
             "Explicit approved topic was not eligible for Simple creation")
-        try require(model.startSimpleTopicCutFromAcceptedTranscript(topicID: options[0].id),
-            "Simple topic adapter did not activate the shared cutTopic workflow")
+        let firstCreate = try element("simple.fragment.topic.create", in: window)
+        try require(firstCreate.isAccessibilityEnabled() && firstCreate.accessibilityPerformPress(),
+            "Rendered Simple topic Create did not activate the shared cutTopic workflow")
         try require(model.isRunning && !model.isStopping,
             "Simple topic create action did not enter the shared workflow")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        window.contentView?.layoutSubtreeIfNeeded()
+        try require(model.isRunning && !nodes(window).contains {
+            $0.accessibilityIdentifier() == "simple.fragment.topic.unavailable"
+                || ($0.accessibilityLabel() ?? "").contains("Нет доступных утверждённых тем")
+        }, "Topic cut startup showed false unavailable topics before cutTopic stage: operation=\(String(describing: model.progress.operation))")
+        var observedDiagnostics = false
+        for _ in 0..<2000 where model.isRunning && model.progress.operation != .cutTopic {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            if !observedDiagnostics && model.progress.operation == .diagnostics {
+                window.contentView?.layoutSubtreeIfNeeded()
+                try require(renderedText(try element("simple.fragment.topic.availability", in: window)).contains("Дождитесь завершения")
+                    && element("simple.progress.stop", in: window).isAccessibilityEnabled()
+                    && nodes(window).contains { $0.accessibilityIdentifier() == "simple.fragment.topic.progress" }
+                    && !nodes(window).contains {
+                        ["simple.fragment.topic.unavailable", "simple.fragment.topic.create", "simple.fragment.topic.picker"].contains($0.accessibilityIdentifier() ?? "")
+                    }, "Topic cut diagnostics stage showed false unavailable topics or duplicate Create")
+                observedDiagnostics = true
+            }
+        }
+        try require(observedDiagnostics, "Production topic cut skipped the expected diagnostics UI observation")
+        try require(model.isRunning && model.progress.operation == .cutTopic,
+            "Production topic cut did not reach its running cutTopic stage: running=\(model.isRunning) status=\(model.status) operation=\(String(describing: model.progress.operation)) alert=\(model.alert?.message ?? "none") log=\(model.log.text.suffix(500))")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        window.contentView?.layoutSubtreeIfNeeded()
+        try require(model.isRunning,
+            "Production topic cut exited before running UI could render: status=\(model.status) alert=\(model.alert?.message ?? "none") log=\(model.log.text.suffix(700))")
+        try assertActiveTopicCut(in: window, stopping: false, previousResult: false)
         try require(model.selectedOperations == advancedOperations
             && model.selectedTopicID == advancedTopicID
             && model.artifactLanguage == advancedLanguage
@@ -1721,6 +1767,9 @@ struct SimpleRenderedControlsProbe {
             "Simple topic create action rewrote Advanced bindings")
         model.stop()
         try require(model.isStopping, "Simple topic cut did not reuse the shared Stop action")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        window.contentView?.layoutSubtreeIfNeeded()
+        try assertActiveTopicCut(in: window, stopping: true, previousResult: false)
         for _ in 0..<200 where model.isRunning {
             RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         }
@@ -1728,39 +1777,50 @@ struct SimpleRenderedControlsProbe {
             "Simple topic cancellation bypassed shared lifecycle")
         let operationRecords = (try store.load(from: project)).workflow?.operations ?? [:]
         let forbidden = [
-            WorkflowOperation.transcribe, .topicTimecoding, .translateTranscript,
+            WorkflowOperation.topicTimecoding, .translateTranscript,
             .burnSubtitles, .burnFragmentSubtitles, .cutRange, .renderFragment
         ]
-        try require(forbidden.allSatisfy { operationRecords[$0.rawValue] == nil },
-            "Simple topic cut started an operation outside cutTopic: \(operationRecords.keys.sorted())")
+        try require(operationRecords[WorkflowOperation.transcribe.rawValue]?.status == .skipped
+            && forbidden.allSatisfy { operationRecords[$0.rawValue] == nil },
+            "Simple topic cut reran ASR or started an unrelated operation: \(operationRecords.keys.sorted())")
         try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.fragment.topic.ready" },
             "Cancelled Simple topic cut displayed a false ready result")
 
-        model.progress = WorkflowProgress(operation: .cutTopic, operationFraction: 0.3, overallFraction: 0.3,
-            elapsed: 1, estimatedTotal: nil, remaining: nil, isIndeterminate: true)
-        model.isRunning = true
-        settle(window)
-        try require(renderedText(try element("simple.progress.stage", in: window)).contains("Создаём фрагмент")
-            && element("simple.progress.stop", in: window).isAccessibilityEnabled()
-            && !element("simple.fragment.topic.create", in: window).isAccessibilityEnabled(),
-            "Simple topic cut did not show shared progress and duplicate-create protection")
-        model.isStopping = true
-        settle(window)
-        try require(!element("simple.progress.stop", in: window).isAccessibilityEnabled()
-            && renderedText(try element("simple.progress.stage", in: window)).contains("Останавливаем обработку"),
-            "Simple topic cut allowed repeated cancellation")
-        model.isStopping = false
-        model.isRunning = false
-
+        // A prior valid media result must remain openable while a second real
+        // cut runs. The second run uses production WorkflowEngine and ffmpeg.
         let fragment = layout.fragmentVideoURL(kind: "simple-topic")
         try FileManager.default.createDirectory(at: fragment.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data("ready topic fragment".utf8).write(to: fragment)
+        try FileManager.default.copyItem(at: media, to: fragment)
         try store.registerOutput(kind: "fragment-video", url: fragment, in: project)
         model.status = "Завершено"
         model.loadDetectedResults()
         settle(window)
         _ = try element("simple.fragment.topic.ready", in: window)
         _ = try element("simple.fragment.topic.open", in: window)
+
+        let secondCreate = try element("simple.fragment.topic.create", in: window)
+        try require(secondCreate.isAccessibilityEnabled() && secondCreate.accessibilityPerformPress(),
+            "Second rendered Simple topic Create did not start with a previous result present")
+        for _ in 0..<2000 where model.isRunning && model.progress.operation != .cutTopic {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        try require(model.isRunning && model.progress.operation == .cutTopic,
+            "Second production topic cut did not reach its running stage: running=\(model.isRunning) status=\(model.status) operation=\(String(describing: model.progress.operation)) alert=\(model.alert?.message ?? "none") log=\(model.log.text.suffix(500))")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        window.contentView?.layoutSubtreeIfNeeded()
+        try require(model.isRunning,
+            "Second production topic cut exited before Ready/Open persistence check: status=\(model.status) alert=\(model.alert?.message ?? "none") log=\(model.log.text.suffix(700))")
+        try assertActiveTopicCut(in: window, stopping: false, previousResult: true)
+        for _ in 0..<400 where model.isRunning {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        try require(!model.isRunning && model.status == "Завершено",
+            "Second production topic cut did not complete successfully: \(model.status)")
+        settle(window)
+        _ = try element("simple.fragment.topic.ready", in: window)
+        _ = try element("simple.fragment.topic.open", in: window)
+        try require((try store.load(from: project)).fragments?.contains(where: { $0.topicID == options[0].id }) == true,
+            "Successful production topic cut did not persist its approved-topic fragment")
 
         let reopened = WorkflowViewModel()
         reopened.openProject(project)
@@ -1778,7 +1838,75 @@ struct SimpleRenderedControlsProbe {
         _ = try element("simple.fragment.topic.validation", in: reopenedWindow)
         _ = try element("simple.fragment.topic.ready", in: reopenedWindow)
         try require(!reopened.isRunning, "Reopening a completed Simple topic cut started duplicate processing")
-        print("RENDERED_SIMPLE_TOPIC_CUT_CONTROLS_PASS: unavailable, local validation, explicit approved selection, fixed request, progress/stop, result/open/reopen, Advanced preservation")
+        print("RENDERED_SIMPLE_TOPIC_CUT_CONTROLS_PASS: real running/stopping/cancel, prior Ready/Open during second cut, real success/reopen, Advanced preservation")
+    }
+
+    private static func selectApprovedTopic(in window: NSWindow) throws {
+        let picker = try element("simple.fragment.topic.picker", in: window)
+        func popups(in view: NSView) -> [NSPopUpButton] {
+            let current = (view as? NSPopUpButton).map { [$0] } ?? []
+            return current + view.subviews.flatMap(popups)
+        }
+        let matching = window.contentView.map { popups(in: $0) }?.filter { $0.cell === picker.object } ?? []
+        try require(matching.count == 1, "Rendered approved-topic picker has no unique native popup")
+        let popup = matching[0]
+        guard let itemIndex = popup.itemArray.firstIndex(where: { $0.title.contains("Approved fixture topic") }) else {
+            throw RenderedProbeFailure(message: "Rendered picker omitted the approved immutable topic")
+        }
+        popup.menu?.performActionForItem(at: itemIndex)
+        settle(window)
+        try require((try element("simple.fragment.topic.picker", in: window).accessibilityValue() as? String)?
+            .contains("Approved fixture topic") == true,
+            "Native approved-topic menu action did not update the rendered picker")
+    }
+
+    private static func assertActiveTopicCut(in window: NSWindow, stopping: Bool, previousResult: Bool) throws {
+        let availability = renderedText(try element("simple.fragment.topic.availability", in: window))
+        let stage = renderedText(try element("simple.progress.stage", in: window))
+        let stop = try element("simple.progress.stop", in: window)
+        _ = try element("simple.fragment.topic.progress", in: window)
+        try require(availability.contains(stopping ? "Останавливаем обработку" : "Дождитесь завершения")
+            && stage.contains(stopping ? "Останавливаем обработку" : "Создаём фрагмент")
+            && stop.isAccessibilityEnabled() == !stopping,
+            "Running topic cut omitted truthful progress/Stop state")
+        try require(!nodes(window).contains {
+            ["simple.fragment.topic.unavailable", "simple.fragment.topic.create", "simple.fragment.topic.picker"].contains($0.accessibilityIdentifier() ?? "")
+                || ($0.accessibilityLabel() ?? "").contains("Нет доступных утверждённых тем")
+        }, "Running topic cut showed false unavailable topics or duplicate Create")
+        try require(nodes(window).contains { $0.accessibilityIdentifier() == "simple.fragment.topic.ready" } == previousResult
+            && nodes(window).contains { $0.accessibilityIdentifier() == "simple.fragment.topic.open" } == previousResult,
+            "Running topic cut lost a previous Ready/Open result or showed false Ready")
+    }
+
+    private static func verifyFailedTopicCutHasNoReady(project: URL, media: URL) throws {
+        let failureMedia = project.deletingLastPathComponent().appendingPathComponent("failed-topic-source.mp4")
+        try FileManager.default.copyItem(at: media, to: failureMedia)
+        _ = try makeProject(project, media: failureMedia, source: .ru)
+        let model = WorkflowViewModel()
+        model.openProject(project)
+        model.sourceHumanReviewEnabled = false
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: ContentView(model: model))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        settle(window)
+        try press("simple.goal.fragment", in: window)
+        _ = try element("simple.fragment.topic.picker", in: window)
+        try FileManager.default.removeItem(at: failureMedia)
+        try require(model.startSimpleTopicCutFromAcceptedTranscript(topicID: "topic-1"),
+            "Failed-cut fixture did not start the real workflow")
+        for _ in 0..<300 where model.isRunning {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        try require(!model.isRunning && model.status == "Ошибка",
+            "Missing source media did not fail the real topic-cut workflow: \(model.status)")
+        settle(window)
+        try require(!nodes(window).contains {
+            ["simple.fragment.topic.ready", "simple.fragment.topic.open"].contains($0.accessibilityIdentifier() ?? "")
+        }, "Failed real topic cut displayed a false Ready/Open result")
+        print("RENDERED_FAILED_TOPIC_CUT_NO_READY_PASS: missing source fails real workflow without Ready/Open")
     }
 
     private static func removeTopics(from project: URL, media: URL) throws {
