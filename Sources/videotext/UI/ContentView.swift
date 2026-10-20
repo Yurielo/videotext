@@ -38,6 +38,7 @@ struct SimpleTopicFragmentValidation: Equatable {
 }
 
 private enum SimpleProjectHomeGoal: String, CaseIterable, Identifiable {
+    case presets
     case textContent
     case subtitledVideo
     case fragment
@@ -47,6 +48,7 @@ private enum SimpleProjectHomeGoal: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
+        case .presets: return "Пакеты обработки"
         case .textContent: return "Текст и содержание"
         case .subtitledVideo: return "Видео с субтитрами"
         case .fragment: return "Фрагмент видео"
@@ -56,6 +58,7 @@ private enum SimpleProjectHomeGoal: String, CaseIterable, Identifiable {
 
     var detail: String {
         switch self {
+        case .presets: return "Выберите результат · один запуск · проверка по ходу"
         case .textContent: return "Расшифровка · Темы · Перевод · Слова-паразиты"
         case .subtitledVideo: return "Полное видео · Исходные субтитры"
         case .fragment: return "По теме · По времени · По тексту"
@@ -185,6 +188,9 @@ struct ContentView: View {
     @State private var knownProjects: [SimpleProjectBrowserEntry] = []
     @State private var simpleReviewTarget: SimpleProjectHomeReviewTarget?
     @State private var showsSimpleTextContent = false
+    @State private var showsSimplePresets = false
+    @State private var simplePresetConfiguration = ProcessingPresetConfiguration()
+    @State private var selectedCustomPresetID: UUID?
     @State private var showsSimpleSubtitledVideo = false
     @State private var showsSimpleFragment = false
     @State private var showsSimpleProcessing = false
@@ -296,6 +302,11 @@ struct ContentView: View {
             reviewSearch = ""
             reviewIssuesOnly = false
             showsSimpleTextContent = false
+            showsSimplePresets = false
+            selectedCustomPresetID = nil
+            if let source = model.projectURL.flatMap({ try? ProjectStore().load(from: $0).languageProfile?.effective }) {
+                simplePresetConfiguration.targetLanguage = source.translationTarget
+            }
             showsSimpleSubtitledVideo = false
             showsSimpleFragment = false
             showsSimpleProcessing = false
@@ -779,6 +790,9 @@ struct ContentView: View {
                     columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)],
                     spacing: 8
                 ) {
+                    simpleGoalCard(.presets, icon: "square.stack.3d.up", reveal: { goal in
+                        proxy.scrollTo(goal.rawValue, anchor: .top)
+                    })
                     simpleGoalCard(.textContent, icon: "text.alignleft", reveal: { goal in
                         proxy.scrollTo(goal.rawValue, anchor: .top)
                     })
@@ -795,6 +809,11 @@ struct ContentView: View {
                 .frame(maxWidth: 680, alignment: .leading)
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("simple.goals.grid")
+
+                if showsSimplePresets {
+                    simpleProcessingPresetsPanel
+                        .id(SimpleProjectHomeGoal.presets.rawValue)
+                }
 
                 if showsSimpleTextContent {
                     VStack(alignment: .leading, spacing: 4) {
@@ -1166,7 +1185,9 @@ struct ContentView: View {
         reveal: @escaping (SimpleProjectHomeGoal) -> Void
     ) -> some View {
         Button {
-            if goal == .textContent {
+            if goal == .presets {
+                showsSimplePresets = true
+            } else if goal == .textContent {
                 showsSimpleTextContent = true
             } else if goal == .subtitledVideo {
                 showsSimpleSubtitledVideo = true
@@ -1200,6 +1221,294 @@ struct ContentView: View {
         .buttonStyle(.plain)
         .accessibilityLabel(goal.title)
         .accessibilityIdentifier("simple.goal.\(goal.rawValue)")
+    }
+
+    private var simpleProcessingPresetsPanel: some View {
+        let configuration = simplePresetConfiguration
+        let plan = model.processingPresetPlan(configuration)
+        let execution = model.processingPresetExecution
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                simpleSectionTitle("Пакеты обработки")
+                Spacer()
+                Button("Скрыть") { showsSimplePresets = false }
+                    .buttonStyle(.borderless)
+                    .accessibilityIdentifier("simple.presets.collapse")
+            }
+            Text("Выберите результат и нажмите «Создать». Проверка расшифровки, тем и перевода остаётся обязательной; после утверждения пакет продолжится.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Picker("Результат", selection: Binding(
+                get: { simplePresetConfiguration.goal },
+                set: { goal in
+                    simplePresetConfiguration.goal = goal
+                    simplePresetConfiguration.scope = .fullVideo
+                    simplePresetConfiguration.effect = goal == .fullOriginal || goal == .fullTranslated
+                        ? .watermark : (goal == .processing ? .blur : .none)
+                    simplePresetConfiguration.muteFillers = false
+                }
+            )) {
+                ForEach(ProcessingPresetGoal.allCases) { goal in
+                    Text(goal.title).tag(goal)
+                }
+            }
+            .accessibilityIdentifier("simple.presets.goal")
+
+            HStack {
+                Picker("Язык исходника", selection: $simplePresetConfiguration.sourceLanguage) {
+                    Text("Авто").tag("auto")
+                    Text("Русский").tag("ru")
+                    Text("Английский").tag("en")
+                }
+                .accessibilityIdentifier("simple.presets.sourceLanguage")
+                if configuration.goal.needsTranslation {
+                    Picker("Перевести на", selection: $simplePresetConfiguration.targetLanguage) {
+                        ForEach(ArtifactLanguage.allCases) { language in
+                            Text(language.rawValue.uppercased()).tag(language)
+                        }
+                    }
+                    .accessibilityIdentifier("simple.presets.targetLanguage")
+                }
+            }
+            if configuration.goal == .topics {
+                Picker("Детализация тем", selection: $simplePresetConfiguration.topicGranularity) {
+                    ForEach(TopicGranularity.allCases) { granularity in
+                        Text(granularity.title).tag(granularity)
+                    }
+                }
+                .accessibilityIdentifier("simple.presets.granularity")
+            }
+            if configuration.goal.needsVideo {
+                Picker("Объём видео", selection: Binding(
+                    get: { simplePresetConfiguration.scope },
+                    set: { scope in
+                        simplePresetConfiguration.scope = scope
+                        if configuration.goal == .fullOriginal || configuration.goal == .fullTranslated {
+                            simplePresetConfiguration.effect = scope == .fullVideo ? .watermark : .none
+                        }
+                        if scope != .timeFragment { simplePresetConfiguration.muteFillers = false }
+                    }
+                )) {
+                    ForEach(ProcessingPresetScope.allCases.filter {
+                        $0 != .approvedTopic || configuration.goal == .sourceSubtitles || configuration.goal == .translatedSubtitles
+                    }) { scope in
+                        Text(scope.title).tag(scope)
+                    }
+                }
+                .accessibilityIdentifier("simple.presets.scope")
+                if configuration.scope == .timeFragment {
+                    HStack {
+                        TextField("Начало, сек", value: $simplePresetConfiguration.fragmentStart, format: .number)
+                        TextField("Конец, сек", value: $simplePresetConfiguration.fragmentEnd, format: .number)
+                    }
+                    .accessibilityIdentifier("simple.presets.fragmentRange")
+                }
+                if configuration.scope == .approvedTopic {
+                    Picker("Утверждённая тема", selection: $simplePresetConfiguration.topicID) {
+                        Text("Выберите тему").tag(nil as String?)
+                        ForEach(model.simpleApprovedTopicOptions) { topic in
+                            Text(topic.title).tag(topic.id as String?)
+                        }
+                    }
+                    .accessibilityIdentifier("simple.presets.approvedTopic")
+                }
+                if configuration.goal == .processing || configuration.goal == .fullOriginal || configuration.goal == .fullTranslated {
+                    Picker("Обработка", selection: $simplePresetConfiguration.effect) {
+                        ForEach(ProcessingPresetEffect.allCases.filter { effect in
+                            if configuration.goal == .fullOriginal || configuration.goal == .fullTranslated {
+                                return configuration.scope == .fullVideo ? effect == .watermark
+                                    : [.none, .speed, .blur].contains(effect)
+                            }
+                            return configuration.scope == .timeFragment
+                                ? [.none, .speed, .blur].contains(effect) : effect != .none
+                        }) { effect in
+                            Text(effect.title).tag(effect)
+                        }
+                    }
+                    .accessibilityIdentifier("simple.presets.effect")
+                    if configuration.effect == .speed {
+                        HStack {
+                            Slider(value: $simplePresetConfiguration.speedFactor, in: 0.5...2, step: 0.05)
+                            Text("\(configuration.speedFactor, specifier: "%.2f")x")
+                        }
+                        .accessibilityIdentifier("simple.presets.speed")
+                    }
+                    if configuration.effect == .blur || configuration.combineBlur {
+                        HStack {
+                            Text("Интенсивность blur")
+                            Slider(value: $simplePresetConfiguration.blurIntensity, in: 1...30, step: 1)
+                            Text("\(Int(configuration.blurIntensity))")
+                        }
+                        .accessibilityIdentifier("simple.presets.blur")
+                        HStack {
+                            TextField("X", value: $simplePresetConfiguration.blurRegion.x, format: .number)
+                            TextField("Y", value: $simplePresetConfiguration.blurRegion.y, format: .number)
+                            TextField("Ширина", value: $simplePresetConfiguration.blurRegion.width, format: .number)
+                            TextField("Высота", value: $simplePresetConfiguration.blurRegion.height, format: .number)
+                        }
+                        .accessibilityIdentifier("simple.presets.blurRegion")
+                    }
+                    if configuration.effect == .watermark {
+                        HStack {
+                            Button("Выбрать watermark") {
+                                simplePresetConfiguration.watermarkImagePath = openWatermarkImage()?.path
+                            }
+                            Text(configuration.watermarkImagePath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Не выбран")
+                                .font(.caption)
+                                .lineLimit(1)
+                        }
+                        Picker("Положение", selection: $simplePresetConfiguration.watermarkPosition) {
+                            ForEach(WatermarkPosition.allCases.filter { $0 != .manual }) { position in
+                                Text(position.title).tag(position)
+                            }
+                        }
+                        Toggle("Размыть выбранную область вместе с watermark", isOn: $simplePresetConfiguration.combineBlur)
+                        HStack {
+                            Text("Прозрачность")
+                            Slider(value: $simplePresetConfiguration.watermarkOpacity, in: 0...1)
+                        }
+                        .accessibilityIdentifier("simple.presets.watermark")
+                    }
+                    if configuration.effect == .audioEnhancement {
+                        Picker("Профиль звука", selection: $simplePresetConfiguration.audioEnhancementProfile) {
+                            ForEach(AudioEnhancementProfile.allCases) { profile in
+                                Text(profile.title).tag(profile)
+                            }
+                        }
+                    }
+                    if configuration.scope == .timeFragment {
+                        Toggle("Заглушить найденные слова-паразиты", isOn: $simplePresetConfiguration.muteFillers)
+                    }
+                }
+                if configuration.needsSourceSubtitles || configuration.needsTranslatedSubtitles {
+                    HStack {
+                        Text("Размер субтитров")
+                        Slider(value: $simplePresetConfiguration.subtitleStyle.fontSize, in: 12...36, step: 1)
+                        Text("\(Int(configuration.subtitleStyle.fontSize))")
+                    }
+                    Picker("Положение субтитров", selection: $simplePresetConfiguration.subtitleStyle.position) {
+                        ForEach(SubtitlePosition.allCases) { position in
+                            Text(position.title).tag(position)
+                        }
+                    }
+                    .accessibilityIdentifier("simple.presets.subtitleStyle")
+                }
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text("План").font(.subheadline.weight(.semibold))
+                Text("Результат: \(plan.result)")
+                    .font(.caption.weight(.medium))
+                    .accessibilityIdentifier("simple.presets.expectedResult")
+                ForEach(plan.reused, id: \.self) { item in
+                    Text("Используем готовое: \(item)").font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(Array(plan.stages.enumerated()), id: \.offset) { index, stage in
+                    Text("\(index + 1). \(stage.title)").font(.caption)
+                }
+                if let blocker = plan.blocker {
+                    Text(blocker).font(.caption).foregroundStyle(.red)
+                        .accessibilityIdentifier("simple.presets.blocker")
+                }
+            }
+            HStack {
+                Button("Создать") { _ = model.startProcessingPreset(configuration) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!plan.canCreate || model.isRunning || model.isStopping
+                        || model.humanReviewCheckpoint != nil || model.topicReviewCheckpoint != nil)
+                    .accessibilityIdentifier("simple.presets.create")
+                if model.isRunning {
+                    Button("Остановить") { model.stop() }
+                        .accessibilityIdentifier("simple.presets.stop")
+                } else if let execution, execution.status != .complete {
+                    Button("Продолжить пакет") { _ = model.resumeProcessingPreset() }
+                        .disabled(model.humanReviewCheckpoint != nil || model.topicReviewCheckpoint != nil)
+                        .accessibilityIdentifier("simple.presets.resume")
+                }
+            }
+            if let execution {
+                let total = max(execution.stages.count, 1)
+                let fraction = execution.status == .complete ? 1 :
+                    (Double(execution.currentStage) + (model.isRunning ? model.progress.overallFraction : 0)) / Double(total)
+                ProgressView(value: min(max(fraction, 0), 1), total: 1)
+                    .accessibilityIdentifier("simple.presets.progress")
+                if model.isRunning {
+                    Text(model.progress.remaining.map { "Осталось примерно \(TimeTextFormatter.string($0))" }
+                        ?? "Оценка времени уточняется")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("simple.presets.eta")
+                }
+                Text("Пакет: \(execution.configuration.goal.title) · \(execution.status.rawValue) · \(min(execution.currentStage + 1, total))/\(total)")
+                    .font(.caption)
+                    .accessibilityIdentifier("simple.presets.status")
+                if let error = execution.lastError {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                }
+                if execution.status == .awaitingReview {
+                    Button("Открыть проверку") {
+                        if let checkpoint = model.humanReviewCheckpoint {
+                            showsSimpleTextContent = true
+                            presentSimpleReview(checkpoint.kind == .sourceTranscript ? .source : .translation)
+                        } else if model.topicReviewCheckpoint != nil {
+                            presentationMode = .advanced
+                            selectedResultsTab = 1
+                        }
+                    }
+                    .accessibilityIdentifier("simple.presets.review")
+                }
+                if execution.status == .complete, let path = execution.resultPath {
+                    HStack {
+                        Button("Открыть") { openSimpleResult(path) }
+                        Button("Показать в Finder") {
+                            model.revealResult(ProjectOutput(id: path, kind: "user-facing-media", path: path, createdAt: Date()))
+                        }
+                    }
+                    .accessibilityIdentifier("simple.presets.result")
+                }
+            }
+            Divider()
+            Text("Пользовательский пакет").font(.subheadline.weight(.semibold))
+            Picker("Сохранённый", selection: $selectedCustomPresetID) {
+                Text("Новый пакет").tag(nil as UUID?)
+                ForEach(model.customProcessingPresets) { preset in
+                    Text(preset.name).tag(preset.id as UUID?)
+                }
+            }
+            .onChange(of: selectedCustomPresetID) { _, id in
+                if let preset = model.customProcessingPresets.first(where: { $0.id == id }) {
+                    simplePresetConfiguration = preset
+                } else {
+                    simplePresetConfiguration.id = UUID()
+                    simplePresetConfiguration.name = ""
+                }
+            }
+            TextField("Название, например «Мой YouTube»", text: $simplePresetConfiguration.name)
+                .accessibilityIdentifier("simple.presets.custom.name")
+            HStack {
+                Button("Сохранить") {
+                    if model.saveCustomProcessingPreset(simplePresetConfiguration) {
+                        selectedCustomPresetID = simplePresetConfiguration.id
+                    }
+                }
+                .accessibilityIdentifier("simple.presets.custom.save")
+                if let id = selectedCustomPresetID {
+                    Button("Удалить", role: .destructive) {
+                        model.deleteCustomProcessingPreset(id: id)
+                        selectedCustomPresetID = nil
+                    }
+                    .accessibilityIdentifier("simple.presets.custom.delete")
+                }
+            }
+            Text("Режим «Автоматически» для публикации непроверенного перевода пока недоступен. Пакеты работают «С проверкой».")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("simple.presets.reviewPolicy")
+        }
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("simple.presets.panel")
     }
 
     @ViewBuilder
