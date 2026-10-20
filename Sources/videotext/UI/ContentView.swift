@@ -1246,6 +1246,7 @@ struct ContentView: View {
                     simplePresetConfiguration.effect = goal == .fullOriginal || goal == .fullTranslated
                         ? .watermark : (goal == .processing ? .blur : .none)
                     simplePresetConfiguration.muteFillers = false
+                    simplePresetConfiguration = simplePresetConfiguration.clearingHiddenOptions()
                 }
             )) {
                 ForEach(ProcessingPresetGoal.allCases) { goal in
@@ -1287,6 +1288,7 @@ struct ContentView: View {
                             simplePresetConfiguration.effect = scope == .fullVideo ? .watermark : .none
                         }
                         if scope != .timeFragment { simplePresetConfiguration.muteFillers = false }
+                        simplePresetConfiguration = simplePresetConfiguration.clearingHiddenOptions()
                     }
                 )) {
                     ForEach(ProcessingPresetScope.allCases.filter {
@@ -1313,7 +1315,13 @@ struct ContentView: View {
                     .accessibilityIdentifier("simple.presets.approvedTopic")
                 }
                 if configuration.goal == .processing || configuration.goal == .fullOriginal || configuration.goal == .fullTranslated {
-                    Picker("Обработка", selection: $simplePresetConfiguration.effect) {
+                    Picker("Обработка", selection: Binding(
+                        get: { simplePresetConfiguration.effect },
+                        set: { effect in
+                            simplePresetConfiguration.effect = effect
+                            simplePresetConfiguration = simplePresetConfiguration.clearingHiddenOptions()
+                        }
+                    )) {
                         ForEach(ProcessingPresetEffect.allCases.filter { effect in
                             if configuration.goal == .fullOriginal || configuration.goal == .fullTranslated {
                                 return configuration.scope == .fullVideo ? effect == .watermark
@@ -1476,7 +1484,7 @@ struct ContentView: View {
             }
             .onChange(of: selectedCustomPresetID) { _, id in
                 if let preset = model.customProcessingPresets.first(where: { $0.id == id }) {
-                    simplePresetConfiguration = preset
+                    simplePresetConfiguration = preset.clearingHiddenOptions()
                 } else {
                     simplePresetConfiguration.id = UUID()
                     simplePresetConfiguration.name = ""

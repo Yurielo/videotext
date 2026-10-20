@@ -391,18 +391,30 @@ final class WorkflowViewModel: ObservableObject {
                         (stage == .transcription && $0.kind == .sourceTranscript)
                             || (stage == .translation && $0.kind == .translatedTranscript)
                     } ?? false
-                    if matchingHuman || (stage == .topics && topicReviewCheckpoint != nil) {
-                        execution.status = .awaitingReview
-                        execution.reviewIdentity = currentProcessingPresetReviewIdentity()
+                    if humanReviewCheckpoint != nil || topicReviewCheckpoint != nil {
+                        let actualIdentity = currentProcessingPresetReviewIdentity()
+                        if (matchingHuman || (stage == .topics && topicReviewCheckpoint != nil))
+                            && ProcessingPresetReviewIdentity.matchesSaved(execution.reviewIdentity, current: actualIdentity) {
+                            execution.status = .awaitingReview
+                        } else {
+                            execution.status = .failed
+                            execution.lastError = "Проверка проекта не относится к сохранённому пакету. Создайте новый план."
+                        }
                         processingPresetExecution = execution
                         try processingPresetStore.save(execution, to: projectRoot)
                     }
                 }
                 if var execution = processingPresetExecution,
-                   execution.status == .complete, execution.configuration.goal.needsVideo,
-                   !ProcessingPresetResultIntegrity.matches(execution, projectURL: projectRoot) {
+                   execution.status == .complete,
+                   (!processingPresetBindingsMatch(execution, manifest: manifest, projectURL: projectRoot)
+                    || (execution.configuration.goal.needsVideo
+                        && !ProcessingPresetResultIntegrity.matches(execution, projectURL: projectRoot))
+                    || (!execution.configuration.goal.needsVideo
+                        && execution.resultPath != validatedPresetTextResultURL(
+                            execution, manifest: manifest, projectURL: projectRoot
+                        )?.path)) {
                     execution.status = .failed
-                    execution.lastError = "Результат пакета изменён или повреждён после проверки."
+                    execution.lastError = "Входные файлы или результат пакета изменились после проверки."
                     processingPresetExecution = execution
                 }
             } catch {
@@ -2172,8 +2184,28 @@ extension WorkflowViewModel {
         )
     }
 
+    private func validatedPresetTextResultURL(
+        _ execution: ProcessingPresetExecution, manifest: ProjectManifest, projectURL: URL
+    ) -> URL? {
+        guard !execution.configuration.goal.needsVideo,
+              presetSourceRevision(manifest, projectURL: projectURL) != nil else { return nil }
+        switch execution.configuration.goal {
+        case .translation:
+            guard presetTranslationReady(manifest, projectURL: projectURL) else { return nil }
+        case .topics:
+            guard presetTopicsReady(
+                manifest, projectURL: projectURL,
+                granularity: execution.configuration.topicGranularity
+            ) else { return nil }
+        default: break
+        }
+        return ProcessingPresetTextResult.validatedURL(
+            execution: execution, manifest: manifest, projectURL: projectURL
+        )
+    }
+
     func processingPresetPlan(_ configuration: ProcessingPresetConfiguration) -> ProcessingPresetPlan {
-        guard let projectURL, mediaURL != nil,
+        guard let projectURL, let mediaURL,
               let manifest = try? store.load(from: projectURL) else {
             return ProcessingPresetPlanner().make(
                 configuration, projectAvailable: false, effectiveLanguage: nil,
@@ -2192,6 +2224,9 @@ extension WorkflowViewModel {
             approvedSource: approvedSource, approvedTopics: approvedTopics,
             approvedTranslation: approvedTranslation
         )
+        if !ProcessingPresetInputIdentity.sourceMatches(manifest: manifest, mediaURL: mediaURL, store: store) {
+            plan.blocker = "Исходное видео изменилось после создания проекта. Откройте правильный проект; готовый результат не будет повторно использован."
+        }
         if configuration.goal.needsTranscript || configuration.scope != .fullVideo || configuration.effect == .speed {
             if let language = manifest.languageProfile?.effective,
                let active = manifest.activeTranscriptRevision(for: language),
@@ -2246,11 +2281,17 @@ extension WorkflowViewModel {
             reportPreparationError(WorkflowError.processFailed("Введите название пользовательского пакета."))
             return false
         }
-        var checked = configuration
+        var checked = configuration.portableForSaving()
         checked.name = name
+        var validation = checked
+        if validation.scope == .approvedTopic {
+            validation.topicID = "portable-topic-selection"
+        }
         let compatibility = ProcessingPresetPlanner().make(
-            checked, projectAvailable: true, effectiveLanguage: nil,
-            approvedSource: false, approvedTopics: false, approvedTranslation: false
+            validation, projectAvailable: true, effectiveLanguage: nil,
+            approvedSource: false,
+            approvedTopics: validation.scope == .approvedTopic,
+            approvedTranslation: false
         )
         guard let blocker = compatibility.blocker else {
             do {
@@ -2295,10 +2336,15 @@ extension WorkflowViewModel {
                 if let manifest = try? store.load(from: projectURL) {
                     pinProcessingPresetRevisions(&execution, manifest: manifest, projectURL: projectURL)
                 }
+                execution.watermarkSHA256 = try ProcessingPresetInputIdentity.watermarkDigest(configuration)
                 if plan.stages.isEmpty, configuration.goal.needsVideo,
                    let previous, previous.status == .complete,
                    previous.projectPath == projectURL.standardizedFileURL.path,
                    previous.configuration.sameOutcome(as: configuration),
+                   ProcessingPresetInputIdentity.watermarkMatches(previous),
+                   (try? store.load(from: projectURL)).map({
+                       processingPresetBindingsMatch(previous, manifest: $0, projectURL: projectURL)
+                   }) == true,
                    ProcessingPresetResultIntegrity.matches(previous, projectURL: projectURL) {
                     execution.resultPath = previous.resultPath
                     execution.resultSHA256 = previous.resultSHA256
@@ -2411,6 +2457,9 @@ extension WorkflowViewModel {
     private func processingPresetBindingsMatch(
         _ execution: ProcessingPresetExecution, manifest: ProjectManifest, projectURL: URL
     ) -> Bool {
+        guard let mediaURL,
+              ProcessingPresetInputIdentity.sourceMatches(manifest: manifest, mediaURL: mediaURL, store: store),
+              ProcessingPresetInputIdentity.watermarkMatches(execution) else { return false }
         if let sourceID = execution.sourceRevisionID,
            presetSourceRevision(manifest, projectURL: projectURL)?.id != sourceID { return false }
         if let translationID = execution.translationRevisionID {
@@ -2625,10 +2674,14 @@ extension WorkflowViewModel {
 
     private func completeProcessingPresetStage() {
         guard var execution = processingPresetExecution else { return }
+        guard let projectURL, let currentManifest = try? store.load(from: projectURL),
+              processingPresetBindingsMatch(execution, manifest: currentManifest, projectURL: projectURL) else {
+            failProcessingPreset("Входные файлы изменились во время выполнения пакета.")
+            return
+        }
         if execution.stages.indices.contains(execution.currentStage),
            execution.stages[execution.currentStage] == .render,
-           let projectURL, let manifest = try? store.load(from: projectURL),
-           let output = ProcessingPresetOutputSelection.select(execution, manifest: manifest) {
+           let output = ProcessingPresetOutputSelection.select(execution, manifest: currentManifest) {
             // engine.run has completed its strict ffprobe stage before this callback.
             let report = ProjectLayout(root: projectURL).ffprobeReportURL
             guard let reportText = try? String(contentsOf: report, encoding: .utf8),
@@ -2647,9 +2700,7 @@ extension WorkflowViewModel {
             failProcessingPreset("Этап завершился без проверенного результата. Повторный запуск остановлен.")
             return
         }
-        if let projectURL, let manifest = try? store.load(from: projectURL) {
-            pinProcessingPresetRevisions(&execution, manifest: manifest, projectURL: projectURL)
-        }
+        pinProcessingPresetRevisions(&execution, manifest: currentManifest, projectURL: projectURL)
         execution.currentStage += 1
         execution.stageStartedAt = nil
         execution.reviewIdentity = nil
@@ -2689,27 +2740,39 @@ extension WorkflowViewModel {
 
     private func finishProcessingPreset() {
         guard var execution = processingPresetExecution else { return }
-        execution.status = .complete
+        guard let projectURL, let manifest = try? store.load(from: projectURL),
+              processingPresetBindingsMatch(execution, manifest: manifest, projectURL: projectURL) else {
+            failProcessingPreset("Входные файлы пакета изменились после проверки.")
+            return
+        }
         if execution.configuration.goal.needsVideo {
-            guard let projectURL,
-                  ProcessingPresetResultIntegrity.matches(execution, projectURL: projectURL) else {
+            guard ProcessingPresetResultIntegrity.matches(execution, projectURL: projectURL) else {
                 failProcessingPreset("Результат пакета не прошёл проверку целостности.")
                 return
             }
-        } else if let projectURL, let manifest = try? store.load(from: projectURL),
-                  let language = manifest.languageProfile?.effective {
-            let layout = ProjectLayout(root: projectURL)
-            switch execution.configuration.goal {
-            case .transcription: execution.resultPath = layout.transcriptURL(language: language).path
-            case .translation: execution.resultPath = layout.transcriptURL(language: language.translationTarget).path
-            case .topics: execution.resultPath = layout.transcriptURL(language: language).path
-            default: break
+        } else {
+            guard let result = validatedPresetTextResultURL(
+                execution, manifest: manifest, projectURL: projectURL
+            ) else {
+                failProcessingPreset("Текстовый результат выбранного пакета отсутствует или не соответствует утверждённой ревизии.")
+                return
             }
+            execution.resultPath = result.path
         }
+        execution.status = .complete
         activeProcessingPresetStageToken = nil
         guard saveProcessingPresetExecution(execution) else { return }
         status = "Завершено"
         alert = AppAlert(title: "Пакет готов", message: "\(execution.configuration.goal.title) завершён.")
+        if let mediaURL {
+            Task {
+                await notifications.notifySuccess(
+                    mediaName: mediaURL.lastPathComponent,
+                    elapsed: progress.elapsed,
+                    projectURL: projectURL
+                )
+            }
+        }
     }
 }
 

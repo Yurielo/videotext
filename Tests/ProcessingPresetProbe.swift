@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 @main
 struct ProcessingPresetProbe {
@@ -82,12 +83,41 @@ struct ProcessingPresetProbe {
         let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL1cAAAAASUVORK5CYII=")!
         try png.write(to: image)
         config.watermarkImagePath = image.path
+        var imageExecution = ProcessingPresetExecution(projectPath: temporary.path, configuration: config, stages: [.render])
+        imageExecution.watermarkSHA256 = try ProcessingPresetInputIdentity.watermarkDigest(config)
+        precondition(ProcessingPresetInputIdentity.watermarkMatches(imageExecution))
+        let otherBitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+            isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        )!
+        otherBitmap.setColor(.red, atX: 0, y: 0)
+        let otherPNG = otherBitmap.representation(using: .png, properties: [:])!
+        try otherPNG.write(to: image)
+        precondition(plan(config, language: .ru, source: true).stages == [.render])
+        precondition(!ProcessingPresetInputIdentity.watermarkMatches(imageExecution),
+                     "Watermark bytes changed at the same path must invalidate reuse")
+        try png.write(to: image)
         config.combineBlur = true
         precondition(plan(config, language: .ru, source: true).stages == [.render])
         config.goal = .fullTranslated
         precondition(plan(config, language: .ru, source: true, translation: true).stages == [.render])
         config.scope = .approvedTopic
         precondition(plan(config, language: .ru, source: true, topics: true, translation: true).blocker?.contains("контракта") == true)
+
+        var portable = ProcessingPresetConfiguration()
+        portable.goal = .sourceSubtitles
+        portable.scope = .approvedTopic
+        portable.topicID = "project-A-only-topic"
+        precondition(portable.portableForSaving().topicID == nil)
+        precondition(plan(portable.portableForSaving(), language: .ru, source: true, topics: true).blocker != nil,
+                     "A portable custom preset must require topic selection in the target project")
+        var hidden = config
+        hidden.effect = .none
+        hidden.combineBlur = true
+        precondition(!hidden.clearingHiddenOptions().combineBlur)
+        hidden.effect = .watermark
+        precondition(hidden.clearingHiddenOptions().combineBlur)
 
         config.scope = .fullVideo
         config.name = "Мой YouTube"
@@ -133,6 +163,10 @@ struct ProcessingPresetProbe {
 
         let project = temporary.appendingPathComponent("project")
         try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let sourceMedia = temporary.appendingPathComponent("source.mp4")
+        try Data("source-A".utf8).write(to: sourceMedia)
+        let sourceStore = ProjectStore()
+        let fingerprint = try sourceStore.sourceFingerprint(for: sourceMedia)
         var execution = ProcessingPresetExecution(
             projectPath: project.standardizedFileURL.path,
             configuration: renamed, stages: [.transcription, .translation, .render]
@@ -178,6 +212,12 @@ struct ProcessingPresetProbe {
                 ProjectOutput(id: "unrelated", kind: "watermarked-video", path: unrelatedVideo.path, createdAt: Date().addingTimeInterval(1))
             ], diagnostics: nil
         )
+        manifest.sourceFingerprint = fingerprint
+        precondition(ProcessingPresetInputIdentity.sourceMatches(manifest: manifest, mediaURL: sourceMedia, store: sourceStore))
+        try Data("source-B-changed".utf8).write(to: sourceMedia)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(5)], ofItemAtPath: sourceMedia.path)
+        precondition(!ProcessingPresetInputIdentity.sourceMatches(manifest: manifest, mediaURL: sourceMedia, store: sourceStore),
+                     "Changed media at the same path must invalidate reuse")
         precondition(ProcessingPresetOutputSelection.select(videoExecution, manifest: manifest)?.path == expectedVideo.path)
         videoExecution.resultPath = expectedVideo.path
         videoExecution.resultSHA256 = try ProcessingPresetResultIntegrity.digest(expectedVideo)
@@ -237,6 +277,40 @@ struct ProcessingPresetProbe {
             sourceReviewEnabled: true, translationReviewEnabled: true, activeRevisionIDs: ["ru": sourceA.id, "en": target.id],
             draftRevisionIDs: [:], pendingCheckpoint: nil
         )
+        var sourceTextConfig = ProcessingPresetConfiguration()
+        sourceTextConfig.goal = .transcription
+        let sourceTextExecution = ProcessingPresetExecution(
+            projectPath: project.path, configuration: sourceTextConfig, stages: []
+        )
+        precondition(ProcessingPresetTextResult.validatedURL(
+            execution: sourceTextExecution, manifest: manifest, projectURL: project
+        ) == nil, "Approved SRT alone must not offer a missing transcript TXT")
+        let sourceText = Data("Approved source text\n".utf8)
+        try FileManager.default.createDirectory(
+            at: layout.transcriptRevisionURL(id: sourceA.id, language: .ru).deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try sourceText.write(to: layout.transcriptRevisionURL(id: sourceA.id, language: .ru))
+        try sourceText.write(to: layout.transcriptURL(language: .ru))
+        precondition(ProcessingPresetTextResult.validatedURL(
+            execution: sourceTextExecution, manifest: manifest, projectURL: project
+        ) == layout.transcriptURL(language: .ru))
+        var topicsConfig = ProcessingPresetConfiguration()
+        topicsConfig.goal = .topics
+        topicsConfig.topicGranularity = .coarse
+        precondition(ProcessingPresetTextResult.targetURL(
+            configuration: topicsConfig, language: .ru, layout: layout
+        ) == layout.topicsTextURL(language: .ru, granularity: .coarse),
+        "Topics must open selected user-facing topic text, not transcript TXT or support JSON")
+        precondition(ProcessingPresetTextResult.targetURL(
+            configuration: topicsConfig, language: .ru, layout: layout
+        ) != layout.transcriptURL(language: .ru))
+        precondition(!ProcessingPresetReviewIdentity.matchesSaved(
+            "human:sourceTranscript:ru:A", current: "human:sourceTranscript:ru:B"
+        ), "Foreign checkpoint B must not resume saved plan A")
+        precondition(ProcessingPresetReviewIdentity.matchesSaved(
+            "human:sourceTranscript:ru:A", current: "human:sourceTranscript:ru:A"
+        ))
         precondition(ProcessingPresetTranslationEligibility.ready(manifest: manifest, projectURL: project, approvedSource: sourceA))
         manifest.transcriptRevisions?.append(sourceB)
         manifest.humanReviewState?.activeRevisionIDs["ru"] = sourceB.id

@@ -302,7 +302,7 @@ struct TopicFileService {
         file.createdAt = Date()
     }
 
-    private func textRepresentation(_ file: TopicsFile) -> String {
+    func textRepresentation(_ file: TopicsFile) -> String {
         let header = file.status == .ready ? "Статус: готов" : "Статус: черновой"
         let body = file.topics.map { topic in
             let confidence = Int((topic.confidence * 100).rounded())

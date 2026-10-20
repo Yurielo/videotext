@@ -88,6 +88,20 @@ struct ProcessingPresetConfiguration: Codable, Equatable, Identifiable {
         rhs.name = ""
         return lhs == rhs
     }
+
+    func portableForSaving() -> Self {
+        var value = self
+        if value.scope == .approvedTopic { value.topicID = nil }
+        return value
+    }
+
+    func clearingHiddenOptions() -> Self {
+        var value = self
+        if value.effect != .watermark { value.combineBlur = false }
+        if value.scope != .timeFragment { value.muteFillers = false }
+        if value.scope != .approvedTopic { value.topicID = nil }
+        return value
+    }
 }
 
 enum ProcessingPresetStage: String, Codable, CaseIterable {
@@ -260,6 +274,79 @@ struct ProcessingPresetExecution: Codable {
     var sourceRevisionID: String? = nil
     var translationRevisionID: String? = nil
     var topicRevisionID: String? = nil
+    /// Input bytes used for the selected watermark operation. Path alone is
+    /// insufficient because a custom preset can point to a replaced image.
+    var watermarkSHA256: String? = nil
+}
+
+enum ProcessingPresetInputIdentity {
+    static func sourceMatches(manifest: ProjectManifest, mediaURL: URL, store: ProjectStore) -> Bool {
+        guard let expected = manifest.sourceFingerprint,
+              let current = try? store.sourceFingerprint(for: mediaURL) else { return false }
+        return expected.standardizedPath == current.standardizedPath && store.sameSource(expected, current)
+    }
+
+    static func watermarkDigest(_ configuration: ProcessingPresetConfiguration) throws -> String? {
+        guard configuration.effect == .watermark else { return nil }
+        guard let path = configuration.watermarkImagePath else {
+            throw WorkflowError.processFailed("Watermark image не выбран.")
+        }
+        return try ProcessingPresetResultIntegrity.digest(URL(fileURLWithPath: path))
+    }
+
+    static func watermarkMatches(_ execution: ProcessingPresetExecution) -> Bool {
+        guard execution.configuration.effect == .watermark else { return true }
+        guard let expected = execution.watermarkSHA256, expected.count == 64 else { return false }
+        return (try? watermarkDigest(execution.configuration)) == expected
+    }
+}
+
+enum ProcessingPresetReviewIdentity {
+    static func matchesSaved(_ saved: String?, current: String?) -> Bool {
+        guard let saved, !saved.isEmpty, let current else { return false }
+        return saved == current
+    }
+}
+
+enum ProcessingPresetTextResult {
+    static func targetURL(
+        configuration: ProcessingPresetConfiguration, language: ArtifactLanguage, layout: ProjectLayout
+    ) -> URL? {
+        switch configuration.goal {
+        case .transcription: return layout.transcriptURL(language: language)
+        case .translation: return layout.transcriptURL(language: language.translationTarget)
+        case .topics: return layout.topicsTextURL(language: language, granularity: configuration.topicGranularity)
+        default: return nil
+        }
+    }
+
+    static func validatedURL(
+        execution: ProcessingPresetExecution, manifest: ProjectManifest, projectURL: URL
+    ) -> URL? {
+        guard let language = manifest.languageProfile?.effective else { return nil }
+        let layout = ProjectLayout(root: projectURL)
+        guard let target = targetURL(configuration: execution.configuration, language: language, layout: layout),
+              let data = try? Data(contentsOf: target), !data.isEmpty,
+              let text = String(data: data, encoding: .utf8),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        switch execution.configuration.goal {
+        case .transcription, .translation:
+            let targetLanguage = execution.configuration.goal == .translation ? language.translationTarget : language
+            guard let revision = manifest.activeTranscriptRevision(for: targetLanguage),
+                  revision.reviewStatus == .approved,
+                  let immutable = try? Data(contentsOf: layout.transcriptRevisionURL(
+                    id: revision.id, language: targetLanguage
+                  )), immutable == data else { return nil }
+        case .topics:
+            let granularity = execution.configuration.topicGranularity
+            guard let snapshot = try? WorkflowEngine.approvedTopicSnapshot(
+                manifest: manifest, projectURL: projectURL, language: language, granularity: granularity
+            ), snapshot.file.status == .ready,
+            text == TopicFileService().textRepresentation(snapshot.file) else { return nil }
+        default: return nil
+        }
+        return target
+    }
 }
 
 enum ProcessingPresetResultIntegrity {
