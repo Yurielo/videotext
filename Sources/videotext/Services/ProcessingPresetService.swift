@@ -428,9 +428,11 @@ enum ProcessingPresetTranslationEligibility {
               target.reviewStatus == .approved,
               manifest.humanReviewState?.pendingCheckpoint == nil else { return false }
         let layout = ProjectLayout(root: projectURL)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
         guard let reportData = try? Data(contentsOf: layout.translationReportURL(
             source: source, target: source.translationTarget
-        )), let report = try? JSONDecoder().decode(TranslationReport.self, from: reportData),
+        )), let report = try? decoder.decode(TranslationReport.self, from: reportData),
               report.sourceLanguage == source,
               report.targetLanguage == source.translationTarget,
               report.sourceRevisionID == approvedSource.id,

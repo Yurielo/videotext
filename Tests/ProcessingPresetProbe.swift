@@ -277,7 +277,11 @@ struct ProcessingPresetProbe {
         )
         let reportURL = layout.translationReportURL(source: .ru, target: .en)
         try FileManager.default.createDirectory(at: reportURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try JSONEncoder().encode(report).write(to: reportURL)
+        let reportEncoder = JSONEncoder()
+        reportEncoder.dateEncodingStrategy = .iso8601
+        let historicalReport = try reportEncoder.encode(report)
+        precondition(String(decoding: historicalReport, as: UTF8.self).contains("\"translatedAt\":\""))
+        try historicalReport.write(to: reportURL)
         manifest.languageProfile = LanguageProfile(
             detected: .ru, effective: .ru, confidence: 1, method: "probe", model: nil,
             modelVersion: nil, sampleRanges: [], manuallyOverridden: false, detectedAt: Date()
@@ -325,6 +329,24 @@ struct ProcessingPresetProbe {
         manifest.transcriptRevisions?.append(sourceB)
         manifest.humanReviewState?.activeRevisionIDs["ru"] = sourceB.id
         precondition(!ProcessingPresetTranslationEligibility.ready(manifest: manifest, projectURL: project, approvedSource: sourceB))
+        manifest.humanReviewState?.activeRevisionIDs["ru"] = sourceA.id
+        try Data("{invalid-report".utf8).write(to: reportURL)
+        precondition(!ProcessingPresetTranslationEligibility.ready(manifest: manifest, projectURL: project, approvedSource: sourceA),
+                     "Invalid translation report must remain blocked")
+
+        // Optional read-only integration against an existing approved project.
+        // QA supplies the path; no report or project content is rewritten.
+        if let fixturePath = ProcessInfo.processInfo.environment["VIDEOTEXT_PRESET_TRANSLATION_FIXTURE"] {
+            let fixtureURL = URL(fileURLWithPath: fixturePath)
+            let fixtureManifest = try ProjectStore().load(from: fixtureURL)
+            guard let language = fixtureManifest.languageProfile?.effective,
+                  let approved = fixtureManifest.activeTranscriptRevision(for: language) else {
+                preconditionFailure("Historical fixture lacks an active source revision")
+            }
+            precondition(ProcessingPresetTranslationEligibility.ready(
+                manifest: fixtureManifest, projectURL: fixtureURL, approvedSource: approved
+            ), "Historical approved ISO8601 report must be reusable without translation rerun")
+        }
 
         try Data("{bad".utf8).write(to: executions.url(for: project), options: .atomic)
         do {
