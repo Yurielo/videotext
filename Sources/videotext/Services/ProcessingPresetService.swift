@@ -127,6 +127,21 @@ struct ProcessingPresetPlan: Equatable {
 /// Pure compatibility and ordering contract. Readiness booleans must come from
 /// validated project-local immutable revisions, never from file presence alone.
 struct ProcessingPresetPlanner {
+    /// Validate a saved template independently of any one project's language.
+    /// Runtime planning still resolves Auto against the opened project and
+    /// rejects a target that is not opposite to that project's source.
+    func validatePortable(_ configuration: ProcessingPresetConfiguration) -> ProcessingPresetPlan {
+        var sample = configuration.portableForSaving()
+        if sample.scope == .approvedTopic { sample.topicID = "portable-topic-selection" }
+        let sampleLanguage: ArtifactLanguage? = sample.goal.needsTranslation && sample.sourceLanguage == "auto"
+            ? sample.targetLanguage.translationTarget : nil
+        return make(
+            sample, projectAvailable: true, effectiveLanguage: sampleLanguage,
+            approvedSource: false, approvedTopics: sample.scope == .approvedTopic,
+            approvedTranslation: false
+        )
+    }
+
     private func resultDescription(_ config: ProcessingPresetConfiguration, language: ArtifactLanguage?) -> String {
         let source = language?.rawValue.uppercased() ?? config.sourceLanguage.uppercased()
         switch config.goal {

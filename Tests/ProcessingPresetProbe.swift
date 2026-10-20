@@ -48,6 +48,16 @@ struct ProcessingPresetProbe {
         precondition(plan(config).blocker?.contains("RU↔EN") == true)
         config.sourceLanguage = "auto"
         precondition(plan(config).blocker?.contains("выберите язык исходника") == true)
+        precondition(planner.validatePortable(config).canCreate,
+                     "Auto RU→EN template must save without embedding the current project")
+        precondition(plan(config, language: .ru).canCreate,
+                     "Saved Auto template must run on a compatible RU project")
+        precondition(plan(config, language: .en).blocker?.contains("RU↔EN") == true,
+                     "Saved Auto template must reject an incompatible EN project")
+        var invalidPortable = config
+        invalidPortable.sourceLanguage = "ru"
+        invalidPortable.targetLanguage = .ru
+        precondition(planner.validatePortable(invalidPortable).blocker?.contains("RU↔EN") == true)
 
         config.sourceLanguage = "ru"
         config.targetLanguage = .en

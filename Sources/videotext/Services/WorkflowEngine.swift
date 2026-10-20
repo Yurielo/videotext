@@ -2283,16 +2283,7 @@ extension WorkflowViewModel {
         }
         var checked = configuration.portableForSaving()
         checked.name = name
-        var validation = checked
-        if validation.scope == .approvedTopic {
-            validation.topicID = "portable-topic-selection"
-        }
-        let compatibility = ProcessingPresetPlanner().make(
-            validation, projectAvailable: true, effectiveLanguage: nil,
-            approvedSource: false,
-            approvedTopics: validation.scope == .approvedTopic,
-            approvedTranslation: false
-        )
+        let compatibility = ProcessingPresetPlanner().validatePortable(checked)
         guard let blocker = compatibility.blocker else {
             do {
                 var presets = customProcessingPresets
