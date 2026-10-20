@@ -1827,7 +1827,7 @@ struct SimpleRenderedControlsProbe {
         model.selectedOperations = [.transcribe, .topicTimecoding]
         model.selectedTopicID = "advanced-topic"
         model.artifactLanguage = .en
-        model.topicGranularity = .normal
+        model.topicGranularity = .detailed
         let advancedOperations = model.selectedOperations
         let advancedTopicID = model.selectedTopicID
         let advancedLanguage = model.artifactLanguage
@@ -1867,6 +1867,8 @@ struct SimpleRenderedControlsProbe {
         settle(window)
         try press("simple.goal.fragment", in: window)
         _ = try element("simple.fragment.topic.picker", in: window)
+        try require(!nodes(window).contains { $0.accessibilityIdentifier() == "simple.fragment.topic.unavailable" },
+            "Simple topic cut treated canonical normal topics as unavailable when Advanced selected detailed")
         try require(element("simple.fragment.topic.create", in: window).isAccessibilityEnabled()
             && renderedText(try element("simple.fragment.topic.availability", in: window)).contains("Выберите тему, чтобы создать фрагмент")
             && !nodes(window).contains { $0.accessibilityIdentifier() == "simple.fragment.topic.validation" },

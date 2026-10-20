@@ -897,6 +897,10 @@ struct ContentView: View {
     }
 
     private var simpleHomeState: SimpleProjectHomeState {
+        simpleHomeState(topicGranularity: model.topicGranularity)
+    }
+
+    private func simpleHomeState(topicGranularity: TopicGranularity) -> SimpleProjectHomeState {
         guard let projectURL = model.projectURL else {
             return SimpleProjectHomeState(
                 projectName: "",
@@ -920,7 +924,7 @@ struct ContentView: View {
             topicsDetail: model.resultSummary.artifact(.topics)?.detail,
             discoveredOutputs: outputs,
             topicLanguage: manifest?.languageProfile?.effective,
-            topicGranularity: model.topicGranularity
+            topicGranularity: topicGranularity
         )
         return selectedState
     }
@@ -1542,7 +1546,10 @@ struct ContentView: View {
 
     @ViewBuilder
     private func simpleCutTopicPanel() -> some View {
-        let topicsArtifact = simpleHomeState.artifact(.topics)
+        // Simple topic cutting intentionally consumes the canonical normal
+        // approved snapshot selected by simpleTopicCutWorkflowRequest. Advanced
+        // controls may retain a different granularity without changing it.
+        let topicsArtifact = simpleHomeState(topicGranularity: .normal).artifact(.topics)
         let options = model.simpleApprovedTopicOptions
         let selectedTopicID = simpleSelectedTopicFragmentID ?? ""
         let availability = model.simpleTopicCutAvailability(topicID: selectedTopicID)
