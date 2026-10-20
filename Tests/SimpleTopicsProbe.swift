@@ -74,6 +74,7 @@ struct SimpleTopicsProbe {
             let store = ProjectStore(history: history)
 
             try await verifySimpleLifecycle(root: root, store: store, history: history)
+            try await verifyApprovedNormalAllowsMissingSelectedVariants(root: root, store: store, history: history)
             try await verifyRelocatedUnavailableTopicsCanRegenerate(root: root, store: store, history: history)
             try verifyCanonicalCorruptedTopicsRemainBlocked(root: root, store: store, history: history)
             try await verifyCancelResume(root: root, store: store, history: history)
@@ -162,6 +163,65 @@ struct SimpleTopicsProbe {
         _ = try await engine.run(settings: resume, policy: policy, onLog: { _ in })
         try require(adapter.calls == callsBeforeResume, "Ready topics were regenerated on resume")
         print("PASS accepted source -> one selected topic variant -> ready/open/reopen; no ASR or translation")
+    }
+
+    @MainActor
+    private static func verifyApprovedNormalAllowsMissingSelectedVariants(
+        root: URL,
+        store: ProjectStore,
+        history: ProjectHistoryStore
+    ) async throws {
+        let fixture = try makeAcceptedFixture(root: root, store: store, name: "normal-approved-other-variants")
+        let adapter = RecordingTopicAdapter()
+        let engine = WorkflowEngine(store: store, hybridTopicAdapter: adapter)
+        let model = WorkflowViewModel(engine: engine, store: store, historyStore: history)
+        model.openProject(fixture.project)
+
+        model.topicGranularity = .normal
+        try require(model.startSimpleTopicsFromAcceptedTranscript(), "Normal fixture topics did not start")
+        try await waitUntil("Normal fixture topics completion") { !model.isRunning }
+        let normalManifest = try store.load(from: fixture.project)
+        let normalID = try value(normalManifest.topicReviewState?.activeRevisionIDs["ru.normal"],
+                                 "Normal fixture has no approved active topic revision")
+        let normalRevision = try value(normalManifest.topicRevisions?.first(where: { $0.id == normalID }),
+                                       "Normal fixture has no immutable topic metadata")
+        try require(normalRevision.status == .approved,
+                    "Normal fixture topic revision was not approved by the workflow")
+        let normalSnapshotURL = ProjectLayout(root: fixture.project).topicRevisionJSONURL(id: normalID)
+        let normalSnapshot = try Data(contentsOf: normalSnapshotURL)
+        try require((try? ApprovedTopicSnapshotResolver.resolve(
+            manifest: normalManifest,
+            projectURL: fixture.project,
+            language: .ru,
+            granularity: .normal
+        )) != nil, "Normal fixture canonical approved snapshot did not validate")
+
+        for missingVariant in [TopicGranularity.detailed, .coarse] {
+            model.topicGranularity = missingVariant
+            let request = try value(model.simpleTopicsWorkflowRequest,
+                                    "Approved Normal topics blocked missing \(missingVariant.rawValue) topics")
+            try require(request.operations == [.topicTimecoding] && request.granularity == missingVariant,
+                        "Missing selected variant requested the wrong workflow")
+            try require(model.startSimpleTopicsFromAcceptedTranscript(),
+                        "Missing \(missingVariant.rawValue) variant failed to start")
+            try await waitUntil("\(missingVariant.rawValue) topics completion") { !model.isRunning }
+            let after = try store.load(from: fixture.project)
+            let selectedID = try value(after.topicReviewState?.activeRevisionIDs["ru.\(missingVariant.rawValue)"],
+                                       "Selected \(missingVariant.rawValue) topics were not approved")
+            let preservedNormalSnapshot = try Data(contentsOf: normalSnapshotURL)
+            try require(after.topicRevisions?.first(where: { $0.id == selectedID })?.status == .approved
+                        && after.topicReviewState?.activeRevisionIDs["ru.normal"] == normalID
+                        && preservedNormalSnapshot == normalSnapshot,
+                        "Creating \(missingVariant.rawValue) topics changed the approved Normal snapshot")
+            try require(!model.canCreateTopicsFromAcceptedTranscript,
+                        "Completed \(missingVariant.rawValue) topics exposed duplicate regeneration")
+        }
+        try require(adapter.calls == 3 && adapter.granularities == [.normal, .detailed, .coarse],
+                    "Missing variant workflows used the wrong adapter sequence")
+        try require(!model.log.text.contains("Запуск: Расшифровать всё видео")
+                    && !model.log.text.contains("Расшифровка bundled SeminarText"),
+                    "Creating a selected topic variant repeated ASR")
+        print("PASS approved Normal snapshot -> missing detailed/coarse variants; Normal preserved, no duplicate regeneration or ASR")
     }
 
     @MainActor

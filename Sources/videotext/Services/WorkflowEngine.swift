@@ -450,18 +450,15 @@ final class WorkflowViewModel: ObservableObject {
         // A copied project can retain an active revision whose stored snapshot
         // path belongs to its former location. That stale metadata represents
         // no project-local topic result and may be regenerated from a valid
-        // approved source. Any active revision that claims the canonical path
-        // remains fail-closed, including a missing or corrupted snapshot.
-        let normalVariantKey = "\(language.rawValue).\(TopicGranularity.normal.rawValue)"
+        // approved source. An active revision for the selected variant that
+        // claims the canonical path remains fail-closed, including a missing
+        // or corrupted snapshot. Other approved variants are independent.
         let selectedVariantKey = "\(language.rawValue).\(topicGranularity.rawValue)"
-        let activeVariants = Set([normalVariantKey, selectedVariantKey])
-        guard !activeVariants.contains(where: {
-            hasCanonicalActiveTopicRevision(
-                for: $0,
-                manifest: manifest,
-                projectURL: projectURL
-            )
-        }) else { return nil }
+        guard !hasCanonicalActiveTopicRevision(
+            for: selectedVariantKey,
+            manifest: manifest,
+            projectURL: projectURL
+        ) else { return nil }
 
         let layout = ProjectLayout(root: projectURL)
         let immutableURL = layout.subtitleRevisionURL(id: revision.id, language: language)

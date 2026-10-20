@@ -233,9 +233,11 @@ struct SimpleRenderedControlsProbe {
         try verifyCreationControls(project: scratch.appendingPathComponent("new-source"), media: media)
         try verifyTopicControls(project: scratch.appendingPathComponent("topics"), media: media)
         try verifySelectedTopicGranularityPresentation(project: scratch.appendingPathComponent("selected-topic-granularity"), media: media)
+        try verifyNormalApprovedOtherGranularityPresentation(project: scratch.appendingPathComponent("normal-approved-other-granularity"), media: media)
         try verifyInvalidTopicSnapshotPresentation(project: scratch.appendingPathComponent("invalid-topics"), media: media)
         try verifyRelocatedTopicSnapshotPresentation(project: scratch.appendingPathComponent("relocated-topics"), media: media)
         try verifyMissingImmutableTopicTextPresentation(project: scratch.appendingPathComponent("missing-topic-text"), media: media)
+        try verifyMissingSelectedTopicTextWithoutNormalPresentation(project: scratch.appendingPathComponent("missing-detailed-topic-text-no-normal"), media: media)
         try verifyTranslationControls(project: scratch.appendingPathComponent("translation"), media: media)
         try verifySourceSubtitledVideoControls(project: scratch.appendingPathComponent("subtitled-video"), media: media)
         try verifySimpleAudioEnhancementControls(project: scratch.appendingPathComponent("simple-audio-enhancement"), media: media)
@@ -920,6 +922,48 @@ struct SimpleRenderedControlsProbe {
         print("RENDERED_SELECTED_TOPIC_GRANULARITY_PASS: coarse Ready/Open without duplicate regeneration; normal/detailed missing variants offer creation")
     }
 
+    private static func verifyNormalApprovedOtherGranularityPresentation(project: URL, media: URL) throws {
+        _ = try makeProject(project, media: media, source: .ru, topicGranularity: .normal)
+        let model = WorkflowViewModel()
+        model.openProject(project)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: ContentView(model: model))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        settle(window)
+        try press("simple.goal.textContent", in: window)
+
+        try require(renderedText(try element("simple.textContent.topics.status", in: window)) == "Готово"
+            && nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.topics.open" }
+            && !model.canCreateTopicsFromAcceptedTranscript,
+            "Approved Normal topics did not remain Ready/Open without duplicate regeneration")
+
+        for missingVariant in [TopicGranularity.detailed, .coarse] {
+            model.topicGranularity = missingVariant
+            settle(window)
+            let create = try element("simple.textContent.topics.create", in: window)
+            try require(renderedText(try element("simple.textContent.topics.status", in: window)) != "Готово"
+                && !nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.topics.open" }
+                && create.isAccessibilityEnabled()
+                && model.simpleTopicsWorkflowRequest?.granularity == missingVariant
+                && !nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.topics.unavailable" },
+                "Approved Normal topics incorrectly blocked creation of missing \(missingVariant.rawValue) topics")
+        }
+
+        try press("simple.goal.fragment", in: window)
+        try require(model.simpleApprovedTopicOptions.count == 1
+            && nodes(window).contains { $0.accessibilityIdentifier() == "simple.fragment.topic.picker" },
+            "Advanced granularity selection changed the canonical Normal topic-cut options")
+        model.topicGranularity = .normal
+        settle(window)
+        try require(renderedText(try element("simple.textContent.topics.status", in: window)) == "Готово"
+            && !nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.topics.create" },
+            "Returning to Normal exposed duplicate regeneration")
+        print("RENDERED_NORMAL_APPROVED_OTHER_GRANULARITY_PASS: missing detailed/coarse create; Normal remains Ready/Open and topic-cut source")
+    }
+
     private static func verifyInvalidTopicSnapshotPresentation(project: URL, media: URL) throws {
         let manifest = try makeProject(project, media: media, source: .ru)
         guard let revision = manifest.topicRevisions?.first else {
@@ -1054,6 +1098,39 @@ struct SimpleRenderedControlsProbe {
             && !nodes(window).contains { $0.accessibilityIdentifier() == "simple.fragment.topic.unavailable" },
             "Valid immutable topic JSON lost Topic Cut when only its TXT is missing")
         print("RENDERED_MISSING_TOPIC_TEXT_PASS: no Open/regeneration, Topic Cut remains available")
+    }
+
+    private static func verifyMissingSelectedTopicTextWithoutNormalPresentation(project: URL, media: URL) throws {
+        let manifest = try makeProject(project, media: media, source: .ru, topicGranularity: .detailed)
+        guard let revision = manifest.topicRevisions?.first else {
+            throw RenderedProbeFailure(message: "Missing Detailed text fixture has no approved topic revision")
+        }
+        try FileManager.default.removeItem(at: URL(fileURLWithPath: revision.textPath))
+
+        let model = WorkflowViewModel()
+        model.openProject(project)
+        try require(model.topicGranularity == .detailed && model.simpleApprovedTopicOptions.isEmpty,
+            "Missing Detailed text fixture unexpectedly has canonical Normal Topic Cut options")
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: ContentView(model: model))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        settle(window)
+
+        try press("simple.goal.textContent", in: window)
+        let recovery = try element("simple.textContent.topics.unavailable", in: window)
+        try require(renderedText(recovery).contains("Текст тем недоступен для открытия")
+            && renderedText(recovery).contains("темы обычной детализации")
+            && !renderedText(recovery).contains("не блокирует создание фрагмента")
+            && !nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.topics.create" },
+            "Missing Detailed text without Normal topics promised an unavailable Topic Cut")
+        try press("simple.goal.fragment", in: window)
+        try require(nodes(window).contains { $0.accessibilityIdentifier() == "simple.fragment.topic.unavailable" }
+            && !nodes(window).contains { $0.accessibilityIdentifier() == "simple.fragment.topic.picker" },
+            "Fragment panel exposed Topic Cut without approved canonical Normal topics")
+        print("RENDERED_MISSING_DETAILED_TEXT_NO_NORMAL_PASS: recovery copy matches unavailable canonical Topic Cut")
     }
 
     private static func verifyTranslationControls(project: URL, media: URL) throws {

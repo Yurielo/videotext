@@ -1016,7 +1016,7 @@ struct ContentView: View {
                     .accessibilityElement(children: .combine)
                     .accessibilityIdentifier("simple.\(section).topics.advancedHandoff")
             } else if artifact.readiness == .missing || artifact.readiness == .failed {
-                if simpleHasCanonicalActiveNormalTopicRevision {
+                if simpleHasCanonicalActiveSelectedTopicRevision {
                     EmptyView()
                 } else if !simpleSourceTranscriptIsApproved {
                     VStack(alignment: .leading, spacing: 3) {
@@ -1064,9 +1064,12 @@ struct ContentView: View {
     @ViewBuilder
     private func simpleTopicsRecoveryMessage(_ artifact: SimpleProjectHomeArtifact, section: String) -> some View {
         if (artifact.readiness == .missing || artifact.readiness == .failed),
-           simpleHasCanonicalActiveNormalTopicRevision {
+           simpleHasCanonicalActiveSelectedTopicRevision {
+            let normalTopicCutAvailable = !model.simpleApprovedTopicOptions.isEmpty
             Text(artifact.isUsableForTopicCut
-                ? "Текст тем недоступен для открытия. Восстановите файл. Отсутствие текста само по себе не блокирует создание фрагмента по утверждённой теме."
+                ? (normalTopicCutAvailable
+                    ? "Текст тем недоступен для открытия. Восстановите файл. Отсутствие текста само по себе не блокирует создание фрагмента по утверждённой теме."
+                    : "Текст тем недоступен для открытия. Восстановите файл. Для создания фрагмента по теме нужны доступные утверждённые темы обычной детализации.")
                 : "Утверждённые темы недоступны. Восстановите файлы проекта или откройте корректный проект.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -1116,16 +1119,24 @@ struct ContentView: View {
     }
 
     private var simpleHasCanonicalActiveNormalTopicRevision: Bool {
+        simpleHasCanonicalActiveTopicRevision(granularity: .normal)
+    }
+
+    private var simpleHasCanonicalActiveSelectedTopicRevision: Bool {
+        simpleHasCanonicalActiveTopicRevision(granularity: model.topicGranularity)
+    }
+
+    private func simpleHasCanonicalActiveTopicRevision(granularity: TopicGranularity) -> Bool {
         guard let projectURL = model.projectURL,
               let manifest = try? ProjectStore().load(from: projectURL),
               let language = manifest.languageProfile?.effective else { return false }
-        let key = "\(language.rawValue).\(TopicGranularity.normal.rawValue)"
+        let key = "\(language.rawValue).\(granularity.rawValue)"
         guard let activeID = manifest.topicReviewState?.activeRevisionIDs[key] else { return false }
         guard let revisions = manifest.topicRevisions,
               revisions.filter({ $0.id == activeID }).count == 1,
               let revision = revisions.first(where: { $0.id == activeID }),
               revision.language == language,
-              revision.granularity == .normal,
+              revision.granularity == granularity,
               revision.status == .approved else {
             return true
         }
