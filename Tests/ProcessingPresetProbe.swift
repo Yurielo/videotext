@@ -4,6 +4,27 @@ import AppKit
 @main
 struct ProcessingPresetProbe {
     static func main() throws {
+        let sourceReview = HumanReviewCheckpoint(
+            kind: .sourceTranscript, language: .en, revisionID: "source-review",
+            pendingOperations: [], createdAt: Date()
+        )
+        let translationReview = HumanReviewCheckpoint(
+            kind: .translatedTranscript, language: .ru, revisionID: "translation-review",
+            pendingOperations: [], createdAt: Date()
+        )
+        precondition(WorkflowReviewPrompt.human(sourceReview).contains("расшифровку EN"))
+        precondition(WorkflowReviewPrompt.human(translationReview).contains("перевод RU"))
+        precondition(!WorkflowReviewPrompt.human(translationReview).contains("расшифровку"))
+        let selectedTopicsReview = TopicReviewCheckpoint(
+            revisionIDs: ["ru.coarse": "topics-coarse"], pendingOperations: [], createdAt: Date()
+        )
+        precondition(WorkflowReviewPrompt.topics(selectedTopicsReview).contains("(Крупный)"))
+        precondition(!WorkflowReviewPrompt.topics(selectedTopicsReview).contains("подробный, обычный и крупный"))
+        let allTopicsReview = TopicReviewCheckpoint(
+            revisionIDs: ["ru.coarse": "coarse", "ru.normal": "normal", "ru.detailed": "detailed"],
+            pendingOperations: [], createdAt: Date()
+        )
+        precondition(WorkflowReviewPrompt.topics(allTopicsReview).contains("подробный, обычный и крупный"))
         let planner = ProcessingPresetPlanner()
         func plan(
             _ configuration: ProcessingPresetConfiguration,

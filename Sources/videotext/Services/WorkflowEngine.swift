@@ -2004,13 +2004,13 @@ final class WorkflowViewModel: ObservableObject {
                     self.signalWorkflowStop()
                     self.alert = AppAlert(
                         title: "Требуется Human Review",
-                        message: "Проверьте расшифровку \(checkpoint.language.rawValue.uppercased()). После утверждения обработка продолжится автоматически."
+                        message: WorkflowReviewPrompt.human(checkpoint)
                     )
-                } else if result.topicReviewCheckpoint != nil {
+                } else if let checkpoint = result.topicReviewCheckpoint {
                     self.signalWorkflowStop()
                     self.alert = AppAlert(
                         title: "Требуется Human Review тем",
-                        message: "Проверьте подробный, обычный и крупный таймкодинг. После утверждения обработка продолжится автоматически."
+                        message: WorkflowReviewPrompt.topics(checkpoint)
                     )
                 } else {
                     self.signalWorkflowStop()
@@ -2783,6 +2783,23 @@ struct WorkflowResult {
     var elapsed: TimeInterval
     var checkpoint: HumanReviewCheckpoint? = nil
     var topicReviewCheckpoint: TopicReviewCheckpoint? = nil
+}
+
+enum WorkflowReviewPrompt {
+    static func human(_ checkpoint: HumanReviewCheckpoint) -> String {
+        let subject = checkpoint.kind == .translatedTranscript ? "перевод" : "расшифровку"
+        return "Проверьте \(subject) \(checkpoint.language.rawValue.uppercased()). После утверждения обработка продолжится автоматически."
+    }
+
+    static func topics(_ checkpoint: TopicReviewCheckpoint) -> String {
+        let selected: TopicGranularity? = checkpoint.revisionIDs.count == 1
+            ? checkpoint.revisionIDs.keys.first.flatMap {
+                TopicGranularity(rawValue: String($0.split(separator: ".").last ?? ""))
+            } : nil
+        let subject = selected.map { "темы выбранной детализации (\($0.title))" }
+            ?? "подробный, обычный и крупный таймкодинг"
+        return "Проверьте \(subject). После утверждения обработка продолжится автоматически."
+    }
 }
 
 final class WorkflowEngine: @unchecked Sendable {
