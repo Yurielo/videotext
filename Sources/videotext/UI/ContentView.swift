@@ -304,6 +304,7 @@ struct ContentView: View {
             showsSimpleTextContent = false
             showsSimplePresets = false
             selectedCustomPresetID = nil
+            simplePresetConfiguration = simplePresetConfiguration.portableForSaving()
             if let source = model.projectURL.flatMap({ try? ProjectStore().load(from: $0).languageProfile?.effective }) {
                 simplePresetConfiguration.targetLanguage = source.translationTarget
             }
