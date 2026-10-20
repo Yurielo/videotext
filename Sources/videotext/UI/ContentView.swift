@@ -920,7 +920,7 @@ struct ContentView: View {
             topicsDetail: model.resultSummary.artifact(.topics)?.detail,
             discoveredOutputs: outputs,
             topicLanguage: manifest?.languageProfile?.effective,
-            topicGranularity: .normal
+            topicGranularity: model.topicGranularity
         )
         return selectedState
     }

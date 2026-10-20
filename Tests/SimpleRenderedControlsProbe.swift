@@ -232,6 +232,7 @@ struct SimpleRenderedControlsProbe {
         }
         try verifyCreationControls(project: scratch.appendingPathComponent("new-source"), media: media)
         try verifyTopicControls(project: scratch.appendingPathComponent("topics"), media: media)
+        try verifySelectedTopicGranularityPresentation(project: scratch.appendingPathComponent("selected-topic-granularity"), media: media)
         try verifyInvalidTopicSnapshotPresentation(project: scratch.appendingPathComponent("invalid-topics"), media: media)
         try verifyRelocatedTopicSnapshotPresentation(project: scratch.appendingPathComponent("relocated-topics"), media: media)
         try verifyMissingImmutableTopicTextPresentation(project: scratch.appendingPathComponent("missing-topic-text"), media: media)
@@ -254,7 +255,12 @@ struct SimpleRenderedControlsProbe {
         }
     }
 
-    private static func makeProject(_ project: URL, media: URL, source: ArtifactLanguage) throws -> ProjectManifest {
+    private static func makeProject(
+        _ project: URL,
+        media: URL,
+        source: ArtifactLanguage,
+        topicGranularity: TopicGranularity = .normal
+    ) throws -> ProjectManifest {
         let store = ProjectStore()
         var manifest = try store.ensureProject(at: project, mediaURL: media, mode: .newProject)
         let layout = ProjectLayout(root: project)
@@ -313,17 +319,25 @@ struct SimpleRenderedControlsProbe {
                 summary: "Two approved cues.", keywords: ["fixture"], confidence: 1,
                 boundaryReason: "Start of fixture", cueIds: [1, 2])]
         )
-        try TopicFileService().save(topics, projectURL: project, language: source, granularity: .normal, updateLegacyFiles: true)
+        var selectedTopics = topics
+        selectedTopics.granularity = topicGranularity
+        try TopicFileService().save(
+            selectedTopics,
+            projectURL: project,
+            language: source,
+            granularity: topicGranularity,
+            updateLegacyFiles: true
+        )
         let topicRevisionID = "approved-topics"
         let approvedTopicsURL = layout.topicRevisionJSONURL(id: topicRevisionID)
         let approvedTopicsTextURL = layout.topicRevisionTextURL(id: topicRevisionID)
         try FileManager.default.createDirectory(at: approvedTopicsURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data(contentsOf: layout.topicsURL(language: source, granularity: .normal))
+        try Data(contentsOf: layout.topicsURL(language: source, granularity: topicGranularity))
             .write(to: approvedTopicsURL, options: .atomic)
-        try Data(contentsOf: layout.topicsTextURL(language: source, granularity: .normal))
+        try Data(contentsOf: layout.topicsTextURL(language: source, granularity: topicGranularity))
             .write(to: approvedTopicsTextURL, options: .atomic)
         let topic = TopicRevision(
-            id: topicRevisionID, language: source, granularity: .normal, parentRevisionID: nil,
+            id: topicRevisionID, language: source, granularity: topicGranularity, parentRevisionID: nil,
             jsonPath: approvedTopicsURL.path,
             textPath: approvedTopicsTextURL.path,
             contentHash: StableTopicHash.string(try String(contentsOf: approvedTopicsURL, encoding: .utf8)),
@@ -866,6 +880,46 @@ struct SimpleRenderedControlsProbe {
         print("RENDERED_TOPIC_CONTROLS_PASS: create CTA, no unnecessary choice, no Simple correction, Advanced handoff")
     }
 
+    private static func verifySelectedTopicGranularityPresentation(project: URL, media: URL) throws {
+        _ = try makeProject(project, media: media, source: .ru, topicGranularity: .coarse)
+        let model = WorkflowViewModel()
+        model.openProject(project)
+        try require(model.topicGranularity == .coarse,
+            "Coarse approved legacy topics did not restore the selected coarse granularity")
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: ContentView(model: model))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        settle(window)
+
+        try press("simple.goal.textContent", in: window)
+        try require(renderedText(try element("simple.textContent.topics.status", in: window)) == "Готово"
+            && nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.topics.open" }
+            && !nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.topics.create" }
+            && !model.canCreateTopicsFromAcceptedTranscript,
+            "Selected approved coarse topics were not rendered Ready/Open or exposed duplicate regeneration")
+
+        for missingVariant in [TopicGranularity.normal, .detailed] {
+            model.topicGranularity = missingVariant
+            settle(window)
+            try require(renderedText(try element("simple.textContent.topics.status", in: window)) != "Готово"
+                && !nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.topics.open" }
+                && nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.topics.create" }
+                && model.canCreateTopicsFromAcceptedTranscript,
+                "Simple presentation or eligibility did not offer creation for missing selected \(missingVariant.rawValue) topics")
+        }
+
+        model.topicGranularity = .coarse
+        settle(window)
+        try require(renderedText(try element("simple.textContent.topics.status", in: window)) == "Готово"
+            && nodes(window).contains { $0.accessibilityIdentifier() == "simple.textContent.topics.open" },
+            "Returning to the selected coarse variant did not restore Ready/Open")
+        print("RENDERED_SELECTED_TOPIC_GRANULARITY_PASS: coarse Ready/Open without duplicate regeneration; normal/detailed missing variants offer creation")
+    }
+
     private static func verifyInvalidTopicSnapshotPresentation(project: URL, media: URL) throws {
         let manifest = try makeProject(project, media: media, source: .ru)
         guard let revision = manifest.topicRevisions?.first else {
@@ -878,7 +932,7 @@ struct SimpleRenderedControlsProbe {
 
         let model = WorkflowViewModel()
         model.openProject(project)
-        model.topicGranularity = .coarse
+        model.topicGranularity = .normal
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -1773,7 +1827,7 @@ struct SimpleRenderedControlsProbe {
         model.selectedOperations = [.transcribe, .topicTimecoding]
         model.selectedTopicID = "advanced-topic"
         model.artifactLanguage = .en
-        model.topicGranularity = .detailed
+        model.topicGranularity = .normal
         let advancedOperations = model.selectedOperations
         let advancedTopicID = model.selectedTopicID
         let advancedLanguage = model.artifactLanguage
