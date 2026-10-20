@@ -447,13 +447,18 @@ final class WorkflowViewModel: ObservableObject {
               let revision = manifest.activeTranscriptRevision(for: language),
               revision.reviewStatus == .approved else { return nil }
 
-        // An active topic revision is an existing approved result. If its
-        // snapshot is unavailable, Simple must not replace it by generating
-        // new topics; the project needs recovery in Advanced instead.
-        let normalVariantKey = "\(language.rawValue).\(TopicGranularity.normal.rawValue)"
+        // A copied project can retain an active revision whose stored snapshot
+        // path belongs to its former location. That stale metadata represents
+        // no project-local topic result and may be regenerated from a valid
+        // approved source. An active revision for the selected variant that
+        // claims the canonical path remains fail-closed, including a missing
+        // or corrupted snapshot. Other approved variants are independent.
         let selectedVariantKey = "\(language.rawValue).\(topicGranularity.rawValue)"
-        guard manifest.topicReviewState?.activeRevisionIDs[normalVariantKey] == nil,
-              manifest.topicReviewState?.activeRevisionIDs[selectedVariantKey] == nil else { return nil }
+        guard !hasCanonicalActiveTopicRevision(
+            for: selectedVariantKey,
+            manifest: manifest,
+            projectURL: projectURL
+        ) else { return nil }
 
         let layout = ProjectLayout(root: projectURL)
         let immutableURL = layout.subtitleRevisionURL(id: revision.id, language: language)
@@ -495,6 +500,39 @@ final class WorkflowViewModel: ObservableObject {
 
     var canCreateTopicsFromAcceptedTranscript: Bool {
         simpleTopicsWorkflowRequest != nil
+    }
+
+    private func topicVariant(for key: String) -> (ArtifactLanguage, TopicGranularity)? {
+        let parts = key.split(separator: ".", maxSplits: 1).map(String.init)
+        guard parts.count == 2,
+              let language = ArtifactLanguage(rawValue: parts[0]),
+              let granularity = TopicGranularity(rawValue: parts[1]) else {
+            return nil
+        }
+        return (language, granularity)
+    }
+
+    private func hasCanonicalActiveTopicRevision(
+        for key: String,
+        manifest: ProjectManifest,
+        projectURL: URL
+    ) -> Bool {
+        guard let activeID = manifest.topicReviewState?.activeRevisionIDs[key] else { return false }
+        guard let (language, granularity) = topicVariant(for: key),
+              let revisions = manifest.topicRevisions,
+              revisions.filter({ $0.id == activeID }).count == 1,
+              let revision = revisions.first(where: { $0.id == activeID }),
+              revision.language == language,
+              revision.granularity == granularity,
+              revision.status == .approved else {
+            // An active ID without coherent immutable metadata is corrupt
+            // state, never a reason to replace it automatically.
+            return true
+        }
+        let expected = ProjectLayout(root: projectURL).topicRevisionJSONURL(id: revision.id)
+            .standardizedFileURL.path
+        let stored = URL(fileURLWithPath: revision.jsonPath).standardizedFileURL.path
+        return stored == expected
     }
 
     @discardableResult

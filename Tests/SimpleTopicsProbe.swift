@@ -74,6 +74,9 @@ struct SimpleTopicsProbe {
             let store = ProjectStore(history: history)
 
             try await verifySimpleLifecycle(root: root, store: store, history: history)
+            try await verifyApprovedNormalAllowsMissingSelectedVariants(root: root, store: store, history: history)
+            try await verifyRelocatedUnavailableTopicsCanRegenerate(root: root, store: store, history: history)
+            try verifyCanonicalCorruptedTopicsRemainBlocked(root: root, store: store, history: history)
             try await verifyCancelResume(root: root, store: store, history: history)
             try verifyMissingApprovalRefuses(root: root, store: store, history: history)
             try await verifyReuseGuard(root: root, store: store)
@@ -163,6 +166,65 @@ struct SimpleTopicsProbe {
     }
 
     @MainActor
+    private static func verifyApprovedNormalAllowsMissingSelectedVariants(
+        root: URL,
+        store: ProjectStore,
+        history: ProjectHistoryStore
+    ) async throws {
+        let fixture = try makeAcceptedFixture(root: root, store: store, name: "normal-approved-other-variants")
+        let adapter = RecordingTopicAdapter()
+        let engine = WorkflowEngine(store: store, hybridTopicAdapter: adapter)
+        let model = WorkflowViewModel(engine: engine, store: store, historyStore: history)
+        model.openProject(fixture.project)
+
+        model.topicGranularity = .normal
+        try require(model.startSimpleTopicsFromAcceptedTranscript(), "Normal fixture topics did not start")
+        try await waitUntil("Normal fixture topics completion") { !model.isRunning }
+        let normalManifest = try store.load(from: fixture.project)
+        let normalID = try value(normalManifest.topicReviewState?.activeRevisionIDs["ru.normal"],
+                                 "Normal fixture has no approved active topic revision")
+        let normalRevision = try value(normalManifest.topicRevisions?.first(where: { $0.id == normalID }),
+                                       "Normal fixture has no immutable topic metadata")
+        try require(normalRevision.status == .approved,
+                    "Normal fixture topic revision was not approved by the workflow")
+        let normalSnapshotURL = ProjectLayout(root: fixture.project).topicRevisionJSONURL(id: normalID)
+        let normalSnapshot = try Data(contentsOf: normalSnapshotURL)
+        try require((try? ApprovedTopicSnapshotResolver.resolve(
+            manifest: normalManifest,
+            projectURL: fixture.project,
+            language: .ru,
+            granularity: .normal
+        )) != nil, "Normal fixture canonical approved snapshot did not validate")
+
+        for missingVariant in [TopicGranularity.detailed, .coarse] {
+            model.topicGranularity = missingVariant
+            let request = try value(model.simpleTopicsWorkflowRequest,
+                                    "Approved Normal topics blocked missing \(missingVariant.rawValue) topics")
+            try require(request.operations == [.topicTimecoding] && request.granularity == missingVariant,
+                        "Missing selected variant requested the wrong workflow")
+            try require(model.startSimpleTopicsFromAcceptedTranscript(),
+                        "Missing \(missingVariant.rawValue) variant failed to start")
+            try await waitUntil("\(missingVariant.rawValue) topics completion") { !model.isRunning }
+            let after = try store.load(from: fixture.project)
+            let selectedID = try value(after.topicReviewState?.activeRevisionIDs["ru.\(missingVariant.rawValue)"],
+                                       "Selected \(missingVariant.rawValue) topics were not approved")
+            let preservedNormalSnapshot = try Data(contentsOf: normalSnapshotURL)
+            try require(after.topicRevisions?.first(where: { $0.id == selectedID })?.status == .approved
+                        && after.topicReviewState?.activeRevisionIDs["ru.normal"] == normalID
+                        && preservedNormalSnapshot == normalSnapshot,
+                        "Creating \(missingVariant.rawValue) topics changed the approved Normal snapshot")
+            try require(!model.canCreateTopicsFromAcceptedTranscript,
+                        "Completed \(missingVariant.rawValue) topics exposed duplicate regeneration")
+        }
+        try require(adapter.calls == 3 && adapter.granularities == [.normal, .detailed, .coarse],
+                    "Missing variant workflows used the wrong adapter sequence")
+        try require(!model.log.text.contains("Запуск: Расшифровать всё видео")
+                    && !model.log.text.contains("Расшифровка bundled SeminarText"),
+                    "Creating a selected topic variant repeated ASR")
+        print("PASS approved Normal snapshot -> missing detailed/coarse variants; Normal preserved, no duplicate regeneration or ASR")
+    }
+
+    @MainActor
     private static func verifyCancelResume(
         root: URL,
         store: ProjectStore,
@@ -214,6 +276,152 @@ struct SimpleTopicsProbe {
         try require(!model.canCreateTopicsFromAcceptedTranscript,
                     "Completed resume still offers topic regeneration")
         print("PASS Simple topic stop -> workflow stopped -> resume -> ready")
+    }
+
+    @MainActor
+    private static func verifyRelocatedUnavailableTopicsCanRegenerate(
+        root: URL,
+        store: ProjectStore,
+        history: ProjectHistoryStore
+    ) async throws {
+        let fixture = try makeAcceptedFixture(root: root, store: store, name: "relocated-unavailable")
+        let layout = ProjectLayout(root: fixture.project)
+        let translationID = "translation-relocated-unavailable"
+        let translatedCues = [
+            SubtitleCue(id: 1, start: 0, end: 2, text: "First translated project statement."),
+            SubtitleCue(id: 2, start: 2, end: 4, text: "Second translated project statement.")
+        ]
+        try SRTService().writePreservingIDs(translatedCues, to: layout.subtitlesURL(language: .en))
+        try SRTService().writePreservingIDs(
+            translatedCues,
+            to: layout.subtitleRevisionURL(id: translationID, language: .en)
+        )
+        let translationText = translatedCues.map(\.text).joined(separator: "\n\n") + "\n"
+        try translationText.write(to: layout.transcriptURL(language: .en), atomically: true, encoding: .utf8)
+        try translationText.write(
+            to: layout.transcriptRevisionURL(id: translationID, language: .en),
+            atomically: true,
+            encoding: .utf8
+        )
+        let translatedSRT = try String(contentsOf: layout.subtitlesURL(language: .en), encoding: .utf8)
+        let staleTopicID = "topics-ru-coarse-relocated"
+        try store.mutate(fixture.project) { manifest in
+            manifest.transcriptRevisions?.append(TranscriptRevision(
+                id: translationID,
+                language: .en,
+                origin: .translated,
+                parentRevisionID: "accepted-relocated-unavailable",
+                transcriptArtifactID: "artifact-\(translationID)-txt",
+                subtitleArtifactID: "artifact-\(translationID)-srt",
+                contentHash: StableTopicHash.string(translatedSRT),
+                createdAt: Date(),
+                reviewStatus: .approved
+            ))
+            manifest.humanReviewState?.activeRevisionIDs["en"] = translationID
+            manifest.topicRevisions = [TopicRevision(
+                id: staleTopicID,
+                language: .ru,
+                granularity: .coarse,
+                parentRevisionID: nil,
+                jsonPath: "/relocated-project/Texts/Topics/Revisions/\(staleTopicID).json",
+                textPath: "/relocated-project/Texts/Topics/Revisions/\(staleTopicID).txt",
+                contentHash: "stale-relocated-snapshot",
+                status: .approved,
+                createdAt: Date()
+            )]
+            manifest.topicReviewState = TopicReviewState(
+                enabled: true,
+                activeRevisionIDs: ["ru.coarse": staleTopicID],
+                pendingCheckpoint: nil
+            )
+        }
+
+        let translationBefore = try Data(contentsOf: layout.subtitlesURL(language: .en))
+        let adapter = RecordingTopicAdapter()
+        let engine = WorkflowEngine(store: store, hybridTopicAdapter: adapter)
+        let model = WorkflowViewModel(engine: engine, store: store, historyStore: history)
+        model.openProject(fixture.project)
+        model.selectTopicVariant(language: .ru, granularity: .coarse)
+        try require((try? ApprovedTopicSnapshotResolver.resolve(
+            manifest: store.load(from: fixture.project),
+            projectURL: fixture.project,
+            language: .ru,
+            granularity: .coarse
+        )) == nil, "Relocated fixture unexpectedly resolved its stale topic snapshot")
+        try require(model.canCreateTopicsFromAcceptedTranscript,
+                    "Valid accepted source could not regenerate topics after a relocated stale snapshot")
+        try require(model.startSimpleTopicsFromAcceptedTranscript(),
+                    "Relocated stale snapshot did not start Simple topic generation")
+        try await waitUntil("relocated Simple topic completion") { !model.isRunning }
+
+        let after = try store.load(from: fixture.project)
+        let activeID = try value(after.topicReviewState?.activeRevisionIDs["ru.coarse"],
+                                 "Regenerated topics did not become active")
+        try require(activeID != staleTopicID,
+                    "Relocated stale topic revision was reused instead of replaced")
+        try require(adapter.calls == 1,
+                    "Relocated stale snapshot scheduled an unexpected topic adapter count")
+        try require(after.workflow?.operations[WorkflowOperation.transcribe.rawValue]?.status == .skipped,
+                    "Relocated topic regeneration repeated ASR")
+        try require(after.workflow?.operations[WorkflowOperation.translateTranscript.rawValue] == nil,
+                    "Relocated topic regeneration scheduled translation")
+        let translationAfter = try Data(contentsOf: layout.subtitlesURL(language: .en))
+        try require(translationAfter == translationBefore,
+                    "Relocated topic regeneration changed the approved translation")
+        try require(after.activeTranscriptRevision(for: .en)?.id == translationID,
+                    "Relocated topic regeneration changed the approved translation revision")
+        try require(!model.log.text.contains("Запуск: Расшифровать всё видео"),
+                    "Relocated topic regeneration launched ASR")
+        print("PASS relocated stale topics -> regenerate from approved source; translation retained, no ASR")
+    }
+
+    @MainActor
+    private static func verifyCanonicalCorruptedTopicsRemainBlocked(
+        root: URL,
+        store: ProjectStore,
+        history: ProjectHistoryStore
+    ) throws {
+        let fixture = try makeAcceptedFixture(root: root, store: store, name: "canonical-corrupted")
+        let layout = ProjectLayout(root: fixture.project)
+        let topicID = "topics-ru-coarse-canonical-corrupted"
+        let immutableJSON = layout.topicRevisionJSONURL(id: topicID)
+        try FileManager.default.createDirectory(
+            at: immutableJSON.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("{\\\"corrupted\\\":true}".utf8).write(to: immutableJSON, options: .atomic)
+        try store.mutate(fixture.project) { manifest in
+            manifest.topicRevisions = [TopicRevision(
+                id: topicID,
+                language: .ru,
+                granularity: .coarse,
+                parentRevisionID: nil,
+                jsonPath: immutableJSON.path,
+                textPath: layout.topicRevisionTextURL(id: topicID).path,
+                contentHash: "intentionally-wrong-hash",
+                status: .approved,
+                createdAt: Date()
+            )]
+            manifest.topicReviewState = TopicReviewState(
+                enabled: true,
+                activeRevisionIDs: ["ru.coarse": topicID],
+                pendingCheckpoint: nil
+            )
+        }
+        let model = WorkflowViewModel(store: store, historyStore: history)
+        model.openProject(fixture.project)
+        model.selectTopicVariant(language: .ru, granularity: .coarse)
+        try require((try? ApprovedTopicSnapshotResolver.resolve(
+            manifest: store.load(from: fixture.project),
+            projectURL: fixture.project,
+            language: .ru,
+            granularity: .coarse
+        )) == nil, "Canonical-corrupted fixture unexpectedly resolved its snapshot")
+        try require(!model.canCreateTopicsFromAcceptedTranscript,
+                    "Canonical corrupted active snapshot exposed topic regeneration")
+        try require(!model.startSimpleTopicsFromAcceptedTranscript() && !model.isRunning,
+                    "Canonical corrupted active snapshot started a workflow")
+        print("PASS canonical corrupted active topics -> fail closed without regeneration")
     }
 
     @MainActor

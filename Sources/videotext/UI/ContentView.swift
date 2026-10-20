@@ -187,13 +187,16 @@ struct ContentView: View {
     @State private var showsSimpleTextContent = false
     @State private var showsSimpleSubtitledVideo = false
     @State private var showsSimpleFragment = false
+    @State private var showsSimpleProcessing = false
     @State private var simpleSubtitledVideoSource: SimpleSubtitledVideoSource = .source
     @State private var simpleSubtitledVideoActionStarted = false
     @State private var simpleFragmentStartText = "00:00:00"
     @State private var simpleFragmentEndText = "00:00:02"
     @State private var simpleFragmentActionStarted = false
     @State private var simpleSelectedTopicFragmentID: String?
+    @State private var simpleSelectedTopicFragmentTitle: String?
     @State private var simpleTopicFragmentActionStarted = false
+    @State private var simpleTopicCutIsActive = false
     @State private var simpleTopicFragmentValidation = SimpleTopicFragmentValidation()
     @State private var simpleTranscription = SimpleTranscriptionPresentation()
     @State private var simpleTranslation = SimpleTranslationPresentation()
@@ -278,7 +281,8 @@ struct ContentView: View {
             if checkpoint == nil { simpleReviewTarget = nil }
             updateSimpleHumanReview()
         }
-        .onChange(of: model.isRunning) { _, _ in
+        .onChange(of: model.isRunning) { _, isRunning in
+            if !isRunning { simpleTopicCutIsActive = false }
             updateSimpleHumanReview()
         }
         .onChange(of: model.alert?.id) { _, _ in
@@ -294,13 +298,16 @@ struct ContentView: View {
             showsSimpleTextContent = false
             showsSimpleSubtitledVideo = false
             showsSimpleFragment = false
+            showsSimpleProcessing = false
             simpleSubtitledVideoSource = .source
             simpleSubtitledVideoActionStarted = false
             simpleFragmentStartText = "00:00:00"
             simpleFragmentEndText = "00:00:02"
             simpleFragmentActionStarted = false
             simpleSelectedTopicFragmentID = nil
+            simpleSelectedTopicFragmentTitle = nil
             simpleTopicFragmentActionStarted = false
+            simpleTopicCutIsActive = false
             simpleTopicFragmentValidation.reset()
         }
         .onChange(of: presentationMode) { _, mode in
@@ -852,6 +859,25 @@ struct ContentView: View {
                     .id(SimpleProjectHomeGoal.fragment.rawValue)
                 }
 
+                if showsSimpleProcessing {
+                    VStack(alignment: .leading, spacing: 9) {
+                        HStack {
+                            simpleSectionTitle("Обработать видео")
+                            Spacer()
+                            Button("Скрыть") { showsSimpleProcessing = false }
+                                .buttonStyle(.borderless)
+                                .accessibilityIdentifier("simple.processVideo.collapse")
+                        }
+                        simpleAudioEnhancementPanel()
+                    }
+                    .padding(10)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("simple.processVideo.panel")
+                    .id(SimpleProjectHomeGoal.processVideo.rawValue)
+                }
+
                 simpleSectionTitle("Последние результаты")
                 if state.recentResults.isEmpty {
                     Text("Готовых результатов пока нет")
@@ -871,6 +897,10 @@ struct ContentView: View {
     }
 
     private var simpleHomeState: SimpleProjectHomeState {
+        simpleHomeState(topicGranularity: model.topicGranularity)
+    }
+
+    private func simpleHomeState(topicGranularity: TopicGranularity) -> SimpleProjectHomeState {
         guard let projectURL = model.projectURL else {
             return SimpleProjectHomeState(
                 projectName: "",
@@ -894,7 +924,7 @@ struct ContentView: View {
             topicsDetail: model.resultSummary.artifact(.topics)?.detail,
             discoveredOutputs: outputs,
             topicLanguage: manifest?.languageProfile?.effective,
-            topicGranularity: .normal
+            topicGranularity: topicGranularity
         )
         return selectedState
     }
@@ -986,7 +1016,7 @@ struct ContentView: View {
                     .accessibilityElement(children: .combine)
                     .accessibilityIdentifier("simple.\(section).topics.advancedHandoff")
             } else if artifact.readiness == .missing || artifact.readiness == .failed {
-                if simpleHasActiveNormalTopicRevision {
+                if simpleHasCanonicalActiveSelectedTopicRevision {
                     EmptyView()
                 } else if !simpleSourceTranscriptIsApproved {
                     VStack(alignment: .leading, spacing: 3) {
@@ -1034,9 +1064,12 @@ struct ContentView: View {
     @ViewBuilder
     private func simpleTopicsRecoveryMessage(_ artifact: SimpleProjectHomeArtifact, section: String) -> some View {
         if (artifact.readiness == .missing || artifact.readiness == .failed),
-           simpleHasActiveNormalTopicRevision {
+           simpleHasCanonicalActiveSelectedTopicRevision {
+            let normalTopicCutAvailable = !model.simpleApprovedTopicOptions.isEmpty
             Text(artifact.isUsableForTopicCut
-                ? "Текст тем недоступен для открытия. Восстановите файл. Отсутствие текста само по себе не блокирует создание фрагмента по утверждённой теме."
+                ? (normalTopicCutAvailable
+                    ? "Текст тем недоступен для открытия. Восстановите файл. Отсутствие текста само по себе не блокирует создание фрагмента по утверждённой теме."
+                    : "Текст тем недоступен для открытия. Восстановите файл. Для создания фрагмента по теме нужны доступные утверждённые темы обычной детализации.")
                 : "Утверждённые темы недоступны. Восстановите файлы проекта или откройте корректный проект.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -1085,12 +1118,32 @@ struct ContentView: View {
         return manifest.activeTranscriptRevision(for: language)?.reviewStatus == .approved
     }
 
-    private var simpleHasActiveNormalTopicRevision: Bool {
+    private var simpleHasCanonicalActiveNormalTopicRevision: Bool {
+        simpleHasCanonicalActiveTopicRevision(granularity: .normal)
+    }
+
+    private var simpleHasCanonicalActiveSelectedTopicRevision: Bool {
+        simpleHasCanonicalActiveTopicRevision(granularity: model.topicGranularity)
+    }
+
+    private func simpleHasCanonicalActiveTopicRevision(granularity: TopicGranularity) -> Bool {
         guard let projectURL = model.projectURL,
               let manifest = try? ProjectStore().load(from: projectURL),
               let language = manifest.languageProfile?.effective else { return false }
-        let key = "\(language.rawValue).\(TopicGranularity.normal.rawValue)"
-        return manifest.topicReviewState?.activeRevisionIDs[key] != nil
+        let key = "\(language.rawValue).\(granularity.rawValue)"
+        guard let activeID = manifest.topicReviewState?.activeRevisionIDs[key] else { return false }
+        guard let revisions = manifest.topicRevisions,
+              revisions.filter({ $0.id == activeID }).count == 1,
+              let revision = revisions.first(where: { $0.id == activeID }),
+              revision.language == language,
+              revision.granularity == granularity,
+              revision.status == .approved else {
+            return true
+        }
+        let expected = ProjectLayout(root: projectURL).topicRevisionJSONURL(id: revision.id)
+            .standardizedFileURL.path
+        let stored = URL(fileURLWithPath: revision.jsonPath).standardizedFileURL.path
+        return stored == expected
     }
 
     private var simpleTopicGranularityNeedsChoice: Bool {
@@ -1120,9 +1173,7 @@ struct ContentView: View {
             } else if goal == .fragment {
                 showsSimpleFragment = true
             } else {
-                presentationMode = .advanced
-                selectedResultsTab = 0
-                return
+                showsSimpleProcessing = true
             }
             DispatchQueue.main.async { reveal(goal) }
         } label: {
@@ -1149,6 +1200,194 @@ struct ContentView: View {
         .buttonStyle(.plain)
         .accessibilityLabel(goal.title)
         .accessibilityIdentifier("simple.goal.\(goal.rawValue)")
+    }
+
+    @ViewBuilder
+    private func simpleAudioEnhancementPanel() -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("Улучшение звука")
+                .font(.subheadline.weight(.semibold))
+            Text("Создаёт отдельное видео с улучшенным звуком. Исходное видео не изменяется.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Picker("Профиль", selection: $model.audioEnhancementProfile) {
+                ForEach(AudioEnhancementProfile.allCases) { profile in
+                    Text(profile.title).tag(profile)
+                }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("simple.processVideo.audio.profile")
+
+            if let output = simpleLatestOutput(kind: "enhanced-video") {
+                HStack(spacing: 10) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Видео с улучшенным звуком")
+                            .fontWeight(.semibold)
+                        Text("Готово")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Открыть") { openSimpleResult(output.path) }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("simple.processVideo.audio.open")
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("simple.processVideo.audio.ready")
+            } else {
+                Button("Создать видео с улучшенным звуком") {
+                    model.enhanceAudio()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.projectURL == nil || model.isRunning || model.isStopping)
+                .accessibilityIdentifier("simple.processVideo.audio.create")
+            }
+
+            Divider()
+
+            Text("Скорость")
+                .font(.subheadline.weight(.semibold))
+            Picker("Источник скорости", selection: $model.speedSource) {
+                ForEach(SpeedSourceKind.allCases) { source in
+                    Text(source.title).tag(source)
+                }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("simple.processVideo.speed.source")
+            HStack {
+                Slider(value: $model.speedFactor, in: 0.5...2, step: 0.05)
+                Text("\(model.speedFactor, specifier: "%.2f")x")
+                    .monospacedDigit()
+                    .frame(width: 48, alignment: .trailing)
+            }
+            Button("Создать видео с изменённой скоростью") { model.createSpeedAdjustedVideo() }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.projectURL == nil || model.isRunning || model.isStopping)
+                .accessibilityIdentifier("simple.processVideo.speed.create")
+            if let output = simpleLatestOutput(kind: "speed-adjusted-video") {
+                simpleProcessingOpenResult("Видео с изменённой скоростью", output: output, identifier: "simple.processVideo.speed")
+            }
+
+            Divider()
+
+            Text("Статический blur")
+                .font(.subheadline.weight(.semibold))
+            Toggle("Размыть область в правом верхнем углу", isOn: $model.blurEnabled)
+                .accessibilityIdentifier("simple.processVideo.blur.enabled")
+            if model.blurEnabled {
+                Picker("Источник blur", selection: $model.blurSource) {
+                    ForEach(SpeedSourceKind.allCases) { source in
+                        Text(source.title).tag(source)
+                    }
+                }
+                .pickerStyle(.segmented)
+                HStack {
+                    Text("Интенсивность")
+                    Slider(value: $model.blurIntensity, in: 1...30, step: 1)
+                    Text("\(Int(model.blurIntensity))")
+                        .monospacedDigit()
+                        .frame(width: 24, alignment: .trailing)
+                }
+                Button("Создать видео с blur") { model.createBlurredVideo() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.projectURL == nil || model.isRunning || model.isStopping)
+                    .accessibilityIdentifier("simple.processVideo.blur.create")
+                Text("Для выбора другой области blur используйте расширенный режим до создания файла.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("simple.processVideo.blur.advancedDetail")
+                if let output = simpleLatestOutput(kind: "blurred-video") {
+                    simpleProcessingOpenResult("Видео с blur", output: output, identifier: "simple.processVideo.blur")
+                }
+            }
+
+            Divider()
+
+            Text("Watermark")
+                .font(.subheadline.weight(.semibold))
+            HStack {
+                Button("Выбрать изображение") { model.watermarkImageURL = openWatermarkImage() }
+                    .accessibilityIdentifier("simple.processVideo.watermark.select")
+                if let imageURL = model.watermarkImageURL {
+                    Text(imageURL.lastPathComponent)
+                        .font(.caption)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            Picker("Положение watermark", selection: $model.watermarkPosition) {
+                ForEach(WatermarkPosition.allCases) { position in
+                    Text(position.title).tag(position)
+                }
+            }
+            Button("Создать видео с watermark") { model.createWatermarkedVideo() }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.projectURL == nil || model.watermarkImageURL == nil || model.isRunning || model.isStopping)
+                .accessibilityIdentifier("simple.processVideo.watermark.create")
+            if let output = simpleLatestOutput(kind: "watermarked-video") {
+                simpleProcessingOpenResult("Видео с watermark", output: output, identifier: "simple.processVideo.watermark")
+            }
+
+            Divider()
+
+            Text("Слова-паразиты")
+                .font(.subheadline.weight(.semibold))
+            Button("Найти слова-паразиты") { model.analyzeFillerWords() }
+                .buttonStyle(.bordered)
+                .disabled(model.projectURL == nil || model.isRunning || model.isStopping)
+                .accessibilityIdentifier("simple.processVideo.filler.analyze")
+            if model.fillerCandidates.isEmpty {
+                Text("Сначала выполните анализ. Если кандидатов нет, видео без удаления слов не создаётся.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Кандидатов: \(model.fillerCandidates.count)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Выбрать уверенные") { model.selectHighConfidenceFillers() }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("simple.processVideo.filler.selectHighConfidence")
+                Button("Создать видео без выбранных слов") {
+                    model.fillerMode = .muteSelected
+                    model.muteFillerWords()
+                }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(
+                        model.isRunning || model.isStopping
+                            || model.selectedFillerCandidateIDs.isEmpty
+                    )
+                    .accessibilityIdentifier("simple.processVideo.filler.create")
+            }
+            if let output = simpleLatestOutput(kind: "filler-muted-video") {
+                simpleProcessingOpenResult("Видео без выбранных слов", output: output, identifier: "simple.processVideo.filler")
+            }
+        }
+    }
+
+    private func simpleProcessingOpenResult(
+        _ title: String,
+        output: ProjectOutput,
+        identifier: String
+    ) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            Text(title).font(.caption.weight(.semibold))
+            Spacer()
+            Button("Открыть") { openSimpleResult(output.path) }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("\(identifier).open")
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("\(identifier).ready")
+    }
+
+    private func simpleLatestOutput(kind: String) -> ProjectOutput? {
+        model.outputs
+            .filter { $0.kind == kind && $0.isGeneratedMedia && FileManager.default.fileExists(atPath: $0.path) }
+            .sorted { $0.createdAt > $1.createdAt }
+            .first
     }
 
     @ViewBuilder
@@ -1318,11 +1557,17 @@ struct ContentView: View {
 
     @ViewBuilder
     private func simpleCutTopicPanel() -> some View {
-        let topicsArtifact = simpleHomeState.artifact(.topics)
+        // Simple topic cutting intentionally consumes the canonical normal
+        // approved snapshot selected by simpleTopicCutWorkflowRequest. Advanced
+        // controls may retain a different granularity without changing it.
+        let topicsArtifact = simpleHomeState(topicGranularity: .normal).artifact(.topics)
         let options = model.simpleApprovedTopicOptions
         let selectedTopicID = simpleSelectedTopicFragmentID ?? ""
         let availability = model.simpleTopicCutAvailability(topicID: selectedTopicID)
         let hasSelection = !selectedTopicID.isEmpty
+        let topicCutIsActive = simpleTopicCutIsActive
+            && (model.isRunning || model.isStopping)
+        let anotherWorkflowIsActive = (model.isRunning || model.isStopping) && !topicCutIsActive
         // Missing selection is a local form state, rather than a workflow error.
         // Keep Create enabled while an approved-topic list is available so the
         // user receives validation only after explicitly requesting creation.
@@ -1337,7 +1582,7 @@ struct ContentView: View {
             if !topicsArtifact.isUsableForTopicCut {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(topicsArtifact.detail)
-                    if simpleHasActiveNormalTopicRevision {
+                    if simpleHasCanonicalActiveNormalTopicRevision {
                         Text("Утверждённые темы недоступны. Восстановите файлы проекта или откройте корректный проект.")
                     }
                 }
@@ -1347,6 +1592,24 @@ struct ContentView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("simple.fragment.topic.unavailable")
+            } else if topicCutIsActive {
+                Picker("Тема", selection: .constant(simpleSelectedTopicFragmentID)) {
+                    Text(simpleSelectedTopicFragmentTitle ?? selectedTopicID)
+                        .tag(simpleSelectedTopicFragmentID)
+                }
+                .disabled(true)
+                .accessibilityIdentifier("simple.fragment.topic.picker")
+                Text(availability.message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("simple.fragment.topic.availability")
+                ProgressView(value: min(max(model.progress.operationFraction, 0), 1), total: 1)
+                    .accessibilityIdentifier("simple.fragment.topic.progress")
+            } else if anotherWorkflowIsActive {
+                Text(availability.message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("simple.fragment.topic.availability")
             } else if options.isEmpty {
                 Text(availabilityMessage)
                     .font(.caption)
@@ -1364,6 +1627,10 @@ struct ContentView: View {
                 }
                 .onChange(of: simpleSelectedTopicFragmentID) { _, _ in
                     simpleTopicFragmentActionStarted = false
+                    simpleTopicCutIsActive = false
+                    simpleSelectedTopicFragmentTitle = options.first(where: { $0.id == simpleSelectedTopicFragmentID }).map {
+                        "\($0.title) · \(TimecodeParser.display($0.start))–\(TimecodeParser.display($0.end))"
+                    }
                     simpleTopicFragmentValidation.reset()
                 }
                 .accessibilityIdentifier("simple.fragment.topic.picker")
@@ -1378,7 +1645,7 @@ struct ContentView: View {
                         .accessibilityIdentifier("simple.fragment.topic.validation")
                 }
             }
-            if topicsArtifact.isUsableForTopicCut {
+            if topicsArtifact.isUsableForTopicCut && !topicCutIsActive {
                 if simpleTopicFragmentActionStarted, model.status == "Ошибка" {
                     Text(model.alert?.message ?? "Фрагмент по теме не создан. Исправьте проблему и повторите попытку.")
                         .font(.caption)
@@ -1390,7 +1657,9 @@ struct ContentView: View {
                           let topicID = simpleSelectedTopicFragmentID else {
                         return
                     }
-                    simpleTopicFragmentActionStarted = model.startSimpleTopicCutFromAcceptedTranscript(topicID: topicID)
+                    let started = model.startSimpleTopicCutFromAcceptedTranscript(topicID: topicID)
+                    simpleTopicFragmentActionStarted = started
+                    simpleTopicCutIsActive = started
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!canAttemptCreate)
