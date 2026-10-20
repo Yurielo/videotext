@@ -1936,17 +1936,25 @@ struct EndToEndTest {
             whisperModelPath: modelPath,
             whisperLanguage: "auto"
         )
-        var transcriptionStarted = false
+        controller.resetLaunchLog()
         let task = Task {
-            try await engine.run(settings: settings, onLog: { message in
-                print(message)
-                if message.contains("Подготовка звуковой дорожки"), !transcriptionStarted {
-                    transcriptionStarted = true
-                    controller.resetLaunchLog()
-                }
-            })
+            try await engine.run(settings: settings, onLog: { print($0) })
         }
-        try await Task.sleep(nanoseconds: 1_500_000_000)
+        let whisperLaunchDeadline = Date().addingTimeInterval(30)
+        while !controller.launchedExecutables.contains(where: {
+            URL(fileURLWithPath: $0).lastPathComponent == "whisper-cli"
+        }) && Date() < whisperLaunchDeadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let whisperLaunched = controller.launchedExecutables.contains {
+            URL(fileURLWithPath: $0).lastPathComponent == "whisper-cli"
+        }
+        guard whisperLaunched else {
+            task.cancel()
+            engine.cancel()
+            _ = try? await task.value
+            throw EndToEndError.failed("Whisper не запустился за 30 секунд; отмена не проверялась до подтверждённого запуска")
+        }
         task.cancel()
         engine.cancel()
         do {
