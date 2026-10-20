@@ -324,6 +324,24 @@ enum ProcessingPresetReviewIdentity {
 }
 
 enum ProcessingPresetTextResult {
+    static func reusedOutputBlocker(
+        configuration: ProcessingPresetConfiguration, manifest: ProjectManifest,
+        projectURL: URL, approvedSource: Bool, approvedTopics: Bool
+    ) -> String? {
+        switch configuration.goal {
+        case .transcription where approvedSource:
+            guard validatedURL(configuration: configuration, manifest: manifest, projectURL: projectURL) != nil else {
+                return "Утверждённая расшифровка есть, но её TXT отсутствует или не совпадает с утверждённой ревизией. Восстановите TXT проекта без повторного ASR."
+            }
+        case .topics where approvedTopics:
+            guard validatedURL(configuration: configuration, manifest: manifest, projectURL: projectURL) != nil else {
+                return "Утверждённые темы есть, но TXT выбранной детализации отсутствует или не совпадает со снимком. Восстановите TXT проекта."
+            }
+        default: break
+        }
+        return nil
+    }
+
     static func targetURL(
         configuration: ProcessingPresetConfiguration, language: ArtifactLanguage, layout: ProjectLayout
     ) -> URL? {
@@ -338,22 +356,28 @@ enum ProcessingPresetTextResult {
     static func validatedURL(
         execution: ProcessingPresetExecution, manifest: ProjectManifest, projectURL: URL
     ) -> URL? {
+        validatedURL(configuration: execution.configuration, manifest: manifest, projectURL: projectURL)
+    }
+
+    static func validatedURL(
+        configuration: ProcessingPresetConfiguration, manifest: ProjectManifest, projectURL: URL
+    ) -> URL? {
         guard let language = manifest.languageProfile?.effective else { return nil }
         let layout = ProjectLayout(root: projectURL)
-        guard let target = targetURL(configuration: execution.configuration, language: language, layout: layout),
+        guard let target = targetURL(configuration: configuration, language: language, layout: layout),
               let data = try? Data(contentsOf: target), !data.isEmpty,
               let text = String(data: data, encoding: .utf8),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        switch execution.configuration.goal {
+        switch configuration.goal {
         case .transcription, .translation:
-            let targetLanguage = execution.configuration.goal == .translation ? language.translationTarget : language
+            let targetLanguage = configuration.goal == .translation ? language.translationTarget : language
             guard let revision = manifest.activeTranscriptRevision(for: targetLanguage),
                   revision.reviewStatus == .approved,
                   let immutable = try? Data(contentsOf: layout.transcriptRevisionURL(
                     id: revision.id, language: targetLanguage
                   )), immutable == data else { return nil }
         case .topics:
-            let granularity = execution.configuration.topicGranularity
+            let granularity = configuration.topicGranularity
             guard let snapshot = try? WorkflowEngine.approvedTopicSnapshot(
                 manifest: manifest, projectURL: projectURL, language: language, granularity: granularity
             ), snapshot.file.status == .ready,

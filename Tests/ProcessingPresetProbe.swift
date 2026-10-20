@@ -296,6 +296,16 @@ struct ProcessingPresetProbe {
         let sourceTextExecution = ProcessingPresetExecution(
             projectPath: project.path, configuration: sourceTextConfig, stages: []
         )
+        precondition(ProcessingPresetTextResult.reusedOutputBlocker(
+            configuration: sourceTextConfig, manifest: manifest, projectURL: project,
+            approvedSource: true, approvedTopics: false
+        ) != nil, "Preflight must not offer reuse of approved source with missing TXT")
+        var srtVideoConfig = sourceTextConfig
+        srtVideoConfig.goal = .sourceSubtitles
+        precondition(ProcessingPresetTextResult.reusedOutputBlocker(
+            configuration: srtVideoConfig, manifest: manifest, projectURL: project,
+            approvedSource: true, approvedTopics: false
+        ) == nil, "Missing transcript TXT must not block SRT-backed video")
         precondition(ProcessingPresetTextResult.validatedURL(
             execution: sourceTextExecution, manifest: manifest, projectURL: project
         ) == nil, "Approved SRT alone must not offer a missing transcript TXT")
@@ -309,6 +319,10 @@ struct ProcessingPresetProbe {
         precondition(ProcessingPresetTextResult.validatedURL(
             execution: sourceTextExecution, manifest: manifest, projectURL: project
         ) == layout.transcriptURL(language: .ru))
+        precondition(ProcessingPresetTextResult.reusedOutputBlocker(
+            configuration: sourceTextConfig, manifest: manifest, projectURL: project,
+            approvedSource: true, approvedTopics: false
+        ) == nil, "Valid approved transcript TXT must remain eligible")
         var topicsConfig = ProcessingPresetConfiguration()
         topicsConfig.goal = .topics
         topicsConfig.topicGranularity = .coarse
@@ -346,6 +360,29 @@ struct ProcessingPresetProbe {
             precondition(ProcessingPresetTranslationEligibility.ready(
                 manifest: fixtureManifest, projectURL: fixtureURL, approvedSource: approved
             ), "Historical approved ISO8601 report must be reusable without translation rerun")
+        }
+        if let fixturePath = ProcessInfo.processInfo.environment["VIDEOTEXT_PRESET_MISSING_TXT_FIXTURE"] {
+            let fixtureURL = URL(fileURLWithPath: fixturePath)
+            let fixtureManifest = try ProjectStore().load(from: fixtureURL)
+            precondition(ProcessingPresetTextResult.reusedOutputBlocker(
+                configuration: sourceTextConfig, manifest: fixtureManifest, projectURL: fixtureURL,
+                approvedSource: true, approvedTopics: false
+            ) != nil, "Read-only approved source fixture with missing TXT must block text reuse")
+            precondition(ProcessingPresetTextResult.reusedOutputBlocker(
+                configuration: srtVideoConfig, manifest: fixtureManifest, projectURL: fixtureURL,
+                approvedSource: true, approvedTopics: false
+            ) == nil, "Read-only missing TXT fixture must still permit SRT-backed workflow")
+        }
+        if let fixturePath = ProcessInfo.processInfo.environment["VIDEOTEXT_PRESET_APPROVED_TOPICS_FIXTURE"] {
+            let fixtureURL = URL(fileURLWithPath: fixturePath)
+            let fixtureManifest = try ProjectStore().load(from: fixtureURL)
+            var selectedTopics = ProcessingPresetConfiguration()
+            selectedTopics.goal = .topics
+            selectedTopics.topicGranularity = .normal
+            precondition(ProcessingPresetTextResult.reusedOutputBlocker(
+                configuration: selectedTopics, manifest: fixtureManifest, projectURL: fixtureURL,
+                approvedSource: true, approvedTopics: true
+            ) == nil, "Read-only approved Normal topics TXT must remain eligible")
         }
 
         try Data("{bad".utf8).write(to: executions.url(for: project), options: .atomic)

@@ -2224,6 +2224,13 @@ extension WorkflowViewModel {
             approvedSource: approvedSource, approvedTopics: approvedTopics,
             approvedTranslation: approvedTranslation
         )
+        if plan.blocker == nil,
+           let blocker = ProcessingPresetTextResult.reusedOutputBlocker(
+            configuration: configuration, manifest: manifest, projectURL: projectURL,
+            approvedSource: approvedSource, approvedTopics: approvedTopics
+           ) {
+            plan.blocker = blocker
+        }
         if !ProcessingPresetInputIdentity.sourceMatches(manifest: manifest, mediaURL: mediaURL, store: store) {
             plan.blocker = "Исходное видео изменилось после создания проекта. Откройте правильный проект; готовый результат не будет повторно использован."
         }
