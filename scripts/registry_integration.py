@@ -15,6 +15,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -56,6 +57,11 @@ def regular(path):
     path = Path(path)
     require(path.is_file() and not path.is_symlink(), f"required regular file missing: {path}")
     return path
+
+
+def contained(path, root, label):
+    require(Path(path).resolve().is_relative_to(Path(root).resolve()), f"{label} escapes its declared root")
+    return Path(path)
 
 
 def retain(path, data):
@@ -181,6 +187,7 @@ def prepare(registry_root, material_root, output):
         staged.mkdir(parents=True)
         for component in dependency["components"]:
             source, target = regular(material_root / component["path"]), staged / component["path"]
+            contained(source, material_root, "SeminarText material component")
             require(sha256(source.read_bytes()) == component["sha256"],
                     f"SeminarText material differs from registered component {component['role']}")
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -204,6 +211,7 @@ def verify_bundle(bundle, dependency):
     bundle = Path(bundle)
     for component in dependency["components"]:
         path = regular(bundle / component["path"])
+        contained(path, bundle, "prepared SeminarText component")
         require(sha256(path.read_bytes()) == component["sha256"],
                 f"prepared SeminarText bundle changed: {component['role']}")
     executable = regular(bundle / "seminartext")
@@ -218,8 +226,11 @@ def parse_evidence(path):
         if not line or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        # release_gate.sh uses bash %q. Its values used here contain no spaces.
-        values[key] = value.strip().strip("'")
+        # release_gate.sh uses bash %q. shlex decodes that one shell word
+        # without evaluating operators, variables, or command substitutions.
+        words = shlex.split(value, posix=True)
+        require(len(words) == 1, f"invalid release evidence value for {key}")
+        values[key] = words[0]
     return values
 
 
