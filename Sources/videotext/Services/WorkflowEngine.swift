@@ -3110,17 +3110,27 @@ final class WorkflowEngine: @unchecked Sendable {
                     log("Расшифровка bundled SeminarText: \(seminarText.path)")
                     log("SeminarText runtime identity:\n\(runtimeIdentity)")
                     tracker.update(operation, fraction: 0.05, indeterminate: true)
-                    let coreResult = try await coreSeminarTextTranscription.transcribe(
+                    let coreResult: SeminarTextCoreTranscriptionRunner.Result
+                    if let recovered = try coreSeminarTextTranscription.recoverCompletedResult(
                         mediaURL: mediaURL,
                         language: sourceLanguage,
-                        executable: seminarText,
-                        modelPath: modelPath,
-                        outputRoot: layout.seminarTextCoreDirectory,
-                        onLog: { message in
-                            tracker.update(operation, fraction: 0.5, indeterminate: true)
-                            log(message)
-                        }
-                    )
+                        outputRoot: layout.seminarTextCoreDirectory
+                    ) {
+                        coreResult = recovered
+                        log("Восстановлена завершённая расшифровка bundled SeminarText; повторный ASR не запускался.")
+                    } else {
+                        coreResult = try await coreSeminarTextTranscription.transcribe(
+                            mediaURL: mediaURL,
+                            language: sourceLanguage,
+                            executable: seminarText,
+                            modelPath: modelPath,
+                            outputRoot: layout.seminarTextCoreDirectory,
+                            onLog: { message in
+                                tracker.update(operation, fraction: 0.5, indeterminate: true)
+                                log(message)
+                            }
+                        )
+                    }
                     let importedCues = try coreSeminarTextTranscription.loadCoreSRT(from: coreResult.srtURL, srt: srt)
                     let cues = try coreSeminarTextTranscription.reconcileForVideoTextTimeline(importedCues)
                     if cues.map(\.start) != importedCues.map(\.start) {

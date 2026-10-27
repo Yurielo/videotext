@@ -563,6 +563,13 @@ struct SeminarTextSelectedTimingRunner {
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
             throw WorkflowError.missingTool("SeminarText: \(executable.path)")
         }
+        guard let ffmpegPath = runner.resolve("ffmpeg") else {
+            throw WorkflowError.missingTool("ffmpeg")
+        }
+        let ffmpegURL = URL(fileURLWithPath: ffmpegPath).standardizedFileURL
+        guard FileManager.default.isExecutableFile(atPath: ffmpegURL.path) else {
+            throw WorkflowError.missingTool("ffmpeg: \(ffmpegURL.path)")
+        }
         try FileManager.default.createDirectory(at: outputRoot, withIntermediateDirectories: true)
         // An invocation owns exactly one child directory. This prevents a
         // previous successful package under the caller's output root from
@@ -588,7 +595,12 @@ struct SeminarTextSelectedTimingRunner {
             "--structured-timing",
             "--no-open"
         ]
-        let result = try await runner.run(env, arguments, currentDirectory: invocationRoot) { _, chunk in
+        let result = try await runner.run(
+            env,
+            arguments,
+            currentDirectory: invocationRoot,
+            searchPathPrepending: [ffmpegURL.deletingLastPathComponent().path]
+        ) { _, chunk in
             onLog(chunk)
         }
         guard result.exitCode == 0 else {
@@ -656,6 +668,13 @@ struct SeminarTextCoreTranscriptionRunner {
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
             throw WorkflowError.missingTool("SeminarText: \(executable.path)")
         }
+        guard let ffmpegPath = runner.resolve("ffmpeg") else {
+            throw WorkflowError.missingTool("ffmpeg")
+        }
+        let ffmpegURL = URL(fileURLWithPath: ffmpegPath).standardizedFileURL
+        guard FileManager.default.isExecutableFile(atPath: ffmpegURL.path) else {
+            throw WorkflowError.missingTool("ffmpeg: \(ffmpegURL.path)")
+        }
         try FileManager.default.createDirectory(at: outputRoot, withIntermediateDirectories: true)
         let invocationRoot = outputRoot.appendingPathComponent("core-transcription-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: invocationRoot, withIntermediateDirectories: true)
@@ -674,7 +693,12 @@ struct SeminarTextCoreTranscriptionRunner {
             "--structured-timing",
             "--no-open"
         ]
-        let result = try await runner.run("/usr/bin/env", arguments, currentDirectory: invocationRoot) { _, chunk in
+        let result = try await runner.run(
+            "/usr/bin/env",
+            arguments,
+            currentDirectory: invocationRoot,
+            searchPathPrepending: [ffmpegURL.deletingLastPathComponent().path]
+        ) { _, chunk in
             onLog(chunk)
         }
         guard result.exitCode == 0 else {
@@ -693,6 +717,95 @@ struct SeminarTextCoreTranscriptionRunner {
             outputDirectory: srtURL.deletingLastPathComponent(),
             selectedTimingPackageURL: manifestURL.deletingLastPathComponent()
         )
+    }
+
+    /// Reuses only a completed, unambiguous SeminarText attempt for this exact
+    /// media hash and source language. The ordinary SRT and selected JSON
+    /// package remain subject to the existing import validation downstream.
+    /// This prevents a retry after a VideoText-side import failure from
+    /// silently launching another long ASR run.
+    func recoverCompletedResult(
+        mediaURL: URL,
+        language: ArtifactLanguage,
+        outputRoot: URL
+    ) throws -> Result? {
+        guard FileManager.default.fileExists(atPath: outputRoot.path) else { return nil }
+        let expectedMediaHash = SelectedTimingHash.file(mediaURL)
+        guard !expectedMediaHash.isEmpty else { return nil }
+        let candidates = try FileManager.default.contentsOfDirectory(
+            at: outputRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ).filter {
+            $0.lastPathComponent.hasPrefix("core-transcription-")
+                && (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        }
+        var recovered: [Result] = []
+        for invocationRoot in candidates {
+            guard let package = completedPackage(
+                in: invocationRoot,
+                expectedMediaHash: expectedMediaHash,
+                language: language
+            ) else { continue }
+            recovered.append(package)
+        }
+        guard recovered.count == 1 else { return nil }
+        return recovered[0]
+    }
+
+    private func completedPackage(
+        in invocationRoot: URL,
+        expectedMediaHash: String,
+        language: ArtifactLanguage
+    ) -> Result? {
+        guard let enumerator = FileManager.default.enumerator(
+            at: invocationRoot,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: []
+        ) else { return nil }
+        var candidates: [Result] = []
+        while let item = enumerator.nextObject() as? URL {
+            guard item.lastPathComponent == ".seminartext_complete",
+                  (try? item.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else {
+                continue
+            }
+            let outputDirectory = item.deletingLastPathComponent()
+            let srtURLs = Self.findCoreSRTs(in: outputDirectory)
+            let manifests = SeminarTextSelectedTimingRunner.findManifests(in: outputDirectory)
+            guard srtURLs.count == 1,
+                  let srtURL = srtURLs.first,
+                  manifests.count == 1,
+                  let manifestURL = manifests.first,
+                  matchesCompletedManifest(
+                    manifestURL,
+                    expectedMediaHash: expectedMediaHash,
+                    language: language
+                  ) else {
+                continue
+            }
+            candidates.append(Result(
+                srtURL: srtURL,
+                outputDirectory: outputDirectory,
+                selectedTimingPackageURL: manifestURL.deletingLastPathComponent()
+            ))
+        }
+        return candidates.count == 1 ? candidates[0] : nil
+    }
+
+    private func matchesCompletedManifest(
+        _ manifestURL: URL,
+        expectedMediaHash: String,
+        language: ArtifactLanguage
+    ) -> Bool {
+        guard let manifestData = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONSerialization.jsonObject(with: manifestData) as? [String: Any],
+              let source = manifest["source"] as? [String: Any],
+              source["media_sha256"] as? String == expectedMediaHash,
+              let transcription = manifest["transcription"] as? [String: Any],
+              transcription["language"] as? String == language.rawValue else {
+            return false
+        }
+        return true
     }
 
     private static func findCoreSRTs(in root: URL) -> [URL] {
@@ -757,8 +870,9 @@ struct SeminarTextCoreTranscriptionRunner {
     /// bounded boundary adjustment for VideoText's non-overlapping full.srt.
     func reconcileForVideoTextTimeline(_ cues: [SubtitleCue]) throws -> [SubtitleCue] {
         let maximumBoundaryOverlap: TimeInterval = 0.25
+        let normalized = mergeAdjacentEqualBoundaryFragments(from: cues, maximumDuration: maximumBoundaryOverlap)
         var reconciled: [SubtitleCue] = []
-        for cue in cues {
+        for cue in normalized {
             guard let previous = reconciled.last else {
                 reconciled.append(cue)
                 continue
@@ -774,6 +888,41 @@ struct SeminarTextCoreTranscriptionRunner {
             reconciled.append(SubtitleCue(id: cue.id, start: previous.end, end: cue.end, text: cue.text))
         }
         return reconciled
+    }
+
+    /// A completed SeminarText run can split one short boundary fragment into
+    /// adjacent pieces that have exactly the same interval. Join only those
+    /// pieces without changing their timing. Every other overlap remains
+    /// subject to the strict fail-closed validation below.
+    private func mergeAdjacentEqualBoundaryFragments(
+        from cues: [SubtitleCue],
+        maximumDuration: TimeInterval
+    ) -> [SubtitleCue] {
+        var result: [SubtitleCue] = []
+        for cue in cues {
+            let text = normalizedCueText(cue.text)
+            guard let previous = result.last,
+                  cue.start == previous.start,
+                  cue.end == previous.end,
+                  cue.end > cue.start,
+                  cue.end - cue.start <= maximumDuration,
+                  !text.isEmpty,
+                  !normalizedCueText(previous.text).isEmpty else {
+                result.append(cue)
+                continue
+            }
+            result[result.count - 1] = SubtitleCue(
+                id: previous.id,
+                start: previous.start,
+                end: previous.end,
+                text: "\(normalizedCueText(previous.text)) \(text)"
+            )
+        }
+        return result
+    }
+
+    private func normalizedCueText(_ text: String) -> String {
+        text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
     }
 }
 

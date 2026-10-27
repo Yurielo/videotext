@@ -109,6 +109,7 @@ struct ToolRunner {
         _ executable: String,
         _ arguments: [String],
         currentDirectory: URL? = nil,
+        searchPathPrepending: [String] = [],
         onOutput: ((ToolOutputStream, String) -> Void)? = nil
     ) async throws -> CommandResult {
         try Task.checkCancellation()
@@ -116,9 +117,17 @@ struct ToolRunner {
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.currentDirectoryURL = currentDirectory
+        let controlledPaths = (searchPathPrepending + Self.defaultSearchPaths)
+            .reduce(into: [String]()) { result, path in
+                let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
+                if !result.contains(standardized) { result.append(standardized) }
+            }
         process.environment = ProcessInfo.processInfo.environment.merging([
-            "PATH": Self.defaultSearchPaths.joined(separator: ":")
-        ]) { current, _ in current }
+            // Never inherit a shell PATH into a processing child. Callers may
+            // prepend a tool directory only after resolving an executable via
+            // this runner's deterministic policy.
+            "PATH": controlledPaths.joined(separator: ":")
+        ]) { _, controlled in controlled }
 
         let workspace = try OwnedTemporaryWorkspace()
         defer { workspace.close() }
