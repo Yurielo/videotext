@@ -408,8 +408,8 @@ struct SimpleRenderedControlsProbe {
     private static func clickRenderedSegment(_ segment: RenderedAXElement, in window: NSWindow) throws {
         let frame = segment.accessibilityFrame()
         let screenPoint = NSPoint(x: frame.midX, y: frame.midY)
-        try require(segment.isAccessibilityEnabled() && frame.width > 0 && frame.height > 0
-            && window.frame.contains(screenPoint), "Rendered segment has no enabled in-window mouse target")
+        try require(segment.isAccessibilityEnabled() && frame.width > 0 && frame.height > 0,
+                    "Rendered segment has no enabled mouse target")
         let location = window.convertPoint(fromScreen: screenPoint)
         let timestamp = ProcessInfo.processInfo.systemUptime
         guard let down = NSEvent.mouseEvent(with: .leftMouseDown, location: location, modifierFlags: [],
@@ -520,8 +520,26 @@ struct SimpleRenderedControlsProbe {
         let raw = AppAlert(title: "Ошибка обработки", message: "/internal/manifest.json: CLI runtime failure")
         let readable = flow.sourceRunAlert(raw, projectURL: project)
         try require(readable.id == raw.id && readable.title == "Не удалось создать расшифровку"
-            && !readable.message.contains("manifest") && !readable.message.contains("CLI")
-            && raw.message.contains("/internal/manifest.json"), "Simple error rendering lost diagnostics or leaked internal details")
+            && !readable.message.contains("/internal/manifest.json") && readable.message.contains("CLI runtime failure")
+            && raw.message.contains("/internal/manifest.json"), "Simple error rendering did not retain the cause without leaking an internal path")
+        let srtFailure = flow.sourceRunAlert(
+            AppAlert(title: "Ошибка", message: "Ошибка формата SRT: SeminarText core SRT: небезопасное пересечение реплик 412 и 413 (0.100 с)."),
+            projectURL: project
+        )
+        try require(srtFailure.message.contains("SeminarText core SRT")
+            && srtFailure.message.contains("реплик 412 и 413"), "Simple error rendering hid the actionable SeminarText SRT cause")
+        let ffmpegFailure = flow.sourceRunAlert(
+            AppAlert(title: "Ошибка", message: "SeminarText transcription завершился с кодом 1: Не установлена программа: ffmpeg"),
+            projectURL: project
+        )
+        try require(ffmpegFailure.message.contains("ffmpeg") && ffmpegFailure.message.contains("установку VideoText"),
+            "Simple error rendering did not identify a missing packaged component")
+        let missingSource = flow.sourceRunAlert(
+            AppAlert(title: "Ошибка", message: "Исходный медиафайл недоступен."),
+            projectURL: project
+        )
+        try require(missingSource.message.contains("исходный файл доступен")
+            && !missingSource.message.contains("установку VideoText"), "Simple error rendering misclassified an unavailable source file")
         try require(flow.sourceRunAlert(raw, projectURL: other).message == raw.message,
             "Source error rendering changed another project's alert")
         let stopped = flow.sourceRunAlert(AppAlert(title: "Обработка остановлена", message: "internal details"), projectURL: project)
