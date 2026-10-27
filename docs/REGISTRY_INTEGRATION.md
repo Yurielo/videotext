@@ -42,6 +42,11 @@ This changes future preparation only. It does not modify any existing VideoText
 application, replace its bundled SeminarText, run a product E2E, or claim that
 the existing VideoText activation uses a newer provider.
 
+The governed clean macOS packaging check uses a disposable local fixture made
+from the checked-in bundle solely to exercise the fail-closed integration path.
+It has an isolated Git repository and cannot publish; it is not a SeminarText
+registration and is never used by a real release gate.
+
 ## VideoText publication after delivery
 
 The current delivery chain remains exactly:

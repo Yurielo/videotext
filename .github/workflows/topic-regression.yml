@@ -177,6 +177,17 @@ jobs:
           xcodebuild -version
           swiftc --version
 
+      - name: Prepare isolated registered SeminarText fixture
+        env:
+          FIXTURE_ROOT: ${{ runner.temp }}/videotext-registry-fixture
+          PREPARED_SEMINARTEXT: ${{ runner.temp }}/videotext-registry-seminartext
+        run: |
+          python3 scripts/create_registry_test_fixture.py \
+            --root "$FIXTURE_ROOT" \
+            --material-root "$GITHUB_WORKSPACE/Resources/SeminarText" \
+            --prepared-output "$PREPARED_SEMINARTEXT" \
+            --github-env "$GITHUB_ENV"
+
       - name: Build exact source snapshot
         env:
           VIDEOTEXT_APP_PATH: ${{ runner.temp }}/videotext-infrastructure-gate.app
