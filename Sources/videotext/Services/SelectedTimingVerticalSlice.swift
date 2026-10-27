@@ -720,18 +720,20 @@ struct SeminarTextCoreTranscriptionRunner {
     }
 
     /// Reuses only a completed, unambiguous SeminarText attempt for this exact
-    /// media hash and source language. The ordinary SRT and selected JSON
-    /// package remain subject to the existing import validation downstream.
+    /// media hash, source language and Whisper model content. The ordinary SRT
+    /// and selected JSON package remain subject to the existing import validation downstream.
     /// This prevents a retry after a VideoText-side import failure from
     /// silently launching another long ASR run.
     func recoverCompletedResult(
         mediaURL: URL,
         language: ArtifactLanguage,
+        modelPath: String,
         outputRoot: URL
     ) throws -> Result? {
         guard FileManager.default.fileExists(atPath: outputRoot.path) else { return nil }
         let expectedMediaHash = SelectedTimingHash.file(mediaURL)
-        guard !expectedMediaHash.isEmpty else { return nil }
+        guard !expectedMediaHash.isEmpty,
+              let expectedModelHash = streamingSHA256(of: URL(fileURLWithPath: modelPath)) else { return nil }
         let candidates = try FileManager.default.contentsOfDirectory(
             at: outputRoot,
             includingPropertiesForKeys: [.isDirectoryKey],
@@ -745,17 +747,21 @@ struct SeminarTextCoreTranscriptionRunner {
             guard let package = completedPackage(
                 in: invocationRoot,
                 expectedMediaHash: expectedMediaHash,
+                expectedModelHash: expectedModelHash,
                 language: language
             ) else { continue }
             recovered.append(package)
         }
-        guard recovered.count == 1 else { return nil }
-        return recovered[0]
+        if recovered.count > 1 {
+            throw WorkflowError.processFailed("Найдено несколько завершённых пакетов SeminarText для текущего файла, языка и модели. Повторный ASR не запускался; откройте папку проекта и оставьте один пакет для восстановления.")
+        }
+        return recovered.first
     }
 
     private func completedPackage(
         in invocationRoot: URL,
         expectedMediaHash: String,
+        expectedModelHash: String,
         language: ArtifactLanguage
     ) -> Result? {
         guard let enumerator = FileManager.default.enumerator(
@@ -779,6 +785,7 @@ struct SeminarTextCoreTranscriptionRunner {
                   matchesCompletedManifest(
                     manifestURL,
                     expectedMediaHash: expectedMediaHash,
+                    expectedModelHash: expectedModelHash,
                     language: language
                   ) else {
                 continue
@@ -795,6 +802,7 @@ struct SeminarTextCoreTranscriptionRunner {
     private func matchesCompletedManifest(
         _ manifestURL: URL,
         expectedMediaHash: String,
+        expectedModelHash: String,
         language: ArtifactLanguage
     ) -> Bool {
         guard let manifestData = try? Data(contentsOf: manifestURL),
@@ -802,10 +810,29 @@ struct SeminarTextCoreTranscriptionRunner {
               let source = manifest["source"] as? [String: Any],
               source["media_sha256"] as? String == expectedMediaHash,
               let transcription = manifest["transcription"] as? [String: Any],
-              transcription["language"] as? String == language.rawValue else {
+              transcription["language"] as? String == language.rawValue,
+              let whisperModel = transcription["whisper_model"] as? [String: Any],
+              whisperModel["sha256"] as? String == expectedModelHash else {
             return false
         }
         return true
+    }
+
+    private func streamingSHA256(of url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            let chunk: Data?
+            do {
+                chunk = try handle.read(upToCount: 1_048_576)
+            } catch {
+                return nil
+            }
+            guard let chunk, !chunk.isEmpty else { break }
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     private static func findCoreSRTs(in root: URL) -> [URL] {

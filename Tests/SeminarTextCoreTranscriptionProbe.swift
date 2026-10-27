@@ -149,6 +149,8 @@ struct SeminarTextCoreTranscriptionProbe {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let media = root.appendingPathComponent("source.mp4")
         try Data("media".utf8).write(to: media)
+        let model = root.appendingPathComponent("core.bin")
+        try Data("core model".utf8).write(to: model)
         let invocationLog = root.appendingPathComponent("invocations.log")
         let executable = root.appendingPathComponent("fake-seminartext")
         let script = """
@@ -178,8 +180,9 @@ struct SeminarTextCoreTranscriptionProbe {
         txt_sha=$(shasum -a 256 "$SEMINARTEXT_OUTPUT/run/structured_timing/parts/part_0000.txt" | awk '{print $1}')
         srt_sha=$(shasum -a 256 "$SEMINARTEXT_OUTPUT/run/structured_timing/parts/part_0000.srt" | awk '{print $1}')
         media_sha=$(shasum -a 256 "$media" | awk '{print $1}')
+        model_sha=$(shasum -a 256 "$SEMINARTEXT_MODEL" | awk '{print $1}')
         cat > "$SEMINARTEXT_OUTPUT/run/structured_timing/manifest.json" <<JSON
-        {"schema_version":1,"artifact_type":"seminartext.selected_whisper_timing","source":{"media_sha256":"$media_sha"},"transcription":{"language":"en"},"parts":[{"id":"part_0000","order":0,"absolute_offset_seconds":0,"selected_timing_absolute_range":{"start_seconds":0,"end_seconds":1},"artifacts":{"txt":{"path":"parts/part_0000.txt","sha256":"$txt_sha"},"srt":{"path":"parts/part_0000.srt","sha256":"$srt_sha"},"json_full":{"path":"parts/part_0000.json","sha256":"$json_sha"}}}]}
+        {"schema_version":1,"artifact_type":"seminartext.selected_whisper_timing","source":{"media_sha256":"$media_sha"},"transcription":{"language":"en","whisper_model":{"sha256":"$model_sha"}},"parts":[{"id":"part_0000","order":0,"absolute_offset_seconds":0,"selected_timing_absolute_range":{"start_seconds":0,"end_seconds":1},"artifacts":{"txt":{"path":"parts/part_0000.txt","sha256":"$txt_sha"},"srt":{"path":"parts/part_0000.srt","sha256":"$srt_sha"},"json_full":{"path":"parts/part_0000.json","sha256":"$json_sha"}}}]}
         JSON
         """
         try script.write(to: executable, atomically: true, encoding: .utf8)
@@ -189,7 +192,7 @@ struct SeminarTextCoreTranscriptionProbe {
             mediaURL: media,
             language: .en,
             executable: executable,
-            modelPath: "/models/core.bin",
+            modelPath: model.path,
             outputRoot: root.appendingPathComponent("seminartext-output")
         )
         try require(result.srtURL.lastPathComponent == "transcript.srt", "core runner did not select the ordinary SeminarText SRT")
@@ -198,7 +201,7 @@ struct SeminarTextCoreTranscriptionProbe {
         try require(invocation.contains("transcribe"), "core runner did not invoke SeminarText transcribe")
         try require(invocation.contains("--language en"), "core runner did not pass the source language")
         try require(invocation.contains("--no-open"), "core runner did not keep SeminarText headless")
-        try require(invocation.contains("|model=/models/core.bin"), "core runner did not pass the selected Whisper model")
+        try require(invocation.contains("|model=\(model.path)"), "core runner did not pass the selected Whisper model")
         try require(invocation.contains("--structured-timing"), "core runner did not request selected JSON-full from the same Whisper attempt")
         guard let canonicalFFmpeg = ToolRunner().resolve("ffmpeg") else {
             throw WorkflowError.missingTool("ffmpeg")
@@ -206,7 +209,7 @@ struct SeminarTextCoreTranscriptionProbe {
         let canonicalDirectory = URL(fileURLWithPath: canonicalFFmpeg).deletingLastPathComponent().path
         try require(invocation.contains("|path=\(canonicalDirectory):"),
                     "core runner did not expose the canonical resolved FFmpeg directory to SeminarText")
-        try verifyCompletedRecovery(result: result, media: media, root: root)
+        try verifyCompletedRecovery(result: result, media: media, model: model, root: root)
         let importedJSON = try SeminarTextCoreWhisperEvidenceImporter().importSelectedWhisperJSON(
             packageRoot: result.selectedTimingPackageURL,
             expectedMediaURL: media,
@@ -292,6 +295,7 @@ struct SeminarTextCoreTranscriptionProbe {
     private static func verifyCompletedRecovery(
         result: SeminarTextCoreTranscriptionRunner.Result,
         media: URL,
+        model: URL,
         root: URL
     ) throws {
         let runner = SeminarTextCoreTranscriptionRunner()
@@ -299,6 +303,7 @@ struct SeminarTextCoreTranscriptionProbe {
         let recovered = try runner.recoverCompletedResult(
             mediaURL: media,
             language: .en,
+            modelPath: model.path,
             outputRoot: outputRoot
         )
         try require(recovered?.srtURL.standardizedFileURL == result.srtURL.standardizedFileURL,
@@ -327,7 +332,7 @@ struct SeminarTextCoreTranscriptionProbe {
             source["media_sha256"] = "not-the-current-media"
             manifest["source"] = source
         }
-        let mediaMismatchRecovery = try runner.recoverCompletedResult(mediaURL: media, language: .en, outputRoot: fixtureRoot)
+        let mediaMismatchRecovery = try runner.recoverCompletedResult(mediaURL: media, language: .en, modelPath: model.path, outputRoot: fixtureRoot)
         try require(mediaMismatchRecovery == nil,
                     "recovery accepted a mismatched source media hash")
         try FileManager.default.removeItem(at: wrongMedia.deletingLastPathComponent())
@@ -338,23 +343,41 @@ struct SeminarTextCoreTranscriptionProbe {
             transcription["language"] = "ru"
             manifest["transcription"] = transcription
         }
-        let languageMismatchRecovery = try runner.recoverCompletedResult(mediaURL: media, language: .en, outputRoot: fixtureRoot)
+        let languageMismatchRecovery = try runner.recoverCompletedResult(mediaURL: media, language: .en, modelPath: model.path, outputRoot: fixtureRoot)
         try require(languageMismatchRecovery == nil,
                     "recovery accepted a mismatched source language")
         try FileManager.default.removeItem(at: wrongLanguage.deletingLastPathComponent())
 
         let missingMarker = try copiedPackage("missing-marker")
         try FileManager.default.removeItem(at: missingMarker.appendingPathComponent(".seminartext_complete"))
-        let incompleteRecovery = try runner.recoverCompletedResult(mediaURL: media, language: .en, outputRoot: fixtureRoot)
+        let incompleteRecovery = try runner.recoverCompletedResult(mediaURL: media, language: .en, modelPath: model.path, outputRoot: fixtureRoot)
         try require(incompleteRecovery == nil,
                     "recovery accepted an incomplete SeminarText package")
         try FileManager.default.removeItem(at: missingMarker.deletingLastPathComponent())
 
+        let differentModel = root.appendingPathComponent("different-core.bin")
+        try Data("different model".utf8).write(to: differentModel)
+        let modelMismatch = try copiedPackage("wrong-model")
+        let modelMismatchRecovery = try runner.recoverCompletedResult(
+            mediaURL: media,
+            language: .en,
+            modelPath: differentModel.path,
+            outputRoot: fixtureRoot
+        )
+        try require(modelMismatchRecovery == nil,
+                    "recovery accepted a completed package from a different Whisper model")
+        try FileManager.default.removeItem(at: modelMismatch.deletingLastPathComponent())
+
         _ = try copiedPackage("first")
         _ = try copiedPackage("second")
-        let ambiguousRecovery = try runner.recoverCompletedResult(mediaURL: media, language: .en, outputRoot: fixtureRoot)
-        try require(ambiguousRecovery == nil,
-                    "recovery accepted ambiguous completed SeminarText packages")
+        do {
+            _ = try runner.recoverCompletedResult(mediaURL: media, language: .en, modelPath: model.path, outputRoot: fixtureRoot)
+            throw WorkflowError.processFailed("recovery permitted a fresh ASR after ambiguous completed SeminarText packages")
+        } catch let error as WorkflowError where error.localizedDescription.contains("permitted a fresh ASR") {
+            throw error
+        } catch {
+            // Expected: matching multiple completed packages must fail closed.
+        }
     }
 
     /// An opt-in read-only check for a retained real SeminarText package. It
@@ -365,6 +388,7 @@ struct SeminarTextCoreTranscriptionProbe {
         let environment = ProcessInfo.processInfo.environment
         guard let mediaPath = environment["VIDEOTEXT_REAL_RECOVERY_MEDIA"],
               let outputRootPath = environment["VIDEOTEXT_REAL_RECOVERY_OUTPUT_ROOT"],
+              let modelPath = environment["VIDEOTEXT_REAL_RECOVERY_MODEL"],
               let languageValue = environment["VIDEOTEXT_REAL_RECOVERY_LANGUAGE"],
               let language = ArtifactLanguage(rawValue: languageValue) else {
             return
@@ -375,6 +399,7 @@ struct SeminarTextCoreTranscriptionProbe {
         guard let result = try runner.recoverCompletedResult(
             mediaURL: media,
             language: language,
+            modelPath: modelPath,
             outputRoot: outputRoot
         ) else {
             throw WorkflowError.processFailed("real completed SeminarText package was not safely recoverable")

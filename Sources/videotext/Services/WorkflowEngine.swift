@@ -3114,6 +3114,7 @@ final class WorkflowEngine: @unchecked Sendable {
                     if let recovered = try coreSeminarTextTranscription.recoverCompletedResult(
                         mediaURL: mediaURL,
                         language: sourceLanguage,
+                        modelPath: modelPath,
                         outputRoot: layout.seminarTextCoreDirectory
                     ) {
                         coreResult = recovered
