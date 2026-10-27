@@ -64,6 +64,19 @@ def contained(path, root, label):
     return Path(path)
 
 
+def same_provider_activation(left, right):
+    """Compare the immutable provider activation, not an unrelated registry head.
+
+    The registry can accept BookText/Integra events after a bundle was prepared.
+    That must not invalidate an unchanged current SeminarText activation, while a
+    changed SeminarText event, release, proof, or component inventory still does.
+    """
+    left, right = dict(left), dict(right)
+    left.pop("central_head", None)
+    right.pop("central_head", None)
+    return left == right
+
+
 def retain(path, data):
     """Write evidence atomically without ever replacing a different record."""
     path = Path(path)
@@ -175,10 +188,9 @@ def prepare(registry_root, material_root, output):
     dependency = resolve(registry_root)
     material_root, output = Path(material_root).resolve(), Path(output).resolve()
     require(material_root.is_dir() and not material_root.is_symlink(), "SeminarText material root is unavailable")
-    desired = encode(dependency)
     if output.exists():
         manifest = output / "FOUR_PRODUCT_REGISTRY_DEPENDENCY.json"
-        require(manifest.is_file() and manifest.read_bytes() == desired,
+        require(manifest.is_file() and same_provider_activation(read(manifest), dependency),
                 "prepared SeminarText bundle already represents a different activation")
         verify_bundle(output, dependency)
         return dependency
@@ -192,7 +204,7 @@ def prepare(registry_root, material_root, output):
                     f"SeminarText material differs from registered component {component['role']}")
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
-        retain(staged / "FOUR_PRODUCT_REGISTRY_DEPENDENCY.json", desired)
+        retain(staged / "FOUR_PRODUCT_REGISTRY_DEPENDENCY.json", encode(dependency))
         verify_bundle(staged, dependency)
         os.rename(staged, output)
     except Exception:
@@ -216,7 +228,7 @@ def verify_bundle(bundle, dependency):
                 f"prepared SeminarText bundle changed: {component['role']}")
     executable = regular(bundle / "seminartext")
     require(os.access(executable, os.X_OK), "prepared SeminarText CLI is not executable")
-    require((bundle / "FOUR_PRODUCT_REGISTRY_DEPENDENCY.json").read_bytes() == encode(dependency),
+    require(same_provider_activation(read(bundle / "FOUR_PRODUCT_REGISTRY_DEPENDENCY.json"), dependency),
             "prepared SeminarText metadata differs from activation")
 
 
@@ -249,7 +261,7 @@ def delivery_receipt(root, registry_root, release_evidence, owner_pass_ref, inst
     values = parse_evidence(release_evidence)
     require(values.get("status") == "PASS" and values.get("promoted") == "true", "release evidence is not a promoted PASS")
     required = ("source_commit", "candidate_sha256", "final_sha256", "seminartext_dependency_sha256",
-                "seminartext_dependency_manifest", "post_install_smoke_status")
+                "seminartext_dependency_manifest", "post_install_smoke_status", "post_install_smoke_log")
     require(all(values.get(name) for name in required), "release evidence lacks a completed delivery chain")
     require(values["candidate_sha256"] == values["final_sha256"], "installed candidate identity differs from accepted candidate")
     require(owner_pass_ref.startswith("https://"), "Owner PASS reference must be an immutable URL")
@@ -267,7 +279,7 @@ def delivery_receipt(root, registry_root, release_evidence, owner_pass_ref, inst
                "delivered_at": now(), "owner_pass_reference": owner_pass_ref,
                "source_commit": values["source_commit"], "release_gate_evidence": str(Path(release_evidence).resolve()),
                "installed_app": str(installed_app), "installed_app_sha256": installed_digest,
-               "post_install_smoke": {"status": "PASS", "reference": values["post_install_smoke_status"]},
+               "post_install_smoke": {"status": "PASS", "reference": values["post_install_smoke_log"]},
                "seminartext_dependency": dependency}
     retain(output, encode(receipt))
     return receipt
