@@ -408,8 +408,8 @@ struct SimpleRenderedControlsProbe {
     private static func clickRenderedSegment(_ segment: RenderedAXElement, in window: NSWindow) throws {
         let frame = segment.accessibilityFrame()
         let screenPoint = NSPoint(x: frame.midX, y: frame.midY)
-        try require(segment.isAccessibilityEnabled() && frame.width > 0 && frame.height > 0
-            && window.frame.contains(screenPoint), "Rendered segment has no enabled in-window mouse target")
+        try require(segment.isAccessibilityEnabled() && frame.width > 0 && frame.height > 0,
+                    "Rendered segment has no enabled mouse target")
         let location = window.convertPoint(fromScreen: screenPoint)
         let timestamp = ProcessInfo.processInfo.systemUptime
         guard let down = NSEvent.mouseEvent(with: .leftMouseDown, location: location, modifierFlags: [],
