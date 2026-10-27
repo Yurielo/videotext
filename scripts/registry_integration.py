@@ -246,6 +246,13 @@ def parse_evidence(path):
     return values
 
 
+def evidence_time(value):
+    try:
+        return datetime.strptime(value, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc).isoformat()
+    except ValueError as error:
+        raise Rejected("release evidence completed_at is not a UTC compact timestamp") from error
+
+
 def file_list_digest(path):
     path = Path(path)
     rows = []
@@ -261,9 +268,10 @@ def delivery_receipt(root, registry_root, release_evidence, owner_pass_ref, inst
     values = parse_evidence(release_evidence)
     require(values.get("status") == "PASS" and values.get("promoted") == "true", "release evidence is not a promoted PASS")
     required = ("source_commit", "candidate_sha256", "final_sha256", "seminartext_dependency_sha256",
-                "seminartext_dependency_manifest", "post_install_smoke_status", "post_install_smoke_log")
+                "seminartext_dependency_manifest", "post_install_smoke_status", "post_install_smoke_log", "completed_at")
     require(all(values.get(name) for name in required), "release evidence lacks a completed delivery chain")
     require(values["candidate_sha256"] == values["final_sha256"], "installed candidate identity differs from accepted candidate")
+    require(values["post_install_smoke_status"] == "PASS", "post-install smoke did not pass")
     require(owner_pass_ref.startswith("https://"), "Owner PASS reference must be an immutable URL")
     require(git(root, "merge-base", "--is-ancestor", values["source_commit"], "refs/remotes/origin/main") == "",
             "accepted VideoText source is not merged on main")
@@ -274,9 +282,11 @@ def delivery_receipt(root, registry_root, release_evidence, owner_pass_ref, inst
     dependency = read(dependency_path)
     require(sha256(dependency_path.read_bytes()) == values["seminartext_dependency_sha256"],
             "release evidence dependency manifest hash differs")
-    verify_bundle(dependency_path.parent, dependency)
+    current_dependency = verify(registry_root, dependency_path.parent)
+    require(same_provider_activation(dependency, current_dependency),
+            "release evidence dependency is no longer the current registered SeminarText activation")
     receipt = {"schema_version": 1, "product": "videotext", "status": "DELIVERED",
-               "delivered_at": now(), "owner_pass_reference": owner_pass_ref,
+               "delivered_at": evidence_time(values["completed_at"]), "owner_pass_reference": owner_pass_ref,
                "source_commit": values["source_commit"], "release_gate_evidence": str(Path(release_evidence).resolve()),
                "installed_app": str(installed_app), "installed_app_sha256": installed_digest,
                "post_install_smoke": {"status": "PASS", "reference": values["post_install_smoke_log"]},

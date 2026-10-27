@@ -48,22 +48,17 @@ The current delivery chain remains exactly:
 
 `Owner PASS → Final Gate → Merge → install exact Candidate → post-install smoke → DELIVERED`.
 
-After that chain, record and publish the native delivery fact using the existing
-central publisher. These adapter commands are evidence and publication steps;
-they do not grant Owner PASS, installation, or delivery authority.
+On the `--promote` path, `release_gate.sh` requires the existing immutable
+Owner PASS URL. It verifies that the approved source is already merged on
+`origin/main`, installs the exact candidate, runs its post-install smoke, then
+records and publishes the native delivery fact through the existing central
+publisher. These adapter commands are evidence and publication steps; they do
+not grant Owner PASS, installation, or delivery authority.
 
 ```sh
-"$CENTRAL_PYTHON" scripts/registry_integration.py record-delivery \
-  --root /exact/videotext-source --registry-root "$CENTRAL" \
-  --release-evidence /exact/release-gate/evidence.env \
-  --owner-pass-reference https://github.com/Yurielo/videotext/issues/NN#issuecomment-NN \
-  --installed-app /exact/installed/videotext.app \
-  --output /exact/release-gate/videotext-delivery-receipt.json
-
-"$CENTRAL_PYTHON" scripts/registry_integration.py publish \
-  --registry-root "$CENTRAL" \
-  --receipt /exact/release-gate/videotext-delivery-receipt.json \
-  --outbox /exact/release-gate/registry-outbox
+scripts/release_gate.sh --profile core /exact/short-video.mp4 /exact/model.bin \
+  --promote \
+  --owner-pass-reference https://github.com/Yurielo/videotext/issues/NN#issuecomment-NN
 ```
 
 The receipt requires a promoted PASS evidence record, same candidate/final
@@ -75,6 +70,11 @@ Failure leaves native delivery intact and evidence retryable. Retry uses the
 same receipt/outbox; it may never re-seal a later SeminarText or VideoText
 event. A newer SeminarText event after delivery rejects publication: prepare a
 new consumer release through its normal lifecycle.
+
+The adapter's `record-delivery` and `publish` subcommands remain the only
+recovery path for an interrupted publication, using the exact retained release
+evidence, receipt and outbox from that delivery. They are not a replacement for
+the gate's normal lifecycle integration.
 
 The delivery gate does not publish on build, candidate creation, source merge,
 or installation alone. Central rollback remains a new verified native activation

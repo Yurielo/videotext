@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -122,6 +123,63 @@ class RegistryIntegrationTests(unittest.TestCase):
         self.assertIn("Missing prepared registered SeminarText bundle", result.stderr)
         self.assertEqual(marker.read_text(), "stable app")
 
+    def test_build_refuses_stale_preparation_without_touching_target(self):
+        prepared = self.root / "prepared"
+        adapter.prepare(self.registry, self.material, prepared)
+        manifest = prepared / "FOUR_PRODUCT_REGISTRY_DEPENDENCY.json"
+        metadata = json.loads(manifest.read_text())
+        metadata["activation_event"] = "sha256:" + "0" * 64
+        manifest.write_text(json.dumps(metadata))
+        app = self.root / "existing.app"; app.mkdir()
+        marker = app / "must-survive"; marker.write_text("stable app")
+        result = subprocess.run([str(ROOT / "scripts/build_app.sh")], cwd=ROOT, env={
+            "VIDEOTEXT_APP_PATH": str(app), "VIDEOTEXT_SEMINARTEXT_PREPARED": str(prepared),
+            "VIDEOTEXT_REGISTRY_ROOT": str(self.registry), "VIDEOTEXT_REGISTRY_PYTHON": os.sys.executable,
+            "PATH": os.environ["PATH"]}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("metadata differs", result.stderr)
+        self.assertEqual(marker.read_text(), "stable app")
+
+    def delivery_inputs(self):
+        prepared = self.root / "prepared"
+        dependency = adapter.prepare(self.registry, self.material, prepared)
+        app = self.root / "installed.app"; app.mkdir()
+        (app / "payload").write_text("installed")
+        digest = adapter.file_list_digest(app)
+        evidence = self.root / "release.env"
+        evidence.write_text("\n".join((
+            "status=PASS", "promoted=true", "source_commit=" + "2" * 40,
+            "candidate_sha256=" + digest, "final_sha256=" + digest,
+            "seminartext_dependency_sha256=" + adapter.sha256((prepared / "FOUR_PRODUCT_REGISTRY_DEPENDENCY.json").read_bytes()),
+            "seminartext_dependency_manifest=" + str(prepared / "FOUR_PRODUCT_REGISTRY_DEPENDENCY.json"),
+            "post_install_smoke_status=PASS", "post_install_smoke_log=/fixture/post-install.log",
+            "completed_at=20261027T010000Z", "candidate_version=0.6.9", "candidate_build=fixture", "\n")))
+        return prepared, app, evidence, dependency
+
+    def test_delivery_receipt_is_idempotent_and_requires_passing_smoke(self):
+        _, app, evidence, dependency = self.delivery_inputs()
+        receipt_path = self.root / "receipt.json"
+        original_git = adapter.git
+        def delivery_git(root, *arguments):
+            if arguments and arguments[0] == "merge-base":
+                return ""
+            return original_git(root, *arguments)
+        with mock.patch.object(adapter, "git", side_effect=delivery_git):
+            first = adapter.delivery_receipt(self.root, self.registry, evidence, "https://owner.example/pass", app, receipt_path)
+            second = adapter.delivery_receipt(self.root, self.registry, evidence, "https://owner.example/pass", app, receipt_path)
+        self.assertEqual(first, second)
+        self.assertEqual(first["delivered_at"], "2026-10-27T01:00:00+00:00")
+        failed = self.root / "failed.env"
+        failed.write_text(evidence.read_text().replace("post_install_smoke_status=PASS", "post_install_smoke_status=FAIL"))
+        with self.assertRaisesRegex(adapter.Rejected, "post-install smoke did not pass"):
+            adapter.delivery_receipt(self.root, self.registry, failed, "https://owner.example/pass", app, self.root / "failed.json")
+        stale = json.loads(json.dumps(dependency))
+        stale["activation_event"] = "sha256:" + "f" * 64
+        with mock.patch.object(adapter, "git", side_effect=delivery_git), \
+             mock.patch.object(adapter, "verify", return_value=stale), \
+             self.assertRaisesRegex(adapter.Rejected, "no longer the current"):
+            adapter.delivery_receipt(self.root, self.registry, evidence, "https://owner.example/pass", app, self.root / "stale.json")
+
     def test_publication_binds_exact_dependency_and_is_retained(self):
         dependency=adapter.resolve(self.registry)
         receipt={"product":"videotext","status":"DELIVERED","delivered_at":"2026-10-27T01:00:00+00:00",
@@ -134,7 +192,9 @@ class RegistryIntegrationTests(unittest.TestCase):
         self.assertEqual(event["predecessor"],None)
         self.assertEqual(event["release"]["source_commit"],"2"*40)
         self.assertEqual(event["evidence"][0]["path"],"evidence/videotext-activation-"+hashlib.sha256((outbox / "publication-evidence.json").read_bytes()).hexdigest()+".json")
-        self.assertEqual(central.publish(self.registry,event,head)["status"],"PUBLISHED")
+        (self.root / "receipt.json").write_text(json.dumps(receipt))
+        self.assertEqual(adapter.publish(self.registry, self.root / "receipt.json", outbox)["status"], "PUBLISHED")
+        self.assertEqual(adapter.publish(self.registry, self.root / "receipt.json", outbox)["status"], "PUBLISHED")
         _, _, retry = adapter.publication_event(self.registry,receipt,outbox)
         self.assertEqual(retry,event)
 

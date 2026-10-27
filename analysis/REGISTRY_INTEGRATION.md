@@ -42,13 +42,15 @@ the resulting manifest part of candidate evidence. Build/E2E then revalidate
 the prepared bundle against central current state. There is no fallback to the
 tracked historical bundle, a standalone installation, or repository HEAD.
 
-VideoText publication remains after the existing Owner-approved delivery chain.
-The adapter's delivery receipt records its completed facts and the central
-publisher atomically retains native evidence/event/current. A failed publication
-leaves delivery unchanged with its exact outbox retained for retry. Newer
-same-product history and altered retained data are rejected by the central
-publisher; an unprepared current provider blocks new publication rather than
-rewriting a dependency.
+VideoText publication is now wired into the existing `--promote` lifecycle,
+after a required immutable Owner PASS URL, final gate, confirmed merge on
+`origin/main`, exact installation and passing post-install smoke. The adapter's
+delivery receipt records those completed facts deterministically and the
+central publisher atomically retains native evidence/event/current. A failed
+publication leaves delivery unchanged with its exact outbox retained for retry.
+Newer same-product history and altered retained data are rejected by the
+central publisher; an unprepared current provider blocks new publication rather
+than rewriting a dependency.
 
 No real registry history, installed VideoText app, SeminarText installation,
 Candidate, Owner decision or release input was altered during this task.

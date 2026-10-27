@@ -15,8 +15,8 @@ PROMOTE=false
 PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
 usage() {
-  printf 'Использование: %s --profile core <ru-видео> <модель-whisper> [--promote]\n' "$0"
-  printf '       или: %s --profile translation <ru-видео> <модель-whisper> <en-видео> <en-проект> [--promote]\n' "$0"
+  printf 'Использование: %s --profile core <ru-видео> <модель-whisper> [--promote --owner-pass-reference <https-url>]\n' "$0"
+  printf '       или: %s --profile translation <ru-видео> <модель-whisper> <en-видео> <en-проект> [--promote --owner-pass-reference <https-url>]\n' "$0"
 }
 
 if [[ "${1:-}" != "--profile" || $# -lt 4 ]]; then
@@ -43,9 +43,23 @@ case "$PROFILE" in
     ;;
   *) usage >&2; exit 2 ;;
 esac
-if [[ $# -eq 1 ]]; then
-  [[ "$1" == "--promote" ]] || { usage >&2; exit 2; }
-  PROMOTE=true
+OWNER_PASS_REFERENCE="${VIDEOTEXT_OWNER_PASS_REFERENCE:-}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --promote) PROMOTE=true; shift ;;
+    --owner-pass-reference)
+      [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+      OWNER_PASS_REFERENCE="$2"
+      shift 2
+      ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+if [[ "$PROMOTE" == true ]]; then
+  [[ "$OWNER_PASS_REFERENCE" == https://* ]] || {
+    printf 'Для promotion требуется immutable HTTPS Owner PASS reference.\n' >&2
+    exit 2
+  }
 fi
 
 [[ -f "$VIDEO_PATH" ]] || { printf 'Не найдено RU-видео: %s\n' "$VIDEO_PATH" >&2; exit 2; }
@@ -121,6 +135,7 @@ release_files() {
     "$ROOT/scripts/test_tool_runner.sh" \
     "$ROOT/scripts/test_whisper_vad.sh" \
     "$ROOT/scripts/test_transcription_quality.sh" \
+    "$ROOT/scripts/test_release_registry_publication.sh" \
     "$ROOT/scripts/check_baseline.sh" \
     "$ROOT/scripts/test_baseline_guard.sh" \
     "$ROOT/scripts/release_gate.sh" \
@@ -277,6 +292,7 @@ focused_checks=(
   test_whisper_vad.sh
   test_transcription_quality.sh
   test_registry_integration.sh
+  test_release_registry_publication.sh
 )
 if [[ "$PROFILE" == "translation" ]]; then
   focused_checks+=(
@@ -437,6 +453,13 @@ record candidate_architecture "$(file "$CANDIDATE/Contents/MacOS/videotext")"
 record smoke_status PASS
 
 if [[ "$PROMOTE" == true ]]; then
+  if ! git -C "$ROOT" fetch --quiet origin refs/heads/main:refs/remotes/origin/main; then
+    fail "не удалось обновить origin/main перед installation"
+  fi
+  if ! git -C "$ROOT" merge-base --is-ancestor "$SOURCE_COMMIT" refs/remotes/origin/main; then
+    fail "Owner-approved source еще не merged on main; installation запрещена"
+  fi
+  record owner_pass_reference "$OWNER_PASS_REFERENCE"
   require_no_active_tools
   if [[ -L "$FINAL_LINK" ]]; then
     FINAL_APP="$(readlink "$FINAL_LINK")"
@@ -501,7 +524,6 @@ else
 fi
 
 record completed_at "$(date -u '+%Y%m%dT%H%M%SZ')"
-record status PASS
 
 required_evidence=(
   source_commit source_tree_clean source_version source_build release_profile
@@ -526,6 +548,28 @@ fi
 for key in "${required_evidence[@]}"; do
   /usr/bin/grep -q "^${key}=" "$EVIDENCE" || fail "evidence не содержит $key"
 done
+record status PASS
+if [[ "$PROMOTE" == true ]]; then
+  DELIVERY_RECEIPT="$RUN_DIR/delivery-receipt.json"
+  PUBLICATION_OUTBOX="$RUN_DIR/registry-publication"
+  if ! "$REGISTRY_PYTHON" "$ROOT/scripts/registry_integration.py" record-delivery \
+      --root "$ROOT" --registry-root "$REGISTRY_ROOT" --release-evidence "$EVIDENCE" \
+      --owner-pass-reference "$OWNER_PASS_REFERENCE" --installed-app "$FINAL_APP" \
+      --output "$DELIVERY_RECEIPT" > "$RUN_DIR/registry-delivery.log" 2>&1; then
+    record registry_delivery_log "$RUN_DIR/registry-delivery.log"
+    fail "не удалось сохранить DELIVERED receipt для central registry"
+  fi
+  record registry_delivery_receipt "$DELIVERY_RECEIPT"
+  record registry_delivery_log "$RUN_DIR/registry-delivery.log"
+  if ! "$REGISTRY_PYTHON" "$ROOT/scripts/registry_integration.py" publish \
+      --registry-root "$REGISTRY_ROOT" --receipt "$DELIVERY_RECEIPT" \
+      --outbox "$PUBLICATION_OUTBOX" > "$RUN_DIR/registry-publication.log" 2>&1; then
+    record registry_publication_log "$RUN_DIR/registry-publication.log"
+    fail "central VideoText activation publication не подтверждена"
+  fi
+  record registry_publication_outbox "$PUBLICATION_OUTBOX"
+  record registry_publication_log "$RUN_DIR/registry-publication.log"
+fi
 printf 'RELEASE GATE PASS\nCandidate: %s\nEvidence: %s\n' "$CANDIDATE" "$EVIDENCE"
 if [[ "$PROMOTE" == false ]]; then
   printf 'Стабильная сборка не заменена. Для продвижения повторите с --promote.\n'
