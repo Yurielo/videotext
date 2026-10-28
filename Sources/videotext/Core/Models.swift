@@ -282,6 +282,8 @@ struct FragmentRecord: Codable, Identifiable {
     var quoteEnd: String? = nil
     var processedVideoPath: String? = nil
     var processingRecipe: FragmentProcessingRecipe? = nil
+    var cutVideoReuseKey: String? = nil
+    var cutVideoSHA256: String? = nil
 }
 
 struct FragmentProcessingRecipe: Codable, Equatable {

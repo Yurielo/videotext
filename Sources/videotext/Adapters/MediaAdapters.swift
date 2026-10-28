@@ -236,6 +236,76 @@ struct FFmpegAdapter {
         self.runner = runner
     }
 
+    func accurateCutExecutableURL() -> URL? {
+        guard let path = runner.resolve("ffmpeg") else { return nil }
+        return URL(fileURLWithPath: path).standardizedFileURL
+    }
+
+    func accurateCutRuntimeIdentity() async -> FFmpegCutRuntimeIdentity? {
+        guard !Self.hasDynamicLoaderOverrides(environment: ProcessInfo.processInfo.environment),
+              let executableURL = accurateCutExecutableURL(),
+              let executableSHA256 = FragmentCutRenderReuseIdentity.sha256(of: executableURL),
+              let otool = runner.resolve("otool"),
+              let swVers = runner.resolve("sw_vers"),
+              let version = try? await runner.run(executableURL.path, ["-version"]),
+              version.exitCode == 0,
+              let operatingSystem = try? await runner.run(swVers, ["-buildVersion"]),
+              operatingSystem.exitCode == 0 else {
+            return nil
+        }
+
+        let operatingSystemBuild = operatingSystem.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !operatingSystemBuild.isEmpty else { return nil }
+        var pending = [executableURL]
+        var visited: Set<String> = []
+        var dependencies: Set<String> = []
+
+        while let binaryURL = pending.popLast() {
+            let binaryPath = binaryURL.standardizedFileURL.path
+            guard visited.insert(binaryPath).inserted else { continue }
+            guard let linked = try? await runner.run(otool, ["-L", binaryPath]), linked.exitCode == 0 else {
+                return nil
+            }
+            let lines = linked.stdout.split(separator: "\n").dropFirst()
+            for line in lines {
+                let declaration = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let dependency = declaration.components(separatedBy: " (").first,
+                      !dependency.isEmpty else {
+                    continue
+                }
+                if dependency.hasPrefix("/System/Library/") || dependency.hasPrefix("/usr/lib/") {
+                    dependencies.insert("system:\(dependency):\(operatingSystemBuild)")
+                    continue
+                }
+                guard dependency.hasPrefix("/") else { return nil }
+                let resolvedURL = URL(fileURLWithPath: dependency).resolvingSymlinksInPath().standardizedFileURL
+                guard let dependencySHA256 = FragmentCutRenderReuseIdentity.sha256(of: resolvedURL) else {
+                    return nil
+                }
+                dependencies.insert("library:\(dependency)->\(resolvedURL.path):\(dependencySHA256)")
+                pending.append(resolvedURL)
+            }
+        }
+
+        let fingerprint = [
+            executableURL.path,
+            executableSHA256,
+            version.stdout,
+            version.stderr,
+            operatingSystemBuild,
+            dependencies.sorted().joined(separator: "\n")
+        ].joined(separator: "\n")
+        return FFmpegCutRuntimeIdentity(
+            executableURL: executableURL,
+            executableSHA256: executableSHA256,
+            fingerprint: fingerprint
+        )
+    }
+
+    static func hasDynamicLoaderOverrides(environment: [String: String]) -> Bool {
+        environment.keys.contains { $0.hasPrefix("DYLD_") }
+    }
+
     func duration(of mediaURL: URL) async throws -> TimeInterval? {
         guard let ffprobe = runner.resolve("ffprobe") else { throw WorkflowError.missingTool("ffprobe") }
         let result = try await runner.run(ffprobe, [
