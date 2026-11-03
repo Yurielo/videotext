@@ -2,6 +2,7 @@ import Foundation
 
 struct OllamaTopicProvider: TopicAIProvider {
     static let chatTimeoutSeconds: TimeInterval = 360
+    static let topicContextTokens = 8_192
     let embeddingModel = "embeddinggemma:latest"
     let primaryLanguageModel = "gemma3:4b"
     let fallbackLanguageModel = "gemma3:4b"
@@ -48,6 +49,7 @@ struct OllamaTopicProvider: TopicAIProvider {
         keep=true только при реальной смене предмета, этапа, вопроса/ответа или переходе к практике.
         Не сохраняй границу из-за одной паузы, длины блока или небольшого изменения формулировки.
         Поля reason в ответе пиши на \(outputLanguage) языке.
+        confidence — только десятичное число от 0 до 1 включительно, например 0.75. Значения больше 1 или меньше 0 запрещены.
         Детализация: \(request.granularity.title). Ориентир длительности: \(durationHint(request.granularity)).
         focusAfterCueIds: [\(focus)]
 
@@ -162,7 +164,11 @@ struct OllamaTopicProvider: TopicAIProvider {
             think: false,
             format: schema.node,
             messages: [ChatMessage(role: "user", content: prompt)],
-            options: ChatOptions(temperature: 0.05, numPredict: 1_200)
+            options: ChatOptions(
+                temperature: 0.05,
+                numPredict: 1_200,
+                numContext: Self.topicContextTokens
+            )
         )
         let data = try await post(path: "api/chat", body: payload, timeout: Self.chatTimeoutSeconds)
         guard let response = try? JSONDecoder().decode(ChatResponse.self, from: data) else {
@@ -196,7 +202,7 @@ struct OllamaTopicProvider: TopicAIProvider {
         guard let correction, !correction.isEmpty else { return "" }
         return """
         ПРЕДЫДУЩИЙ ОТВЕТ ОТКЛОНЁН ВАЛИДАТОРОМ: \(correction)
-        Исправь каждую указанную ошибку. Не повторяй отклонённый вариант. Проверь число объектов, точные cueId и число слов в каждом title перед ответом.
+        Исправь каждую указанную ошибку. Не повторяй отклонённый вариант. Проверь число объектов, точные cueId, confidence от 0 до 1 и число слов в каждом title перед ответом.
         """
     }
 
@@ -228,7 +234,12 @@ struct OllamaTopicProvider: TopicAIProvider {
     private struct ChatOptions: Encodable {
         var temperature: Double
         var numPredict: Int
-        enum CodingKeys: String, CodingKey { case temperature; case numPredict = "num_predict" }
+        var numContext: Int
+        enum CodingKeys: String, CodingKey {
+            case temperature
+            case numPredict = "num_predict"
+            case numContext = "num_ctx"
+        }
     }
     private struct ChatRequest: Encodable {
         var model: String
@@ -249,7 +260,7 @@ struct OllamaTopicProvider: TopicAIProvider {
     }
 }
 
-private enum TopicResponseSchema {
+enum TopicResponseSchema {
     case boundaryReview(ids: [Int])
     case topicReview(starts: [Int], ends: [Int])
 
@@ -259,7 +270,7 @@ private enum TopicResponseSchema {
             let decision = TopicSchemaNode.object(
                 properties: [
                     "keep": .boolean,
-                    "confidence": .number,
+                    "confidence": .boundedNumber(minimum: 0, maximum: 1),
                     "reason": .constrainedString(minimum: 8, maximum: 400)
                 ],
                 required: ["keep", "confidence", "reason"]
@@ -280,7 +291,7 @@ private enum TopicResponseSchema {
                         "keywords": .rangeArray(.string, minimum: 2, maximum: 8),
                         "startCueId": .constantInteger(start),
                         "endCueId": .constantInteger(end),
-                        "confidence": .number,
+                        "confidence": .boundedNumber(minimum: 0, maximum: 1),
                         "boundaryReason": .constrainedString(minimum: 12, maximum: 500)
                     ],
                     required: ["title", "summary", "keywords", "startCueId", "endCueId", "confidence", "boundaryReason"]
@@ -296,7 +307,7 @@ private enum TopicResponseSchema {
     }
 }
 
-private indirect enum TopicSchemaNode: Encodable {
+indirect enum TopicSchemaNode: Encodable {
     case object(properties: [String: TopicSchemaNode], required: [String])
     case array(TopicSchemaNode)
     case exactArray(TopicSchemaNode, count: Int)
@@ -308,11 +319,12 @@ private indirect enum TopicSchemaNode: Encodable {
     case integerChoices([Int])
     case constantInteger(Int)
     case number
+    case boundedNumber(minimum: Double, maximum: Double)
     case boolean
 
     private enum CodingKeys: String, CodingKey {
         case type, properties, required, items, additionalProperties
-        case minItems, maxItems, minLength, maxLength, prefixItems, constValue = "const", enumValues = "enum"
+        case minItems, maxItems, minLength, maxLength, minimum, maximum, prefixItems, constValue = "const", enumValues = "enum"
     }
 
     func encode(to encoder: Encoder) throws {
@@ -357,6 +369,10 @@ private indirect enum TopicSchemaNode: Encodable {
             try values.encode(value, forKey: .constValue)
         case .number:
             try values.encode("number", forKey: .type)
+        case .boundedNumber(let minimum, let maximum):
+            try values.encode("number", forKey: .type)
+            try values.encode(minimum, forKey: .minimum)
+            try values.encode(maximum, forKey: .maximum)
         case .boolean:
             try values.encode("boolean", forKey: .type)
         }

@@ -143,6 +143,7 @@ struct TopicAnalysisProbe {
             try await validateCancellationResume(cues: cues, sourceSRT: sourceSRT, parent: root)
             try validateBrokenModelJSON()
             try validateUnknownCueAndTemporalJSON(cues: cues)
+            try validateOllamaBoundarySchema()
             try await validateFallback(cues: cues, sourceSRT: sourceSRT, parent: root)
             try validateTopicEditing(file: file, cues: cues, parent: root)
             print("TOPIC PROBE PASS: подготовка, границы, JSON, кэш, остановка и редактор проверены")
@@ -377,6 +378,26 @@ struct TopicAnalysisProbe {
             _ = try TopicJSONDecoder.decode(temporal, as: TopicReviewResponse.self)
             throw TopicProbeError.failed("декодер принял временной код от LLM")
         } catch is WorkflowError {}
+    }
+
+    private static func validateOllamaBoundarySchema() throws {
+        try require(OllamaTopicProvider.topicContextTokens == 8_192,
+                    "topic provider lost the bounded context needed for real boundary responses")
+        let schemaData = try JSONEncoder().encode(
+            TopicResponseSchema.boundaryReview(ids: [12, 34]).node
+        )
+        guard let root = try JSONSerialization.jsonObject(with: schemaData) as? [String: Any],
+              let properties = root["properties"] as? [String: Any],
+              let decisions = properties["decisions"] as? [String: Any],
+              let decisionProperties = decisions["properties"] as? [String: Any],
+              let firstDecision = decisionProperties["12"] as? [String: Any],
+              let confidence = firstDecision["properties"] as? [String: Any],
+              let confidenceSchema = confidence["confidence"] as? [String: Any] else {
+            throw TopicProbeError.failed("boundary JSON schema is not structurally readable")
+        }
+        try require((confidenceSchema["minimum"] as? NSNumber)?.doubleValue == 0
+                    && (confidenceSchema["maximum"] as? NSNumber)?.doubleValue == 1,
+                    "boundary JSON schema does not constrain confidence to 0...1")
     }
 
     private static func validateFallback(cues: [SubtitleCue], sourceSRT: URL, parent: URL) async throws {
