@@ -663,6 +663,7 @@ struct SeminarTextCoreTranscriptionRunner {
         executable: URL,
         modelPath: String,
         outputRoot: URL,
+        chunkSeconds: Int? = nil,
         onLog: @escaping (String) -> Void = { _ in }
     ) async throws -> Result {
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
@@ -684,6 +685,12 @@ struct SeminarTextCoreTranscriptionRunner {
         ]
         if !modelPath.isEmpty {
             arguments.append("SEMINARTEXT_MODEL=\(modelPath)")
+        }
+        if let chunkSeconds {
+            guard chunkSeconds == 60 else {
+                throw WorkflowError.processFailed("Неподдерживаемый размер фрагмента восстановления SeminarText.")
+            }
+            arguments.append("SEMINARTEXT_CHUNK_SECONDS=\(chunkSeconds)")
         }
         arguments += [
             executable.path,
@@ -717,6 +724,55 @@ struct SeminarTextCoreTranscriptionRunner {
             outputDirectory: srtURL.deletingLastPathComponent(),
             selectedTimingPackageURL: manifestURL.deletingLastPathComponent()
         )
+    }
+
+    /// The first ordinary SeminarText attempt may report success despite an
+    /// unresolved ASR loop in an older bundled runtime. Keep that package for
+    /// diagnosis and make only one smaller-chunk attempt before publication.
+    func transcribeWithQualityRecovery(
+        mediaURL: URL,
+        language: ArtifactLanguage,
+        executable: URL,
+        modelPath: String,
+        outputRoot: URL,
+        preferShortChunks: Bool,
+        onLog: @escaping (String) -> Void = { _ in }
+    ) async throws -> Result {
+        let first = try await transcribe(
+            mediaURL: mediaURL,
+            language: language,
+            executable: executable,
+            modelPath: modelPath,
+            outputRoot: outputRoot,
+            chunkSeconds: preferShortChunks ? 60 : nil,
+            onLog: onLog
+        )
+        if let issue = try qualityRecoveryIssue(in: first) {
+            guard !preferShortChunks else {
+                throw WorkflowError.processFailed("SeminarText сохранил повреждённую расшифровку после восстановления: \(issue.message). Исходный пакет сохранён; результат проекта не заменён.")
+            }
+            onLog("SeminarText вернул повреждённую расшифровку: \(issue.message). Выполняется один повтор с фрагментами по 60 секунд.")
+            let fallback = try await transcribe(
+                mediaURL: mediaURL,
+                language: language,
+                executable: executable,
+                modelPath: modelPath,
+                outputRoot: outputRoot,
+                chunkSeconds: 60,
+                onLog: onLog
+            )
+            if let remaining = try qualityRecoveryIssue(in: fallback) {
+                throw WorkflowError.processFailed("SeminarText сохранил повреждённую расшифровку после восстановления: \(remaining.message). Оба пакета сохранены; результат проекта не заменён.")
+            }
+            return fallback
+        }
+        return first
+    }
+
+    func qualityRecoveryIssue(in result: Result) throws -> TranscriptionRecoveryIssue? {
+        let imported = try loadCoreSRT(from: result.srtURL)
+        let reconciled = try reconcileForVideoTextTimeline(imported)
+        return TranscriptionQualityService().recoveryIssue(cues: reconciled)
     }
 
     /// Reuses only a completed, unambiguous SeminarText attempt for this exact
@@ -790,11 +846,17 @@ struct SeminarTextCoreTranscriptionRunner {
                   ) else {
                 continue
             }
-            candidates.append(Result(
+            let result = Result(
                 srtURL: srtURL,
                 outputDirectory: outputDirectory,
                 selectedTimingPackageURL: manifestURL.deletingLastPathComponent()
-            ))
+            )
+            guard let imported = try? loadCoreSRT(from: srtURL),
+                  let reconciled = try? reconcileForVideoTextTimeline(imported),
+                  TranscriptionQualityService().recoveryIssue(cues: reconciled) == nil else {
+                continue
+            }
+            candidates.append(result)
         }
         return candidates.count == 1 ? candidates[0] : nil
     }

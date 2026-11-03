@@ -3120,12 +3120,17 @@ final class WorkflowEngine: @unchecked Sendable {
                         coreResult = recovered
                         log("Восстановлена завершённая расшифровка bundled SeminarText; повторный ASR не запускался.")
                     } else {
-                        coreResult = try await coreSeminarTextTranscription.transcribe(
+                        let existingCues = try? srt.load(from: layout.fullSRTURL)
+                        let needsShortChunkRecovery = existingCues.flatMap {
+                            transcriptionQuality.recoveryIssue(cues: $0)
+                        } != nil
+                        coreResult = try await coreSeminarTextTranscription.transcribeWithQualityRecovery(
                             mediaURL: mediaURL,
                             language: sourceLanguage,
                             executable: seminarText,
                             modelPath: modelPath,
                             outputRoot: layout.seminarTextCoreDirectory,
+                            preferShortChunks: needsShortChunkRecovery,
                             onLog: { message in
                                 tracker.update(operation, fraction: 0.5, indeterminate: true)
                                 log(message)
@@ -3134,22 +3139,28 @@ final class WorkflowEngine: @unchecked Sendable {
                     }
                     let importedCues = try coreSeminarTextTranscription.loadCoreSRT(from: coreResult.srtURL, srt: srt)
                     let cues = try coreSeminarTextTranscription.reconcileForVideoTextTimeline(importedCues)
+                    if let issue = transcriptionQuality.recoveryIssue(cues: cues) {
+                        throw WorkflowError.processFailed("SeminarText сохранил повреждённую расшифровку: \(issue.message). Исходные результаты проекта не заменены.")
+                    }
                     if cues.map(\.start) != importedCues.map(\.start) {
                         log("Скорректированы микроперекрытия на границах фрагментов SeminarText; исходный SRT сохранён в provenance.")
                     }
-                    try srt.writePreservingIDs(cues, to: layout.fullSRTURL)
-                    try writeTranscript(from: cues, to: layout.transcriptURL)
                     let coreWhisperJSON = try SeminarTextCoreWhisperEvidenceImporter().importSelectedWhisperJSON(
                         packageRoot: coreResult.selectedTimingPackageURL,
                         expectedMediaURL: mediaURL,
                         expectedLanguage: sourceLanguage
                     )
-                    try coreWhisperJSON.write(to: layout.whisperJSONURL, options: .atomic)
-                    guard SeminarTextCoreWhisperEvidenceImporter().validateLegacyWhisperJSON(at: layout.whisperJSONURL),
-                          nonemptyFile(layout.fullSRTURL),
-                          nonemptyFile(layout.transcriptURL) else {
+                    let validationURL = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("videotext-core-import-\(UUID().uuidString).json")
+                    defer { try? FileManager.default.removeItem(at: validationURL) }
+                    try coreWhisperJSON.write(to: validationURL, options: .atomic)
+                    guard SeminarTextCoreWhisperEvidenceImporter().validateLegacyWhisperJSON(at: validationURL) else {
                         throw WorkflowError.processFailed("SeminarText не создал полный core transcription package: full.srt, transcript.txt и whisper.json обязательны.")
                     }
+                    try Task.checkCancellation()
+                    try srt.writePreservingIDs(cues, to: layout.fullSRTURL)
+                    try writeTranscript(from: cues, to: layout.transcriptURL)
+                    try coreWhisperJSON.write(to: layout.whisperJSONURL, options: .atomic)
                     let coreEvidence = SeminarTextCoreTranscriptionEvidence(
                         schemaVersion: 1,
                         runtimeIdentity: runtimeIdentity,
@@ -4661,7 +4672,7 @@ final class WorkflowEngine: @unchecked Sendable {
         log("Проверка ffprobe сохранена.")
     }
 
-    private func shouldSkip(
+    func shouldSkip(
         _ operation: WorkflowOperation,
         settings: WorkflowSettings,
         manifest: ProjectManifest,
@@ -4681,6 +4692,11 @@ final class WorkflowEngine: @unchecked Sendable {
                   manifest.languageProfile != nil else { return false }
             return true
         case .transcribe:
+            if let checkpoint = manifest.workflow?.operations[WorkflowOperation.transcribe.rawValue],
+               checkpoint.status != .completed && checkpoint.status != .skipped {
+                log("Предыдущее сохранение расшифровки не завершено; проверяю исходный пакет SeminarText перед восстановлением.")
+                return false
+            }
             guard nonemptyFile(layout.fullSRTURL),
                   nonemptyFile(layout.whisperJSONURL),
                   SeminarTextCoreWhisperEvidenceImporter().validateLegacyWhisperJSON(at: layout.whisperJSONURL) else { return false }
