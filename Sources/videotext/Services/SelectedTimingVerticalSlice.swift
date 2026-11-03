@@ -645,6 +645,10 @@ struct SeminarTextSelectedTimingRunner {
 /// `whisper.json` evidence for quality and filler-word consumers. This is one
 /// SeminarText invocation, not a second transcription or a translation path.
 struct SeminarTextCoreTranscriptionRunner {
+    private enum InvocationFailure: Error {
+        case qualityRetryRequested(String)
+    }
+
     struct Result {
         let srtURL: URL
         let outputDirectory: URL
@@ -709,6 +713,13 @@ struct SeminarTextCoreTranscriptionRunner {
             onLog(chunk)
         }
         guard result.exitCode == 0 else {
+            let diagnostics = (result.stderr + result.stdout)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if chunkSeconds == nil,
+               diagnostics.contains("ASR quality gate: REJECT"),
+               diagnostics.contains("Повторите с SEMINARTEXT_CHUNK_SECONDS=60.") {
+                throw InvocationFailure.qualityRetryRequested(diagnostics)
+            }
             throw WorkflowError.processFailed("SeminarText transcription завершился с кодом \(result.exitCode): \((result.stderr + result.stdout).trimmingCharacters(in: .whitespacesAndNewlines))")
         }
         let srtURLs = Self.findCoreSRTs(in: invocationRoot)
@@ -738,15 +749,36 @@ struct SeminarTextCoreTranscriptionRunner {
         preferShortChunks: Bool,
         onLog: @escaping (String) -> Void = { _ in }
     ) async throws -> Result {
-        let first = try await transcribe(
-            mediaURL: mediaURL,
-            language: language,
-            executable: executable,
-            modelPath: modelPath,
-            outputRoot: outputRoot,
-            chunkSeconds: preferShortChunks ? 60 : nil,
-            onLog: onLog
-        )
+        let first: Result
+        do {
+            first = try await transcribe(
+                mediaURL: mediaURL,
+                language: language,
+                executable: executable,
+                modelPath: modelPath,
+                outputRoot: outputRoot,
+                chunkSeconds: preferShortChunks ? 60 : nil,
+                onLog: onLog
+            )
+        } catch InvocationFailure.qualityRetryRequested(let diagnostics) {
+            guard !preferShortChunks else {
+                throw WorkflowError.processFailed("SeminarText сохранил повреждённую расшифровку после восстановления: \(diagnostics). Исходный пакет сохранён; результат проекта не заменён.")
+            }
+            onLog("SeminarText отклонил качество обычной расшифровки. Выполняется один повтор с фрагментами по 60 секунд.")
+            let fallback = try await transcribe(
+                mediaURL: mediaURL,
+                language: language,
+                executable: executable,
+                modelPath: modelPath,
+                outputRoot: outputRoot,
+                chunkSeconds: 60,
+                onLog: onLog
+            )
+            if let remaining = try qualityRecoveryIssue(in: fallback) {
+                throw WorkflowError.processFailed("SeminarText сохранил повреждённую расшифровку после восстановления: \(remaining.message). Оба пакета сохранены; результат проекта не заменён.")
+            }
+            return fallback
+        }
         if let issue = try qualityRecoveryIssue(in: first) {
             guard !preferShortChunks else {
                 throw WorkflowError.processFailed("SeminarText сохранил повреждённую расшифровку после восстановления: \(issue.message). Исходный пакет сохранён; результат проекта не заменён.")

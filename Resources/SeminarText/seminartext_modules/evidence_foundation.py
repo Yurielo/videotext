@@ -225,6 +225,14 @@ def read_alignment(path: Path) -> dict[str, Any]:
 def map_words(text: str, evidence_words: list[dict[str, Any]]) -> list[dict[str, Any] | None]:
     tokens = list(re.finditer(r"\S+", text))
     mapped: list[dict[str, Any] | None] = []
+    if any("sequence" in item for item in evidence_words):
+        if len(evidence_words) != len(tokens):
+            raise ValueError("positional alignment must preserve every transcript token")
+        for sequence, (token, item) in enumerate(zip(tokens, evidence_words)):
+            if item.get("sequence") != sequence or item.get("word") != token.group():
+                raise ValueError("positional alignment token identity differs")
+            mapped.append(None if item.get("alignment_status") == "unaligned" else item)
+        return mapped
     cursor = 0
     for token in tokens:
         item = evidence_words[cursor] if cursor < len(evidence_words) else None
@@ -327,6 +335,28 @@ def build_bundle(project: Path, revision: dict[str, Any], source: dict[str, Any]
         "topics": [],
         "evidence_refs": [],
     }
+    if "cues" in evidence:
+        # Optional native SRT cue projection from the media adapter. No timing
+        # is inferred: ranges and cue text come from the retained original SRT.
+        cues, cursor = [], 0
+        for sequence, item in enumerate(evidence["cues"]):
+            cue_text = item["text"]
+            start = text.find(cue_text, cursor)
+            if start < 0 or text[cursor:start].strip():
+                raise ValueError("native cue text differs from TranscriptRevision")
+            cursor = start
+            cue = dict(bundle["cues"][0], id=f"{revision_id}:cue:{sequence:06d}", sequence=sequence,
+                       char_start=cursor, char_end=cursor+len(cue_text), text=cue_text,
+                       source_locator={"type":"time_interval", "start_seconds":item["start"], "end_seconds":item["end"]})
+            cues.append(cue); cursor += len(cue_text)
+        if text[min(cursor,len(text)):].strip() or not cues:
+            raise ValueError("native cues do not partition TranscriptRevision")
+        bundle["cues"] = cues
+        for word in bundle["words"]:
+            selected = [cue["id"] for cue in cues if cue["char_start"] <= word["char_start"] and word["char_end"] <= cue["char_end"]]
+            if len(selected) != 1:
+                raise ValueError("Word does not belong to one native cue")
+            word["source_cue_ids"] = selected
     errors = validate_bundle(bundle)
     if errors:
         raise ValueError("canonical cross-record validation failed:\n" + "\n".join(errors))
@@ -533,21 +563,35 @@ def align_project(args: argparse.Namespace) -> int:
     source_root = project / "evidence" / "sources" / source_canonical_id
     revision_bundle_path = source_root / "revisions" / revision["revision_id"] / "canonical_bundle.json"
     source_bundle_path = source_root / "canonical_bundle.json"
-    if run_path.is_file() and revision_bundle_path.is_file():
-        if not source_bundle_path.is_file():
-            atomic_write_json(
-                source_bundle_path,
-                load_json(revision_bundle_path, "retained revision bundle"),
-                overwrite=True,
-            )
-        bundle_path, _ = write_project_aggregate(project)
-        print(json.dumps({"status": "RESUMED", "alignment_run_id": run_id, "bundle": str(bundle_path)}, ensure_ascii=False, sort_keys=True))
-        return 0
-    if run_path.exists() != revision_bundle_path.exists():
-        raise ValueError("incomplete retained alignment state; refusing automatic repair")
+    resumed = run_path.is_file() and revision_bundle_path.is_file()
     bundle, run = build_bundle(project, revision, source, args.source_id, media, evidence, run_id, config_sha, model, model_revision, model_sha, evidence.get("aligner", "whisperx"), evidence.get("aligner_version", "3.8.6"))
-    atomic_write_json(run_path, run)
-    atomic_write_json(revision_bundle_path, bundle)
+    # Published source projections may only be replaced when their prior
+    # manifest still validates, or when they already equal this exact pending
+    # deterministic import. Never overwrite a corrupted published projection.
+    pending_projection = False
+    published_manifests = list((project / "evidence" / "sources").glob("*/manifest.json"))
+    for manifest_path in published_manifests:
+        published_manifest = load_json(manifest_path, "source evidence manifest")
+        published_path = project / published_manifest["bundle_path"]
+        published = load_json(published_path, "published source evidence")
+        if sha256_bytes(canonical_payload(published)) != published_manifest["bundle_sha256"]:
+            if published_path != source_bundle_path or published != bundle:
+                raise ValueError("source manifest bundle hash mismatch")
+            pending_projection = True
+    pending_projection = pending_projection or (source_bundle_path.exists() and not (source_root / "manifest.json").exists())
+    if published_manifests and not pending_projection:
+        compose_project_bundle(project)  # preserve existing cross-record diagnostics
+    if source_bundle_path.exists() and not (source_root / "manifest.json").exists():
+        if load_json(source_bundle_path, "pending source evidence") != bundle:
+            raise ValueError("incomplete source projection differs from current import")
+    # Recover an interrupted deterministic import without deleting or changing
+    # any retained immutable record. Existing bytes must equal recomputation.
+    for destination, expected in ((run_path, run), (revision_bundle_path, bundle)):
+        if destination.exists():
+            if load_json(destination, "retained alignment") != expected:
+                raise ValueError("incomplete retained alignment differs from current inputs")
+        else:
+            atomic_write_json(destination, expected)
     atomic_write_json(source_bundle_path, bundle, overwrite=True)
     source_timeline = {
         "schema_version": "1.0.0",
@@ -597,7 +641,7 @@ def align_project(args: argparse.Namespace) -> int:
         {"schema_version": 1, "bindings": sorted(by_path.values(), key=lambda item: item["path"])},
         overwrite=True,
     )
-    print(json.dumps({"status": run["review_status"], "alignment_run_id": run_id, "bundle": str(bundle_path), "unaligned_words": run["unaligned_sequences"]}, ensure_ascii=False, sort_keys=True))
+    print(json.dumps({"status": "RESUMED" if resumed else run["review_status"], "alignment_run_id": run_id, "bundle": str(bundle_path), "unaligned_words": run["unaligned_sequences"]}, ensure_ascii=False, sort_keys=True))
     return 0
 
 

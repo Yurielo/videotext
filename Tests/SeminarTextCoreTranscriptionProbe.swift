@@ -437,11 +437,25 @@ struct SeminarTextCoreTranscriptionProbe {
         try fuzzyLoopSRT.write(to: bad, atomically: true, encoding: .utf8)
         try Data("00:00:00,000 --> 00:00:01,000\nClear transcription.\n".utf8).write(to: good)
 
-        func fakeExecutable(_ name: String, shortResult: URL) throws -> URL {
+        func fakeExecutable(
+            _ name: String,
+            shortResult: URL,
+            ordinaryQualityExit: Bool = false,
+            ordinaryFailure: String? = nil
+        ) throws -> URL {
             let executable = root.appendingPathComponent(name)
             let script = """
             #!/bin/sh
             printf '%s\\n' "${SEMINARTEXT_CHUNK_SECONDS:-300}" >> '\(calls.path)'
+            if [ "${SEMINARTEXT_CHUNK_SECONDS:-300}" != 60 ] && [ '\(ordinaryQualityExit ? "1" : "0")' = 1 ]; then
+              echo 'ASR quality gate: REJECT reason=fuzzy_loop' >&2
+              echo 'Ошибка: фрагмент остаётся подозрительным после повтора. Повторите с SEMINARTEXT_CHUNK_SECONDS=60.' >&2
+              exit 1
+            fi
+            if [ "${SEMINARTEXT_CHUNK_SECONDS:-300}" != 60 ] && [ -n '\(ordinaryFailure ?? "")' ]; then
+              echo '\(ordinaryFailure ?? "")' >&2
+              exit 2
+            fi
             mkdir -p "$SEMINARTEXT_OUTPUT/run/structured_timing"
             if [ "${SEMINARTEXT_CHUNK_SECONDS:-300}" = 60 ]; then
               cp '\(shortResult.path)' "$SEMINARTEXT_OUTPUT/run/transcript.srt"
@@ -474,6 +488,41 @@ struct SeminarTextCoreTranscriptionProbe {
         let retainedPackages = try FileManager.default.contentsOfDirectory(at: outputRoot, includingPropertiesForKeys: nil)
         try require(retainedPackages.count == 2, "quality fallback removed the rejected diagnostic package")
 
+        try Data().write(to: calls)
+        let upstreamQualityExecutable = try fakeExecutable(
+            "fake-upstream-quality", shortResult: good, ordinaryQualityExit: true
+        )
+        let upstreamOutput = root.appendingPathComponent("upstream-quality", isDirectory: true)
+        let upstreamRecovered = try await runner.transcribeWithQualityRecovery(
+            mediaURL: media, language: .en, executable: upstreamQualityExecutable,
+            modelPath: model.path, outputRoot: upstreamOutput, preferShortChunks: false
+        )
+        let upstreamIssue = try runner.qualityRecoveryIssue(in: upstreamRecovered)
+        try require(upstreamIssue == nil,
+                    "nonzero SeminarText quality recovery did not return the 60-second result")
+        let upstreamCalls = try String(contentsOf: calls, encoding: .utf8).split(separator: "\n")
+        try require(upstreamCalls == ["300", "60"],
+                    "nonzero SeminarText quality failure did not perform exactly one 60-second retry")
+
+        try Data().write(to: calls)
+        let unrelatedFailure = try fakeExecutable(
+            "fake-unrelated-failure", shortResult: good, ordinaryFailure: "network unavailable"
+        )
+        do {
+            _ = try await runner.transcribeWithQualityRecovery(
+                mediaURL: media, language: .en, executable: unrelatedFailure,
+                modelPath: model.path, outputRoot: root.appendingPathComponent("unrelated-failure"), preferShortChunks: false
+            )
+            throw WorkflowError.processFailed("unrelated SeminarText failure triggered a retry")
+        } catch let error as WorkflowError where error.localizedDescription.contains("unrelated SeminarText failure triggered a retry") {
+            throw error
+        } catch {
+            // Only the explicit upstream quality marker is eligible for fallback.
+        }
+        let unrelatedCalls = try String(contentsOf: calls, encoding: .utf8).split(separator: "\n")
+        try require(unrelatedCalls == ["300"], "unrelated SeminarText failure launched a fallback")
+
+        try Data().write(to: calls)
         let badExecutable = try fakeExecutable("fake-bad", shortResult: bad)
         let resumeOutput = root.appendingPathComponent("resume-failed", isDirectory: true)
         do {
@@ -488,10 +537,11 @@ struct SeminarTextCoreTranscriptionProbe {
             // A resumed invalid project receives exactly one short attempt.
         }
         let resumeCalls = try String(contentsOf: calls, encoding: .utf8).split(separator: "\n")
-        try require(resumeCalls == ["300", "60", "60"], "resume reran default chunks or retried short chunks")
+        try require(resumeCalls == ["60"], "resume reran default chunks or retried short chunks")
         let resumePackages = try FileManager.default.contentsOfDirectory(at: resumeOutput, includingPropertiesForKeys: nil)
         try require(resumePackages.count == 1, "failed resume lost its diagnostic package")
 
+        try Data().write(to: calls)
         let failedOutput = root.appendingPathComponent("failed", isDirectory: true)
         do {
             _ = try await runner.transcribeWithQualityRecovery(
@@ -505,7 +555,7 @@ struct SeminarTextCoreTranscriptionProbe {
             // Both invalid packages remain available for diagnosis.
         }
         let failedCalls = try String(contentsOf: calls, encoding: .utf8).split(separator: "\n")
-        try require(failedCalls == ["300", "60", "60", "300", "60"], "failed fallback retried more than once")
+        try require(failedCalls == ["300", "60"], "failed fallback retried more than once")
         let failedPackages = try FileManager.default.contentsOfDirectory(at: failedOutput, includingPropertiesForKeys: nil)
         try require(failedPackages.count == 2, "failed fallback removed diagnostic packages")
 
