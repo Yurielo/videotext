@@ -5,6 +5,9 @@ struct SeminarTextCoreTranscriptionProbe {
     static func main() async {
         do {
             try await verifyCoreRunner()
+            try await verifyBoundedQualityRecovery()
+            try await verifyIncompleteTranscriptionCheckpoint()
+            try verifyRealCompletedRecoveryIfConfigured()
             try verifyAbsoluteOffsetImport()
             try verifyReverseRawImport()
             try await verifyReleaseBoundary()
@@ -148,11 +151,13 @@ struct SeminarTextCoreTranscriptionProbe {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let media = root.appendingPathComponent("source.mp4")
         try Data("media".utf8).write(to: media)
+        let model = root.appendingPathComponent("core.bin")
+        try Data("core model".utf8).write(to: model)
         let invocationLog = root.appendingPathComponent("invocations.log")
         let executable = root.appendingPathComponent("fake-seminartext")
         let script = """
         #!/bin/sh
-        printf '%s|model=%s\\n' "$*" "$SEMINARTEXT_MODEL" >> '\(invocationLog.path)'
+        printf '%s|model=%s|path=%s\\n' "$*" "$SEMINARTEXT_MODEL" "$PATH" >> '\(invocationLog.path)'
         media="$2"
         mkdir -p "$SEMINARTEXT_OUTPUT/run/structured_timing/parts"
         cat > "$SEMINARTEXT_OUTPUT/run/transcript.srt" <<'SRT'
@@ -172,12 +177,14 @@ struct SeminarTextCoreTranscriptionProbe {
         00:00:00,000 --> 00:00:01,000
         Core transcription.
         SRT
+        touch "$SEMINARTEXT_OUTPUT/run/.seminartext_complete"
         json_sha=$(shasum -a 256 "$SEMINARTEXT_OUTPUT/run/structured_timing/parts/part_0000.json" | awk '{print $1}')
         txt_sha=$(shasum -a 256 "$SEMINARTEXT_OUTPUT/run/structured_timing/parts/part_0000.txt" | awk '{print $1}')
         srt_sha=$(shasum -a 256 "$SEMINARTEXT_OUTPUT/run/structured_timing/parts/part_0000.srt" | awk '{print $1}')
         media_sha=$(shasum -a 256 "$media" | awk '{print $1}')
+        model_sha=$(shasum -a 256 "$SEMINARTEXT_MODEL" | awk '{print $1}')
         cat > "$SEMINARTEXT_OUTPUT/run/structured_timing/manifest.json" <<JSON
-        {"schema_version":1,"artifact_type":"seminartext.selected_whisper_timing","source":{"media_sha256":"$media_sha"},"transcription":{"language":"en"},"parts":[{"id":"part_0000","order":0,"absolute_offset_seconds":0,"selected_timing_absolute_range":{"start_seconds":0,"end_seconds":1},"artifacts":{"txt":{"path":"parts/part_0000.txt","sha256":"$txt_sha"},"srt":{"path":"parts/part_0000.srt","sha256":"$srt_sha"},"json_full":{"path":"parts/part_0000.json","sha256":"$json_sha"}}}]}
+        {"schema_version":1,"artifact_type":"seminartext.selected_whisper_timing","source":{"media_sha256":"$media_sha"},"transcription":{"language":"en","whisper_model":{"sha256":"$model_sha"}},"parts":[{"id":"part_0000","order":0,"absolute_offset_seconds":0,"selected_timing_absolute_range":{"start_seconds":0,"end_seconds":1},"artifacts":{"txt":{"path":"parts/part_0000.txt","sha256":"$txt_sha"},"srt":{"path":"parts/part_0000.srt","sha256":"$srt_sha"},"json_full":{"path":"parts/part_0000.json","sha256":"$json_sha"}}}]}
         JSON
         """
         try script.write(to: executable, atomically: true, encoding: .utf8)
@@ -187,7 +194,7 @@ struct SeminarTextCoreTranscriptionProbe {
             mediaURL: media,
             language: .en,
             executable: executable,
-            modelPath: "/models/core.bin",
+            modelPath: model.path,
             outputRoot: root.appendingPathComponent("seminartext-output")
         )
         try require(result.srtURL.lastPathComponent == "transcript.srt", "core runner did not select the ordinary SeminarText SRT")
@@ -196,8 +203,15 @@ struct SeminarTextCoreTranscriptionProbe {
         try require(invocation.contains("transcribe"), "core runner did not invoke SeminarText transcribe")
         try require(invocation.contains("--language en"), "core runner did not pass the source language")
         try require(invocation.contains("--no-open"), "core runner did not keep SeminarText headless")
-        try require(invocation.contains("|model=/models/core.bin"), "core runner did not pass the selected Whisper model")
+        try require(invocation.contains("|model=\(model.path)"), "core runner did not pass the selected Whisper model")
         try require(invocation.contains("--structured-timing"), "core runner did not request selected JSON-full from the same Whisper attempt")
+        guard let canonicalFFmpeg = ToolRunner().resolve("ffmpeg") else {
+            throw WorkflowError.missingTool("ffmpeg")
+        }
+        let canonicalDirectory = URL(fileURLWithPath: canonicalFFmpeg).deletingLastPathComponent().path
+        try require(invocation.contains("|path=\(canonicalDirectory):"),
+                    "core runner did not expose the canonical resolved FFmpeg directory to SeminarText")
+        try verifyCompletedRecovery(result: result, media: media, model: model, root: root)
         let importedJSON = try SeminarTextCoreWhisperEvidenceImporter().importSelectedWhisperJSON(
             packageRoot: result.selectedTimingPackageURL,
             expectedMediaURL: media,
@@ -220,6 +234,43 @@ struct SeminarTextCoreTranscriptionProbe {
         let reconciled = try SeminarTextCoreTranscriptionRunner().reconcileForVideoTextTimeline(cues)
         try require(reconciled[1].start == reconciled[0].end, "core timeline did not reconcile a bounded chunk-boundary overlap")
 
+        let splitBoundaryFragments = [
+            SubtitleCue(id: 12, start: 2.82, end: 2.92, text: "Split first"),
+            SubtitleCue(id: 13, start: 2.82, end: 2.92, text: "fragment."),
+            SubtitleCue(id: 14, start: 2.82, end: 3.2, text: "Boundary continuation.")
+        ]
+        let merged = try SeminarTextCoreTranscriptionRunner().reconcileForVideoTextTimeline(splitBoundaryFragments)
+        try require(merged.count == 2 && merged[0].id == 12 && merged[0].text == "Split first fragment."
+                    && merged[1].start == merged[0].end,
+                    "core timeline did not join only adjacent equal short SeminarText boundary fragments")
+
+        let longEqualInterval = [
+            SubtitleCue(id: 15, start: 3, end: 3.3, text: "Long first fragment."),
+            SubtitleCue(id: 16, start: 3, end: 3.3, text: "Long second fragment.")
+        ]
+        do {
+            _ = try SeminarTextCoreTranscriptionRunner().reconcileForVideoTextTimeline(longEqualInterval)
+            throw WorkflowError.processFailed("core timeline accepted a long equal-interval overlap")
+        } catch let error as WorkflowError where error.localizedDescription.contains("accepted") {
+            throw error
+        } catch {
+            // Expected: only short boundary fragments can be joined.
+        }
+
+        let nonAdjacentEqualInterval = [
+            SubtitleCue(id: 17, start: 4, end: 4.1, text: "First fragment."),
+            SubtitleCue(id: 18, start: 4.1, end: 4.2, text: "Bridge."),
+            SubtitleCue(id: 19, start: 4, end: 4.1, text: "Not adjacent.")
+        ]
+        do {
+            _ = try SeminarTextCoreTranscriptionRunner().reconcileForVideoTextTimeline(nonAdjacentEqualInterval)
+            throw WorkflowError.processFailed("core timeline accepted a non-adjacent equal-interval overlap")
+        } catch let error as WorkflowError where error.localizedDescription.contains("accepted") {
+            throw error
+        } catch {
+            // Expected: only immediately adjacent fragments may be merged.
+        }
+
         let malformed = root.appendingPathComponent("malformed.srt")
         try Data("00:00:01,000 --> 00:00:00,000\\nBroken\n".utf8).write(to: malformed)
         do {
@@ -241,6 +292,381 @@ struct SeminarTextCoreTranscriptionProbe {
         } catch {
             // Expected: only tiny chunk-boundary overlaps may be reconciled.
         }
+    }
+
+    private static func verifyCompletedRecovery(
+        result: SeminarTextCoreTranscriptionRunner.Result,
+        media: URL,
+        model: URL,
+        root: URL
+    ) throws {
+        let runner = SeminarTextCoreTranscriptionRunner()
+        let outputRoot = root.appendingPathComponent("seminartext-output")
+        let recovered = try runner.recoverCompletedResult(
+            mediaURL: media,
+            language: .en,
+            modelPath: model.path,
+            outputRoot: outputRoot
+        )
+        try require(recovered?.srtURL.standardizedFileURL == result.srtURL.standardizedFileURL,
+                    "completed matching SeminarText package was not recovered")
+
+        let fixtureRoot = root.appendingPathComponent("recovery-fixtures", isDirectory: true)
+        let sourcePackage = result.outputDirectory
+        func copiedPackage(_ name: String) throws -> URL {
+            let destination = fixtureRoot
+                .appendingPathComponent("core-transcription-\(name)", isDirectory: true)
+                .appendingPathComponent("run", isDirectory: true)
+            try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: sourcePackage, to: destination)
+            return destination
+        }
+        func modifyManifest(in package: URL, _ body: (inout [String: Any]) -> Void) throws {
+            let manifestURL = package.appendingPathComponent("structured_timing/manifest.json")
+            var manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as! [String: Any]
+            body(&manifest)
+            try JSONSerialization.data(withJSONObject: manifest).write(to: manifestURL, options: .atomic)
+        }
+
+        let wrongMedia = try copiedPackage("wrong-media")
+        try modifyManifest(in: wrongMedia) { manifest in
+            var source = manifest["source"] as! [String: Any]
+            source["media_sha256"] = "not-the-current-media"
+            manifest["source"] = source
+        }
+        let mediaMismatchRecovery = try runner.recoverCompletedResult(mediaURL: media, language: .en, modelPath: model.path, outputRoot: fixtureRoot)
+        try require(mediaMismatchRecovery == nil,
+                    "recovery accepted a mismatched source media hash")
+        try FileManager.default.removeItem(at: wrongMedia.deletingLastPathComponent())
+
+        let wrongLanguage = try copiedPackage("wrong-language")
+        try modifyManifest(in: wrongLanguage) { manifest in
+            var transcription = manifest["transcription"] as! [String: Any]
+            transcription["language"] = "ru"
+            manifest["transcription"] = transcription
+        }
+        let languageMismatchRecovery = try runner.recoverCompletedResult(mediaURL: media, language: .en, modelPath: model.path, outputRoot: fixtureRoot)
+        try require(languageMismatchRecovery == nil,
+                    "recovery accepted a mismatched source language")
+        try FileManager.default.removeItem(at: wrongLanguage.deletingLastPathComponent())
+
+        let missingMarker = try copiedPackage("missing-marker")
+        try FileManager.default.removeItem(at: missingMarker.appendingPathComponent(".seminartext_complete"))
+        let incompleteRecovery = try runner.recoverCompletedResult(mediaURL: media, language: .en, modelPath: model.path, outputRoot: fixtureRoot)
+        try require(incompleteRecovery == nil,
+                    "recovery accepted an incomplete SeminarText package")
+        try FileManager.default.removeItem(at: missingMarker.deletingLastPathComponent())
+
+        let differentModel = root.appendingPathComponent("different-core.bin")
+        try Data("different model".utf8).write(to: differentModel)
+        let modelMismatch = try copiedPackage("wrong-model")
+        let modelMismatchRecovery = try runner.recoverCompletedResult(
+            mediaURL: media,
+            language: .en,
+            modelPath: differentModel.path,
+            outputRoot: fixtureRoot
+        )
+        try require(modelMismatchRecovery == nil,
+                    "recovery accepted a completed package from a different Whisper model")
+        try FileManager.default.removeItem(at: modelMismatch.deletingLastPathComponent())
+
+        let corrupt = try copiedPackage("corrupt-loop")
+        try fuzzyLoopSRT.write(to: corrupt.appendingPathComponent("transcript.srt"), atomically: true, encoding: .utf8)
+        let corruptResult = SeminarTextCoreTranscriptionRunner.Result(
+            srtURL: corrupt.appendingPathComponent("transcript.srt"),
+            outputDirectory: corrupt,
+            selectedTimingPackageURL: corrupt.appendingPathComponent("structured_timing")
+        )
+        let corruptIssue = try runner.qualityRecoveryIssue(in: corruptResult)
+        try require(corruptIssue != nil,
+                    "fuzzy-loop test package was not recognized as quality-invalid")
+        let rejectedCorrupt = try runner.recoverCompletedResult(
+            mediaURL: media, language: .en, modelPath: model.path, outputRoot: fixtureRoot
+        )
+        try require(rejectedCorrupt == nil, "recovery accepted an identity-matching package with an ASR loop")
+        let validAlongsideCorrupt = try copiedPackage("valid-after-corrupt")
+        let recoveredValid = try runner.recoverCompletedResult(
+            mediaURL: media, language: .en, modelPath: model.path, outputRoot: fixtureRoot
+        )
+        try require(recoveredValid?.srtURL.standardizedFileURL == validAlongsideCorrupt.appendingPathComponent("transcript.srt").standardizedFileURL,
+                    "invalid old package made the valid recovered package ambiguous")
+        try FileManager.default.removeItem(at: corrupt.deletingLastPathComponent())
+        try FileManager.default.removeItem(at: validAlongsideCorrupt.deletingLastPathComponent())
+
+        _ = try copiedPackage("first")
+        _ = try copiedPackage("second")
+        do {
+            _ = try runner.recoverCompletedResult(mediaURL: media, language: .en, modelPath: model.path, outputRoot: fixtureRoot)
+            throw WorkflowError.processFailed("recovery permitted a fresh ASR after ambiguous completed SeminarText packages")
+        } catch let error as WorkflowError where error.localizedDescription.contains("permitted a fresh ASR") {
+            throw error
+        } catch {
+            // Expected: matching multiple completed packages must fail closed.
+        }
+    }
+
+    private static let fuzzyLoopSRT = """
+    00:00:00,000 --> 00:00:04,000
+    И с чего начать хотелось с того что самые большие ценности в нашей жизни не материальные
+
+    00:00:04,000 --> 00:00:08,000
+    И с чего же начать хотелось с того что самые большие ценности в нашей жизни вовсе не материальные
+
+    00:00:08,000 --> 00:00:12,000
+    И с чего начать мне хотелось с того что самые большие ценности в нашей жизни обычно не материальные
+
+    00:00:12,000 --> 00:00:16,000
+    И все таки с чего начать хотелось с того что самые большие ценности в нашей жизни не бывают материальными
+
+    00:00:16,000 --> 00:00:20,000
+    Затем лектор переходит к следующему разделу и показывает таблицу
+    """
+
+    private static func verifyBoundedQualityRecovery() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("videotext-core-quality-recovery-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let media = root.appendingPathComponent("source.mp4")
+        let model = root.appendingPathComponent("model.bin")
+        let bad = root.appendingPathComponent("bad.srt")
+        let good = root.appendingPathComponent("good.srt")
+        let calls = root.appendingPathComponent("calls.txt")
+        try Data("quality-media".utf8).write(to: media)
+        try Data("quality-model".utf8).write(to: model)
+        try fuzzyLoopSRT.write(to: bad, atomically: true, encoding: .utf8)
+        try Data("00:00:00,000 --> 00:00:01,000\nClear transcription.\n".utf8).write(to: good)
+
+        func fakeExecutable(
+            _ name: String,
+            shortResult: URL,
+            ordinaryQualityExit: Bool = false,
+            ordinaryFailure: String? = nil
+        ) throws -> URL {
+            let executable = root.appendingPathComponent(name)
+            let script = """
+            #!/bin/sh
+            printf '%s\\n' "${SEMINARTEXT_CHUNK_SECONDS:-300}" >> '\(calls.path)'
+            if [ "${SEMINARTEXT_CHUNK_SECONDS:-300}" != 60 ] && [ '\(ordinaryQualityExit ? "1" : "0")' = 1 ]; then
+              echo 'ASR quality gate: REJECT reason=fuzzy_loop' >&2
+              echo 'Ошибка: фрагмент остаётся подозрительным после повтора. Повторите с SEMINARTEXT_CHUNK_SECONDS=60.' >&2
+              exit 1
+            fi
+            if [ "${SEMINARTEXT_CHUNK_SECONDS:-300}" != 60 ] && [ -n '\(ordinaryFailure ?? "")' ]; then
+              echo '\(ordinaryFailure ?? "")' >&2
+              exit 2
+            fi
+            mkdir -p "$SEMINARTEXT_OUTPUT/run/structured_timing"
+            if [ "${SEMINARTEXT_CHUNK_SECONDS:-300}" = 60 ]; then
+              cp '\(shortResult.path)' "$SEMINARTEXT_OUTPUT/run/transcript.srt"
+            else
+              cp '\(bad.path)' "$SEMINARTEXT_OUTPUT/run/transcript.srt"
+            fi
+            touch "$SEMINARTEXT_OUTPUT/run/.seminartext_complete"
+            media_sha=$(shasum -a 256 "$2" | awk '{print $1}')
+            model_sha=$(shasum -a 256 "$SEMINARTEXT_MODEL" | awk '{print $1}')
+            cat > "$SEMINARTEXT_OUTPUT/run/structured_timing/manifest.json" <<JSON
+            {"source":{"media_sha256":"$media_sha"},"transcription":{"language":"en","whisper_model":{"sha256":"$model_sha"}}}
+            JSON
+            """
+            try script.write(to: executable, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+            return executable
+        }
+
+        let runner = SeminarTextCoreTranscriptionRunner()
+        let goodExecutable = try fakeExecutable("fake-good", shortResult: good)
+        let outputRoot = root.appendingPathComponent("recovered", isDirectory: true)
+        let recovered = try await runner.transcribeWithQualityRecovery(
+            mediaURL: media, language: .en, executable: goodExecutable,
+            modelPath: model.path, outputRoot: outputRoot, preferShortChunks: false
+        )
+        let recoveredIssue = try runner.qualityRecoveryIssue(in: recovered)
+        try require(recoveredIssue == nil, "60-second fallback retained the ASR loop")
+        let successfulCalls = try String(contentsOf: calls, encoding: .utf8).split(separator: "\n")
+        try require(successfulCalls == ["300", "60"], "quality fallback did not run exactly once at 60 seconds")
+        let retainedPackages = try FileManager.default.contentsOfDirectory(at: outputRoot, includingPropertiesForKeys: nil)
+        try require(retainedPackages.count == 2, "quality fallback removed the rejected diagnostic package")
+
+        try Data().write(to: calls)
+        let upstreamQualityExecutable = try fakeExecutable(
+            "fake-upstream-quality", shortResult: good, ordinaryQualityExit: true
+        )
+        let upstreamOutput = root.appendingPathComponent("upstream-quality", isDirectory: true)
+        let upstreamRecovered = try await runner.transcribeWithQualityRecovery(
+            mediaURL: media, language: .en, executable: upstreamQualityExecutable,
+            modelPath: model.path, outputRoot: upstreamOutput, preferShortChunks: false
+        )
+        let upstreamIssue = try runner.qualityRecoveryIssue(in: upstreamRecovered)
+        try require(upstreamIssue == nil,
+                    "nonzero SeminarText quality recovery did not return the 60-second result")
+        let upstreamCalls = try String(contentsOf: calls, encoding: .utf8).split(separator: "\n")
+        try require(upstreamCalls == ["300", "60"],
+                    "nonzero SeminarText quality failure did not perform exactly one 60-second retry")
+
+        try Data().write(to: calls)
+        let unrelatedFailure = try fakeExecutable(
+            "fake-unrelated-failure", shortResult: good, ordinaryFailure: "network unavailable"
+        )
+        do {
+            _ = try await runner.transcribeWithQualityRecovery(
+                mediaURL: media, language: .en, executable: unrelatedFailure,
+                modelPath: model.path, outputRoot: root.appendingPathComponent("unrelated-failure"), preferShortChunks: false
+            )
+            throw WorkflowError.processFailed("unrelated SeminarText failure triggered a retry")
+        } catch let error as WorkflowError where error.localizedDescription.contains("unrelated SeminarText failure triggered a retry") {
+            throw error
+        } catch {
+            // Only the explicit upstream quality marker is eligible for fallback.
+        }
+        let unrelatedCalls = try String(contentsOf: calls, encoding: .utf8).split(separator: "\n")
+        try require(unrelatedCalls == ["300"], "unrelated SeminarText failure launched a fallback")
+
+        try Data().write(to: calls)
+        let badExecutable = try fakeExecutable("fake-bad", shortResult: bad)
+        let resumeOutput = root.appendingPathComponent("resume-failed", isDirectory: true)
+        do {
+            _ = try await runner.transcribeWithQualityRecovery(
+                mediaURL: media, language: .en, executable: badExecutable,
+                modelPath: model.path, outputRoot: resumeOutput, preferShortChunks: true
+            )
+            throw WorkflowError.processFailed("invalid resumed package was accepted")
+        } catch let error as WorkflowError where error.localizedDescription.contains("invalid resumed package was accepted") {
+            throw error
+        } catch {
+            // A resumed invalid project receives exactly one short attempt.
+        }
+        let resumeCalls = try String(contentsOf: calls, encoding: .utf8).split(separator: "\n")
+        try require(resumeCalls == ["60"], "resume reran default chunks or retried short chunks")
+        let resumePackages = try FileManager.default.contentsOfDirectory(at: resumeOutput, includingPropertiesForKeys: nil)
+        try require(resumePackages.count == 1, "failed resume lost its diagnostic package")
+
+        try Data().write(to: calls)
+        let failedOutput = root.appendingPathComponent("failed", isDirectory: true)
+        do {
+            _ = try await runner.transcribeWithQualityRecovery(
+                mediaURL: media, language: .en, executable: badExecutable,
+                modelPath: model.path, outputRoot: failedOutput, preferShortChunks: false
+            )
+            throw WorkflowError.processFailed("rejected 60-second fallback was accepted")
+        } catch let error as WorkflowError where error.localizedDescription.contains("rejected 60-second fallback was accepted") {
+            throw error
+        } catch {
+            // Both invalid packages remain available for diagnosis.
+        }
+        let failedCalls = try String(contentsOf: calls, encoding: .utf8).split(separator: "\n")
+        try require(failedCalls == ["300", "60"], "failed fallback retried more than once")
+        let failedPackages = try FileManager.default.contentsOfDirectory(at: failedOutput, includingPropertiesForKeys: nil)
+        try require(failedPackages.count == 2, "failed fallback removed diagnostic packages")
+
+        let malformed = root.appendingPathComponent("malformed.srt")
+        try Data("broken SRT".utf8).write(to: malformed)
+        let malformedPackage = SeminarTextCoreTranscriptionRunner.Result(
+            srtURL: malformed, outputDirectory: root, selectedTimingPackageURL: root
+        )
+        do {
+            _ = try runner.qualityRecoveryIssue(in: malformedPackage)
+            throw WorkflowError.processFailed("malformed SeminarText SRT was treated as quality PASS")
+        } catch let error as WorkflowError where error.localizedDescription.contains("treated as quality PASS") {
+            throw error
+        } catch {
+            // Parsing failures must propagate before output publication.
+        }
+    }
+
+    private static func verifyIncompleteTranscriptionCheckpoint() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("videotext-mixed-transcription-checkpoint-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let media = root.appendingPathComponent("source.mp4")
+        try Data("disposable source".utf8).write(to: media)
+        let project = root.appendingPathComponent("project", isDirectory: true)
+        let store = ProjectStore(history: ProjectHistoryStore(indexURL: root.appendingPathComponent("history.json")))
+        var manifest = try store.ensureProject(at: project, mediaURL: media, mode: .resumeProject)
+        let layout = ProjectLayout(root: project)
+        try SRTService().writePreservingIDs(
+            [SubtitleCue(id: 1, start: 0, end: 1, text: "New transcription.")],
+            to: layout.fullSRTURL
+        )
+        let oldWhisper: [String: Any] = [
+            "transcription": [["tokens": [[
+                "text": " Old transcription.", "offsets": ["from": 0, "to": 1000]
+            ]]]]
+        ]
+        try JSONSerialization.data(withJSONObject: oldWhisper).write(to: layout.whisperJSONURL)
+        let fullHash = SelectedTimingHash.file(layout.fullSRTURL)
+        let jsonHash = SelectedTimingHash.file(layout.whisperJSONURL)
+        let settings = WorkflowSettings(
+            mediaURL: media, projectURL: project, selectedOperations: [.transcribe],
+            mode: .retryFailedOperations, rangeStart: 0, rangeEnd: 1,
+            fragmentName: "checkpoint", burnFragmentSubtitles: false,
+            subtitleStyle: .standard, selectedTopicID: nil,
+            whisperModelPath: "", whisperLanguage: "en"
+        )
+        let engine = WorkflowEngine(store: store)
+        for status: ProjectOperationStatus in [.pending, .running, .stopped, .failed] {
+            manifest.workflow?.operations[WorkflowOperation.transcribe.rawValue] = ProjectOperationRecord(
+                status: status, startedAt: Date(), finishedAt: nil,
+                inputSignature: nil, outputPaths: [], errorMessage: nil
+            )
+            let skipped = try await engine.shouldSkip(
+                .transcribe, settings: settings, manifest: manifest,
+                projectURL: project, mediaURL: media, log: { _ in }
+            )
+            try require(!skipped, "mixed transcript/JSON skipped incomplete \(status.rawValue) checkpoint")
+            try require(SelectedTimingHash.file(layout.fullSRTURL) == fullHash
+                        && SelectedTimingHash.file(layout.whisperJSONURL) == jsonHash,
+                        "checkpoint preflight changed existing transcript artifacts")
+        }
+        manifest.workflow?.operations[WorkflowOperation.transcribe.rawValue]?.status = .completed
+        let validReuse = try await engine.shouldSkip(
+            .transcribe, settings: settings, manifest: manifest,
+            projectURL: project, mediaURL: media, log: { _ in }
+        )
+        try require(validReuse, "completed valid transcription did not retain ordinary no-ASR reuse")
+    }
+
+    /// An opt-in read-only check for a retained real SeminarText package. It
+    /// exercises recovery, exact media binding, strict selected-timing import,
+    /// and the VideoText SRT reconciliation without launching ASR or touching
+    /// the project.
+    private static func verifyRealCompletedRecoveryIfConfigured() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let mediaPath = environment["VIDEOTEXT_REAL_RECOVERY_MEDIA"],
+              let outputRootPath = environment["VIDEOTEXT_REAL_RECOVERY_OUTPUT_ROOT"],
+              let modelPath = environment["VIDEOTEXT_REAL_RECOVERY_MODEL"],
+              let languageValue = environment["VIDEOTEXT_REAL_RECOVERY_LANGUAGE"],
+              let language = ArtifactLanguage(rawValue: languageValue) else {
+            return
+        }
+        let media = URL(fileURLWithPath: mediaPath)
+        let outputRoot = URL(fileURLWithPath: outputRootPath, isDirectory: true)
+        let runner = SeminarTextCoreTranscriptionRunner()
+        guard let result = try runner.recoverCompletedResult(
+            mediaURL: media,
+            language: language,
+            modelPath: modelPath,
+            outputRoot: outputRoot
+        ) else {
+            throw WorkflowError.processFailed("real completed SeminarText package was not safely recoverable")
+        }
+        let rawCues = try runner.loadCoreSRT(from: result.srtURL)
+        let reconciled = try runner.reconcileForVideoTextTimeline(rawCues)
+        try require(!rawCues.isEmpty && !reconciled.isEmpty && reconciled.count < rawCues.count,
+                    "real completed package did not contain safely mergeable short equal-boundary fragments")
+        let imported = try SeminarTextCoreWhisperEvidenceImporter().importSelectedWhisperJSON(
+            packageRoot: result.selectedTimingPackageURL,
+            expectedMediaURL: media,
+            expectedLanguage: language
+        )
+        let importedURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("videotext-real-recovered-whisper-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: importedURL) }
+        try imported.write(to: importedURL)
+        try require(SeminarTextCoreWhisperEvidenceImporter().validateLegacyWhisperJSON(at: importedURL),
+                    "real completed package did not pass selected timing JSON integrity validation")
+        print("REAL_COMPLETED_SEMINARTEXT_RECOVERY_PASS cues=\(rawCues.count)->\(reconciled.count)")
     }
 
     private static func verifyReleaseBoundary() async throws {

@@ -256,6 +256,8 @@ final class WorkflowViewModel: ObservableObject {
     @Published var progress = WorkflowProgress.idle
     @Published var alert: AppAlert?
     @Published var log = AppLog()
+    @Published private(set) var processingPresetExecution: ProcessingPresetExecution?
+    @Published private(set) var customProcessingPresets: [ProcessingPresetConfiguration] = []
 
     private let engine: WorkflowEngine
     private let store: ProjectStore
@@ -267,6 +269,9 @@ final class WorkflowViewModel: ObservableObject {
     private let reviewTaskService = ReviewTaskService()
     private let humanReviewService = HumanReviewService()
     private let topicReviewService = TopicReviewService()
+    private let processingPresetStore = ProcessingPresetExecutionStore()
+    private let customProcessingPresetStore = CustomProcessingPresetStore()
+    private var activeProcessingPresetStageToken: UUID?
     private var clockTask: Task<Void, Never>?
     private var runTask: Task<Void, Never>?
     private var simpleRunNeedsPreferenceRestoration = false
@@ -286,6 +291,11 @@ final class WorkflowViewModel: ObservableObject {
         self.engine = engine ?? WorkflowEngine(store: store)
         self.historyStore = historyStore
         whisperModelPath = WhisperModelLocator().bestModelPath() ?? ""
+        do {
+            customProcessingPresets = try customProcessingPresetStore.load()
+        } catch {
+            log.append("Список пользовательских пакетов повреждён и сохранён для восстановления: \(error.localizedDescription)")
+        }
         reloadHistory()
     }
 
@@ -327,6 +337,7 @@ final class WorkflowViewModel: ObservableObject {
             humanReviewCheckpoint = nil
             topicHumanReviewEnabled = true
             topicReviewCheckpoint = nil
+            processingPresetExecution = nil
             subtitleSource = .source
             progress = .idle
             log.append("Создан новый проект: \(automaticProject.path)")
@@ -370,6 +381,46 @@ final class WorkflowViewModel: ObservableObject {
             humanReviewCheckpoint = manifest.humanReviewState?.pendingCheckpoint
             topicHumanReviewEnabled = manifest.topicReviewState?.enabled ?? true
             topicReviewCheckpoint = manifest.topicReviewState?.pendingCheckpoint
+            do {
+                processingPresetExecution = try processingPresetStore.load(from: projectRoot)
+                if var execution = processingPresetExecution,
+                   (execution.status == .running || execution.status == .awaitingReview),
+                   execution.stages.indices.contains(execution.currentStage) {
+                    let stage = execution.stages[execution.currentStage]
+                    let matchingHuman = humanReviewCheckpoint.map {
+                        (stage == .transcription && $0.kind == .sourceTranscript)
+                            || (stage == .translation && $0.kind == .translatedTranscript)
+                    } ?? false
+                    if humanReviewCheckpoint != nil || topicReviewCheckpoint != nil {
+                        let actualIdentity = currentProcessingPresetReviewIdentity()
+                        if (matchingHuman || (stage == .topics && topicReviewCheckpoint != nil))
+                            && ProcessingPresetReviewIdentity.matchesSaved(execution.reviewIdentity, current: actualIdentity) {
+                            execution.status = .awaitingReview
+                        } else {
+                            execution.status = .failed
+                            execution.lastError = "Проверка проекта не относится к сохранённому пакету. Создайте новый план."
+                        }
+                        processingPresetExecution = execution
+                        try processingPresetStore.save(execution, to: projectRoot)
+                    }
+                }
+                if var execution = processingPresetExecution,
+                   execution.status == .complete,
+                   (!processingPresetBindingsMatch(execution, manifest: manifest, projectURL: projectRoot)
+                    || (execution.configuration.goal.needsVideo
+                        && !ProcessingPresetResultIntegrity.matches(execution, projectURL: projectRoot))
+                    || (!execution.configuration.goal.needsVideo
+                        && execution.resultPath != validatedPresetTextResultURL(
+                            execution, manifest: manifest, projectURL: projectRoot
+                        )?.path)) {
+                    execution.status = .failed
+                    execution.lastError = "Входные файлы или результат пакета изменились после проверки."
+                    processingPresetExecution = execution
+                }
+            } catch {
+                processingPresetExecution = nil
+                log.append("Сохранённый пакет повреждён и не будет продолжен: \(error.localizedDescription)")
+            }
             subtitleSource = .source
             progress = .idle
             status = manifest.workflow?.status.title ?? "Готово"
@@ -437,6 +488,10 @@ final class WorkflowViewModel: ObservableObject {
     }
 
     var simpleTopicsWorkflowRequest: SimpleTopicsWorkflowRequest? {
+        simpleTopicsWorkflowRequest(granularity: topicGranularity)
+    }
+
+    func simpleTopicsWorkflowRequest(granularity: TopicGranularity) -> SimpleTopicsWorkflowRequest? {
         guard !isRunning, !isStopping, mediaURL != nil,
               humanReviewCheckpoint == nil, topicReviewCheckpoint == nil,
               let projectURL,
@@ -453,7 +508,7 @@ final class WorkflowViewModel: ObservableObject {
         // approved source. An active revision for the selected variant that
         // claims the canonical path remains fail-closed, including a missing
         // or corrupted snapshot. Other approved variants are independent.
-        let selectedVariantKey = "\(language.rawValue).\(topicGranularity.rawValue)"
+        let selectedVariantKey = "\(language.rawValue).\(granularity.rawValue)"
         guard !hasCanonicalActiveTopicRevision(
             for: selectedVariantKey,
             manifest: manifest,
@@ -483,14 +538,14 @@ final class WorkflowViewModel: ObservableObject {
             topicsDetail: nil,
             discoveredOutputs: [],
             topicLanguage: language,
-            topicGranularity: topicGranularity
+            topicGranularity: granularity
         )
         switch state.artifact(.topics).readiness {
         case .missing, .failed:
             return SimpleTopicsWorkflowRequest(
                 operations: [.topicTimecoding],
                 language: language,
-                granularity: topicGranularity,
+                granularity: granularity,
                 approvedRevisionID: revision.id
             )
         case .ready, .needsReview:
@@ -1482,6 +1537,7 @@ final class WorkflowViewModel: ObservableObject {
 
     func approveHumanReview() {
         guard !isRunning, let projectURL else { return }
+        let approvalIdentity = currentProcessingPresetReviewIdentity()
         do {
             let approval = try humanReviewService.approve(projectURL: projectURL)
             humanReviewCheckpoint = nil
@@ -1491,8 +1547,21 @@ final class WorkflowViewModel: ObservableObject {
             log.append("Human Review завершён: утверждена ревизия \(approval.revision.id).")
             if approval.pendingOperations.isEmpty {
                 status = "Завершено"
+                if processingPresetExecution?.status == .awaitingReview,
+                   processingPresetExecution?.reviewIdentity == approvalIdentity {
+                    completeProcessingPresetStage()
+                }
             } else {
-                startRun(operations: Set(approval.pendingOperations))
+                if var execution = processingPresetExecution, execution.status == .awaitingReview,
+                   execution.reviewIdentity == approvalIdentity {
+                    execution.status = .running
+                    _ = saveProcessingPresetExecution(execution)
+                    activeProcessingPresetStageToken = UUID()
+                }
+                startRun(
+                    operations: Set(approval.pendingOperations),
+                    processingPresetStageToken: activeProcessingPresetStageToken
+                )
             }
         } catch {
             reportPreparationError(error)
@@ -1519,6 +1588,7 @@ final class WorkflowViewModel: ObservableObject {
 
     func approveTopicReview() {
         guard !isRunning, let projectURL else { return }
+        let approvalIdentity = currentProcessingPresetReviewIdentity()
         do {
             let approval = try topicReviewService.approve(projectURL: projectURL)
             topicReviewCheckpoint = nil
@@ -1526,8 +1596,21 @@ final class WorkflowViewModel: ObservableObject {
             log.append("Human Review тематического таймкодинга завершён: утверждено вариантов \(approval.revisions.count).")
             if approval.pendingOperations.isEmpty {
                 status = "Завершено"
+                if processingPresetExecution?.status == .awaitingReview,
+                   processingPresetExecution?.reviewIdentity == approvalIdentity {
+                    completeProcessingPresetStage()
+                }
             } else {
-                startRun(operations: Set(approval.pendingOperations))
+                if var execution = processingPresetExecution, execution.status == .awaitingReview,
+                   execution.reviewIdentity == approvalIdentity {
+                    execution.status = .running
+                    _ = saveProcessingPresetExecution(execution)
+                    activeProcessingPresetStageToken = UUID()
+                }
+                startRun(
+                    operations: Set(approval.pendingOperations),
+                    processingPresetStageToken: activeProcessingPresetStageToken
+                )
             }
         } catch {
             reportPreparationError(error)
@@ -1670,6 +1753,7 @@ final class WorkflowViewModel: ObservableObject {
     private func startRun(
         operations requestedOperations: Set<WorkflowOperation>,
         sourceHumanReviewOverride: Bool? = nil,
+        translationHumanReviewOverride: Bool? = nil,
         whisperLanguageOverride: String? = nil,
         fillerAnalysisBeforeReviewOverride: Bool? = nil,
         topicHumanReviewOverride: Bool? = nil,
@@ -1685,10 +1769,16 @@ final class WorkflowViewModel: ObservableObject {
         requireReusableTranscription: Bool = false,
         preserveReviewPreferences: Bool = false,
         approvedTranscript: ApprovedTranscriptReuseRequirement? = nil,
-        approvedTopicSelection: ApprovedTopicSelectionRequirement? = nil
+        approvedTopicSelection: ApprovedTopicSelectionRequirement? = nil,
+        processingPreset: ProcessingPresetConfiguration? = nil,
+        processingPresetStageToken: UUID? = nil
     ) -> Bool {
+        let presetStageToken = processingPresetStageToken
+            ?? (processingPreset == nil ? nil : activeProcessingPresetStageToken)
         var operations = requestedOperations
-        if operations.contains(.renderFragment), fragmentMuteFillerWords {
+        if operations.contains(.renderFragment), ProcessingPresetRunContract.muteFillers(
+            processingPreset, advanced: fragmentMuteFillerWords
+        ) {
             operations.insert(.detectFillerWords)
         }
         guard !isRunning else { return false }
@@ -1745,7 +1835,8 @@ final class WorkflowViewModel: ObservableObject {
         useQuoteProvenance = false
         let blurStart: TimeInterval?
         let blurEnd: TimeInterval?
-        if (operations.contains(.applyBlur) || (operations.contains(.renderFragment) && fragmentApplyBlur)), blurUsesTimeRange {
+        if processingPreset == nil,
+           (operations.contains(.applyBlur) || (operations.contains(.renderFragment) && fragmentApplyBlur)), blurUsesTimeRange {
             do {
                 blurStart = try TimecodeParser.parse(blurStartText)
                 blurEnd = try TimecodeParser.parse(blurEndText)
@@ -1763,7 +1854,7 @@ final class WorkflowViewModel: ObservableObject {
         }
         let watermarkStart: TimeInterval?
         let watermarkEnd: TimeInterval?
-        if operations.contains(.applyWatermark), watermarkUsesTimeRange {
+        if processingPreset == nil, operations.contains(.applyWatermark), watermarkUsesTimeRange {
             do {
                 watermarkStart = try TimecodeParser.parse(watermarkStartText)
                 watermarkEnd = try TimecodeParser.parse(watermarkEndText)
@@ -1798,37 +1889,39 @@ final class WorkflowViewModel: ObservableObject {
             subtitleSource: subtitleSourceOverride ?? subtitleSource,
             quoteStart: quoteProvenance ? quoteStartText : nil,
             quoteEnd: quoteProvenance ? quoteEndText : nil,
-            speedFactor: speedFactor,
-            speedSource: speedSource,
-            blurSource: blurSource,
-            blurRegion: blurRegion,
-            blurIntensity: blurIntensity,
+            speedFactor: processingPreset?.speedFactor ?? speedFactor,
+            speedSource: ProcessingPresetRunContract.source(processingPreset, advanced: speedSource),
+            blurSource: ProcessingPresetRunContract.source(processingPreset, advanced: blurSource),
+            blurRegion: processingPreset?.blurRegion ?? blurRegion,
+            blurIntensity: processingPreset?.blurIntensity ?? blurIntensity,
             blurStart: blurStart,
             blurEnd: blurEnd,
-            watermarkImageURL: watermarkImageURL,
-            watermarkSource: watermarkSource,
-            watermarkPosition: watermarkPosition,
-            watermarkManualX: watermarkManualX,
-            watermarkManualY: watermarkManualY,
-            watermarkRelativeWidth: watermarkRelativeWidth,
-            watermarkMargin: watermarkMargin,
-            watermarkOpacity: watermarkOpacity,
+            watermarkImageURL: processingPreset?.watermarkImagePath.map { URL(fileURLWithPath: $0) } ?? watermarkImageURL,
+            watermarkSource: ProcessingPresetRunContract.source(processingPreset, advanced: watermarkSource),
+            watermarkPosition: processingPreset?.watermarkPosition ?? watermarkPosition,
+            watermarkManualX: processingPreset == nil ? watermarkManualX : 0.75,
+            watermarkManualY: processingPreset == nil ? watermarkManualY : 0.75,
+            watermarkRelativeWidth: processingPreset == nil ? watermarkRelativeWidth : 0.18,
+            watermarkMargin: processingPreset == nil ? watermarkMargin : 0.03,
+            watermarkOpacity: processingPreset?.watermarkOpacity ?? watermarkOpacity,
             watermarkStart: watermarkStart,
             watermarkEnd: watermarkEnd,
-            watermarkIncludesBlur: watermarkIncludesBlur,
-            watermarkBurnSubtitles: watermarkBurnSubtitles,
-            fillerMode: fillerMode,
-            selectedFillerCandidateIDs: selectedFillerCandidateIDs,
-            audioEnhancementProfile: audioEnhancementProfile,
+            watermarkIncludesBlur: processingPreset?.combineBlur ?? watermarkIncludesBlur,
+            watermarkBurnSubtitles: processingPreset.map { $0.needsSourceSubtitles || $0.needsTranslatedSubtitles } ?? watermarkBurnSubtitles,
+            fillerMode: processingPreset == nil ? fillerMode : .muteAll,
+            selectedFillerCandidateIDs: processingPreset == nil ? selectedFillerCandidateIDs : [],
+            audioEnhancementProfile: processingPreset?.audioEnhancementProfile ?? audioEnhancementProfile,
             dubbingLanguage: dubbingLanguage,
             dubbingMixMode: dubbingMixMode,
             sourceHumanReviewEnabled: sourceHumanReviewOverride ?? sourceHumanReviewEnabled,
-            translationHumanReviewEnabled: translationHumanReviewEnabled,
+            translationHumanReviewEnabled: translationHumanReviewOverride ?? translationHumanReviewEnabled,
             fillerAnalysisBeforeReview: fillerAnalysisBeforeReviewOverride ?? fillerAnalysisBeforeReview,
             topicHumanReviewEnabled: topicHumanReviewOverride ?? topicHumanReviewEnabled,
-            fragmentMuteFillerWords: fragmentMuteFillerWords,
-            fragmentAdjustSpeed: fragmentAdjustSpeed,
-            fragmentApplyBlur: fragmentApplyBlur
+            fragmentMuteFillerWords: ProcessingPresetRunContract.muteFillers(
+                processingPreset, advanced: fragmentMuteFillerWords
+            ),
+            fragmentAdjustSpeed: processingPreset.map { $0.effect == .speed } ?? fragmentAdjustSpeed,
+            fragmentApplyBlur: processingPreset.map { $0.effect == .blur } ?? fragmentApplyBlur
         )
         let policy = WorkflowExecutionPolicy(
             requireReusableTranscription: requireReusableTranscription,
@@ -1838,11 +1931,14 @@ final class WorkflowViewModel: ObservableObject {
         )
 
         let sourceReviewPreferenceToRestore: Bool? = sourceHumanReviewOverride == nil ? nil : sourceHumanReviewEnabled
+        let translationReviewPreferenceToRestore: Bool? = translationHumanReviewOverride == nil
+            ? nil : translationHumanReviewEnabled
         let fillerPreferenceToRestore: Bool? = fillerAnalysisBeforeReviewOverride == nil || preserveReviewPreferences
             ? nil : fillerAnalysisBeforeReview
         let topicReviewPreferenceToRestore: Bool? = topicHumanReviewOverride == nil || preserveReviewPreferences
             ? nil : topicHumanReviewEnabled
-        if sourceReviewPreferenceToRestore != nil || fillerPreferenceToRestore != nil || topicReviewPreferenceToRestore != nil {
+        if sourceReviewPreferenceToRestore != nil || translationReviewPreferenceToRestore != nil
+            || fillerPreferenceToRestore != nil || topicReviewPreferenceToRestore != nil {
             simpleRunNeedsPreferenceRestoration = true
         }
         runTask = Task { [weak self] in
@@ -1867,11 +1963,13 @@ final class WorkflowViewModel: ObservableObject {
                 outcome = .failure(error)
             }
             do {
-                if sourceReviewPreferenceToRestore != nil || fillerPreferenceToRestore != nil || topicReviewPreferenceToRestore != nil {
+                if sourceReviewPreferenceToRestore != nil || translationReviewPreferenceToRestore != nil
+                    || fillerPreferenceToRestore != nil || topicReviewPreferenceToRestore != nil {
                     defer { self.simpleRunNeedsPreferenceRestoration = false }
                     do {
                         try self.restoreReviewPreferences(
                             sourceEnabled: sourceReviewPreferenceToRestore,
+                            translationEnabled: translationReviewPreferenceToRestore,
                             fillerAnalysisBeforeReview: fillerPreferenceToRestore,
                             topicEnabled: topicReviewPreferenceToRestore,
                             projectURL: projectURL
@@ -1906,25 +2004,27 @@ final class WorkflowViewModel: ObservableObject {
                     self.signalWorkflowStop()
                     self.alert = AppAlert(
                         title: "Требуется Human Review",
-                        message: "Проверьте расшифровку \(checkpoint.language.rawValue.uppercased()). После утверждения обработка продолжится автоматически."
+                        message: WorkflowReviewPrompt.human(checkpoint)
                     )
-                } else if result.topicReviewCheckpoint != nil {
+                } else if let checkpoint = result.topicReviewCheckpoint {
                     self.signalWorkflowStop()
                     self.alert = AppAlert(
                         title: "Требуется Human Review тем",
-                        message: "Проверьте подробный, обычный и крупный таймкодинг. После утверждения обработка продолжится автоматически."
+                        message: WorkflowReviewPrompt.topics(checkpoint)
                     )
                 } else {
                     self.signalWorkflowStop()
-                    await self.notifications.notifySuccess(
-                        mediaName: mediaURL.lastPathComponent,
-                        elapsed: result.elapsed,
-                        projectURL: result.projectURL
-                    )
-                    self.alert = AppAlert(
-                        title: "Обработка завершена",
-                        message: "\(mediaURL.lastPathComponent) готово за \(TimeTextFormatter.string(result.elapsed))."
-                    )
+                    if presetStageToken == nil || self.activeProcessingPresetStageToken != presetStageToken {
+                        await self.notifications.notifySuccess(
+                            mediaName: mediaURL.lastPathComponent,
+                            elapsed: result.elapsed,
+                            projectURL: result.projectURL
+                        )
+                        self.alert = AppAlert(
+                            title: "Обработка завершена",
+                            message: "\(mediaURL.lastPathComponent) готово за \(TimeTextFormatter.string(result.elapsed))."
+                        )
+                    }
                 }
             } catch is CancellationError {
                 self.status = "Остановлено"
@@ -1949,6 +2049,24 @@ final class WorkflowViewModel: ObservableObject {
             self.isRunning = false
             self.isStopping = false
             self.loadDetectedResults()
+            if ProcessingPresetRunContract.ownsCompletion(
+                token: presetStageToken,
+                activeToken: self.activeProcessingPresetStageToken,
+                execution: self.processingPresetExecution
+            ) {
+                if self.humanReviewCheckpoint != nil || self.topicReviewCheckpoint != nil {
+                    self.pauseProcessingPresetForReview()
+                } else if self.status == "Завершено" {
+                    self.completeProcessingPresetStage()
+                } else if self.status == "Остановлено" {
+                    if var execution = self.processingPresetExecution {
+                        execution.status = .stopped
+                        _ = self.saveProcessingPresetExecution(execution)
+                    }
+                } else if self.status == "Ошибка" || self.status == "Перевод не выполнен" {
+                    self.failProcessingPreset(self.alert?.message ?? "Этап пакета завершился с ошибкой.")
+                }
+            }
         }
         return true
     }
@@ -1956,6 +2074,7 @@ final class WorkflowViewModel: ObservableObject {
     func restoreSourceHumanReviewPreference(_ enabled: Bool, projectURL: URL) throws {
         try restoreReviewPreferences(
             sourceEnabled: enabled,
+            translationEnabled: nil,
             fillerAnalysisBeforeReview: nil,
             topicEnabled: nil,
             projectURL: projectURL
@@ -1964,6 +2083,7 @@ final class WorkflowViewModel: ObservableObject {
 
     private func restoreReviewPreferences(
         sourceEnabled: Bool?,
+        translationEnabled: Bool?,
         fillerAnalysisBeforeReview: Bool?,
         topicEnabled: Bool?,
         projectURL: URL
@@ -1972,6 +2092,7 @@ final class WorkflowViewModel: ObservableObject {
             var manifest = try store.load(from: projectURL)
             var humanState = manifest.humanReviewState ?? .newProjectDefault
             if let sourceEnabled { humanState.sourceReviewEnabled = sourceEnabled }
+            if let translationEnabled { humanState.translationReviewEnabled = translationEnabled }
             if let fillerAnalysisBeforeReview {
                 humanState.fillerAnalysisBeforeReview = fillerAnalysisBeforeReview
             }
@@ -1982,6 +2103,7 @@ final class WorkflowViewModel: ObservableObject {
             try store.save(manifest, to: projectURL)
             let restored = try store.load(from: projectURL)
             guard sourceEnabled.map({ restored.humanReviewState?.sourceReviewEnabled == $0 }) ?? true,
+                  translationEnabled.map({ restored.humanReviewState?.translationReviewEnabled == $0 }) ?? true,
                   fillerAnalysisBeforeReview.map({ restored.humanReviewState?.fillerAnalysisBeforeReview == $0 }) ?? true,
                   topicEnabled.map({ restored.topicReviewState?.enabled == $0 }) ?? true else {
                 throw WorkflowError.processFailed("Сохранённые настройки Human Review не совпадают с исходными.")
@@ -2029,6 +2151,629 @@ final class WorkflowViewModel: ObservableObject {
     }
 }
 
+// Thin, review-preserving preset coordinator. Every media stage delegates to
+// the existing WorkflowEngine through startRun; no second media pipeline exists.
+@MainActor
+extension WorkflowViewModel {
+    private func presetSourceRevision(_ manifest: ProjectManifest, projectURL: URL) -> TranscriptRevision? {
+        guard let language = manifest.languageProfile?.effective,
+              let revision = manifest.activeTranscriptRevision(for: language),
+              revision.reviewStatus == .approved,
+              isSimpleApprovedSourceSubtitleReusable(
+                language: language, revisionID: revision.id,
+                manifest: manifest, projectURL: projectURL
+              ) else { return nil }
+        return revision
+    }
+
+    private func presetTopicsReady(
+        _ manifest: ProjectManifest, projectURL: URL, granularity: TopicGranularity
+    ) -> Bool {
+        guard let language = manifest.languageProfile?.effective else { return false }
+        let state = SimpleProjectHomeStateService().make(
+            projectURL: projectURL, manifest: manifest, topicsDetail: nil,
+            discoveredOutputs: [], topicLanguage: language, topicGranularity: granularity
+        )
+        return state.artifact(.topics).readiness == .ready
+    }
+
+    private func presetTranslationReady(_ manifest: ProjectManifest, projectURL: URL) -> Bool {
+        guard let approvedSource = presetSourceRevision(manifest, projectURL: projectURL) else { return false }
+        return ProcessingPresetTranslationEligibility.ready(
+            manifest: manifest, projectURL: projectURL, approvedSource: approvedSource
+        )
+    }
+
+    private func validatedPresetTextResultURL(
+        _ execution: ProcessingPresetExecution, manifest: ProjectManifest, projectURL: URL
+    ) -> URL? {
+        guard !execution.configuration.goal.needsVideo,
+              presetSourceRevision(manifest, projectURL: projectURL) != nil else { return nil }
+        switch execution.configuration.goal {
+        case .translation:
+            guard presetTranslationReady(manifest, projectURL: projectURL) else { return nil }
+        case .topics:
+            guard presetTopicsReady(
+                manifest, projectURL: projectURL,
+                granularity: execution.configuration.topicGranularity
+            ) else { return nil }
+        default: break
+        }
+        return ProcessingPresetTextResult.validatedURL(
+            execution: execution, manifest: manifest, projectURL: projectURL
+        )
+    }
+
+    func processingPresetPlan(_ configuration: ProcessingPresetConfiguration) -> ProcessingPresetPlan {
+        guard let projectURL, let mediaURL,
+              let manifest = try? store.load(from: projectURL) else {
+            return ProcessingPresetPlanner().make(
+                configuration, projectAvailable: false, effectiveLanguage: nil,
+                approvedSource: false, approvedTopics: false, approvedTranslation: false
+            )
+        }
+        let approvedSource = presetSourceRevision(manifest, projectURL: projectURL) != nil
+        let approvedTopics = presetTopicsReady(
+            manifest, projectURL: projectURL,
+            granularity: configuration.scope == .approvedTopic ? .normal : configuration.topicGranularity
+        )
+        let approvedTranslation = presetTranslationReady(manifest, projectURL: projectURL)
+        var plan = ProcessingPresetPlanner().make(
+            configuration, projectAvailable: true,
+            effectiveLanguage: manifest.languageProfile?.effective,
+            approvedSource: approvedSource, approvedTopics: approvedTopics,
+            approvedTranslation: approvedTranslation
+        )
+        if plan.blocker == nil,
+           let blocker = ProcessingPresetTextResult.reusedOutputBlocker(
+            configuration: configuration, manifest: manifest, projectURL: projectURL,
+            approvedSource: approvedSource, approvedTopics: approvedTopics
+           ) {
+            plan.blocker = blocker
+        }
+        if !ProcessingPresetInputIdentity.sourceMatches(manifest: manifest, mediaURL: mediaURL, store: store) {
+            plan.blocker = "Исходное видео изменилось после создания проекта. Откройте правильный проект; готовый результат не будет повторно использован."
+        }
+        if configuration.goal.needsTranscript || configuration.scope != .fullVideo || configuration.effect == .speed {
+            if let language = manifest.languageProfile?.effective,
+               let active = manifest.activeTranscriptRevision(for: language),
+               active.reviewStatus == .approved, !approvedSource {
+                plan.blocker = "Утверждённая расшифровка не совпадает с проверенными исходными файлами. Восстановите проект; повторный ASR не запускается."
+            }
+        }
+        if configuration.goal == .topics, let language = manifest.languageProfile?.effective,
+           hasCanonicalActiveTopicRevision(
+            for: "\(language.rawValue).\(configuration.topicGranularity.rawValue)",
+            manifest: manifest, projectURL: projectURL
+           ), !approvedTopics {
+            plan.blocker = "Утверждённый снимок тем повреждён или недоступен. Восстановите файлы проекта."
+        }
+        if configuration.scope == .approvedTopic, plan.blocker == nil,
+           let language = manifest.languageProfile?.effective,
+           let snapshot = try? WorkflowEngine.approvedTopicSnapshot(
+            manifest: manifest, projectURL: projectURL, language: language, granularity: .normal
+           ), !snapshot.file.topics.contains(where: { $0.id == configuration.topicID }) {
+            plan.blocker = "Выбранная тема отсутствует в утверждённом снимке обычных тем."
+        }
+        if configuration.goal.needsTranslation,
+           let language = manifest.languageProfile?.effective,
+           let active = manifest.activeTranscriptRevision(for: language.translationTarget),
+           active.reviewStatus == .approved, !approvedTranslation {
+            plan.blocker = "Утверждённый перевод не совпадает с проверенными файлами проекта. Восстановите проект."
+        }
+        if let pending = manifest.humanReviewState?.pendingCheckpoint,
+           processingPresetExecution?.projectPath != projectURL.standardizedFileURL.path {
+            plan.blocker = "Завершите текущую проверку \(pending.language.rawValue.uppercased()) перед новым пакетом."
+        }
+        if manifest.topicReviewState?.pendingCheckpoint != nil,
+           processingPresetExecution?.projectPath != projectURL.standardizedFileURL.path {
+            plan.blocker = "Завершите текущую проверку тем перед новым пакетом."
+        }
+        if plan.blocker == nil, plan.stages == [.render],
+           let previous = processingPresetExecution, previous.status == .complete,
+           previous.projectPath == projectURL.standardizedFileURL.path,
+           previous.configuration.sameOutcome(as: configuration),
+           processingPresetBindingsMatch(previous, manifest: manifest, projectURL: projectURL),
+           ProcessingPresetResultIntegrity.matches(previous, projectURL: projectURL) {
+            plan.stages.removeAll()
+            plan.reused.append("Проверенное готовое видео")
+        }
+        return plan
+    }
+
+    @discardableResult
+    func saveCustomProcessingPreset(_ configuration: ProcessingPresetConfiguration) -> Bool {
+        let name = configuration.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            reportPreparationError(WorkflowError.processFailed("Введите название пользовательского пакета."))
+            return false
+        }
+        var checked = configuration.portableForSaving()
+        checked.name = name
+        let compatibility = ProcessingPresetPlanner().validatePortable(checked)
+        guard let blocker = compatibility.blocker else {
+            do {
+                var presets = customProcessingPresets
+                if let index = presets.firstIndex(where: { $0.id == checked.id }) {
+                    presets[index] = checked
+                } else {
+                    presets.append(checked)
+                }
+                try customProcessingPresetStore.save(presets)
+                customProcessingPresets = presets
+                return true
+            } catch {
+                reportPreparationError(error)
+                return false
+            }
+        }
+        reportPreparationError(WorkflowError.processFailed(blocker))
+        return false
+    }
+
+    func deleteCustomProcessingPreset(id: UUID) {
+        do {
+            let presets = customProcessingPresets.filter { $0.id != id }
+            try customProcessingPresetStore.save(presets)
+            customProcessingPresets = presets
+        } catch { reportPreparationError(error) }
+    }
+
+    @discardableResult
+    func startProcessingPreset(_ configuration: ProcessingPresetConfiguration) -> Bool {
+        guard !isRunning, !isStopping, humanReviewCheckpoint == nil,
+              topicReviewCheckpoint == nil, let projectURL else { return false }
+        let plan = processingPresetPlan(configuration)
+        guard let blocker = plan.blocker else {
+            do {
+                let previous = processingPresetExecution
+                var execution = ProcessingPresetExecution(
+                    projectPath: projectURL.standardizedFileURL.path,
+                    configuration: configuration, stages: plan.stages
+                )
+                if let manifest = try? store.load(from: projectURL) {
+                    pinProcessingPresetRevisions(&execution, manifest: manifest, projectURL: projectURL)
+                }
+                execution.watermarkSHA256 = try ProcessingPresetInputIdentity.watermarkDigest(configuration)
+                if plan.stages.isEmpty, configuration.goal.needsVideo,
+                   let previous, previous.status == .complete,
+                   previous.projectPath == projectURL.standardizedFileURL.path,
+                   previous.configuration.sameOutcome(as: configuration),
+                   ProcessingPresetInputIdentity.watermarkMatches(previous),
+                   (try? store.load(from: projectURL)).map({
+                       processingPresetBindingsMatch(previous, manifest: $0, projectURL: projectURL)
+                   }) == true,
+                   ProcessingPresetResultIntegrity.matches(previous, projectURL: projectURL) {
+                    execution.resultPath = previous.resultPath
+                    execution.resultSHA256 = previous.resultSHA256
+                }
+                try processingPresetStore.save(execution, to: projectURL)
+                processingPresetExecution = execution
+                if execution.stages.isEmpty {
+                    finishProcessingPreset()
+                    return true
+                }
+                return startNextProcessingPresetStage()
+            } catch {
+                reportPreparationError(error)
+                return false
+            }
+        }
+        reportPreparationError(WorkflowError.processFailed(blocker))
+        return false
+    }
+
+    @discardableResult
+    func resumeProcessingPreset() -> Bool {
+        guard !isRunning, !isStopping, let projectURL,
+              var execution = processingPresetExecution,
+              execution.projectPath == projectURL.standardizedFileURL.path,
+              execution.status != .complete else { return false }
+        guard let manifest = try? store.load(from: projectURL),
+              processingPresetBindingsMatch(execution, manifest: manifest, projectURL: projectURL) else {
+            failProcessingPreset("Ревизии проекта изменились после сохранения пакета. Создайте новый план.")
+            return false
+        }
+        if humanReviewCheckpoint != nil || topicReviewCheckpoint != nil {
+            status = "Ожидает проверки"
+            return false
+        }
+        let plan = processingPresetPlan(execution.configuration)
+        if let blocker = plan.blocker {
+            reportPreparationError(WorkflowError.processFailed(blocker))
+            return false
+        }
+        if processingPresetStageIsComplete(execution) {
+            pinProcessingPresetRevisions(&execution, manifest: manifest, projectURL: projectURL)
+            execution.currentStage += 1
+            execution.status = .running
+            execution.stageStartedAt = nil
+            execution.reviewIdentity = nil
+            do {
+                try processingPresetStore.save(execution, to: projectURL)
+                processingPresetExecution = execution
+            } catch { reportPreparationError(error); return false }
+        }
+        return startNextProcessingPresetStage()
+    }
+
+    private func processingPresetStageIsComplete(_ execution: ProcessingPresetExecution) -> Bool {
+        guard let projectURL,
+              let manifest = try? store.load(from: projectURL),
+              execution.stages.indices.contains(execution.currentStage) else { return false }
+        let stage = execution.stages[execution.currentStage]
+        switch stage {
+        case .transcription:
+            return presetSourceRevision(manifest, projectURL: projectURL) != nil
+        case .topics:
+            return presetTopicsReady(
+                manifest, projectURL: projectURL,
+                granularity: execution.configuration.topicGranularity
+            )
+        case .translation:
+            return presetTranslationReady(manifest, projectURL: projectURL)
+        case .render:
+            guard let output = ProcessingPresetOutputSelection.select(execution, manifest: manifest),
+                  execution.resultPath == output.path else { return false }
+            return ProcessingPresetResultIntegrity.matches(execution, projectURL: projectURL)
+        }
+    }
+
+    private func saveProcessingPresetExecution(_ execution: ProcessingPresetExecution) -> Bool {
+        guard let projectURL else { return false }
+        do {
+            try processingPresetStore.save(execution, to: projectURL)
+            processingPresetExecution = execution
+            return true
+        } catch {
+            reportPreparationError(error)
+            return false
+        }
+    }
+
+    private func pinProcessingPresetRevisions(
+        _ execution: inout ProcessingPresetExecution, manifest: ProjectManifest, projectURL: URL
+    ) {
+        let config = execution.configuration
+        if let source = presetSourceRevision(manifest, projectURL: projectURL) {
+            execution.sourceRevisionID = source.id
+        }
+        if config.goal.needsTranslation, presetTranslationReady(manifest, projectURL: projectURL),
+           let language = manifest.languageProfile?.effective {
+            execution.translationRevisionID = manifest.activeTranscriptRevision(for: language.translationTarget)?.id
+        }
+        if config.goal == .topics || config.scope == .approvedTopic,
+           let language = manifest.languageProfile?.effective {
+            let granularity: TopicGranularity = config.scope == .approvedTopic ? .normal : config.topicGranularity
+            if presetTopicsReady(manifest, projectURL: projectURL, granularity: granularity) {
+                execution.topicRevisionID = manifest.topicReviewState?
+                    .activeRevisionIDs["\(language.rawValue).\(granularity.rawValue)"]
+            }
+        }
+    }
+
+    private func processingPresetBindingsMatch(
+        _ execution: ProcessingPresetExecution, manifest: ProjectManifest, projectURL: URL
+    ) -> Bool {
+        guard let mediaURL,
+              ProcessingPresetInputIdentity.sourceMatches(manifest: manifest, mediaURL: mediaURL, store: store),
+              ProcessingPresetInputIdentity.watermarkMatches(execution) else { return false }
+        if let sourceID = execution.sourceRevisionID,
+           presetSourceRevision(manifest, projectURL: projectURL)?.id != sourceID { return false }
+        if let translationID = execution.translationRevisionID {
+            guard let language = manifest.languageProfile?.effective,
+                  presetTranslationReady(manifest, projectURL: projectURL),
+                  manifest.activeTranscriptRevision(for: language.translationTarget)?.id == translationID else { return false }
+        }
+        if let topicID = execution.topicRevisionID {
+            let granularity: TopicGranularity = execution.configuration.scope == .approvedTopic
+                ? .normal : execution.configuration.topicGranularity
+            guard let language = manifest.languageProfile?.effective,
+                  presetTopicsReady(manifest, projectURL: projectURL, granularity: granularity),
+                  manifest.topicReviewState?.activeRevisionIDs[
+                    "\(language.rawValue).\(granularity.rawValue)"
+                  ] == topicID else { return false }
+        }
+        return true
+    }
+
+    private func startNextProcessingPresetStage() -> Bool {
+        guard !isRunning, !isStopping, var execution = processingPresetExecution,
+              let projectURL, let manifest = try? store.load(from: projectURL),
+              humanReviewCheckpoint == nil, topicReviewCheckpoint == nil else { return false }
+        guard processingPresetBindingsMatch(execution, manifest: manifest, projectURL: projectURL) else {
+            failProcessingPreset("Ревизии проекта изменились после сохранения пакета. Создайте новый план.")
+            return false
+        }
+        guard execution.stages.indices.contains(execution.currentStage) else {
+            finishProcessingPreset()
+            return true
+        }
+        let stage = execution.stages[execution.currentStage]
+        let config = execution.configuration
+        let stagePlan = processingPresetPlan(config)
+        if let blocker = stagePlan.blocker {
+            failProcessingPreset(blocker)
+            return false
+        }
+        execution.status = .running
+        execution.stageStartedAt = Date().addingTimeInterval(-1)
+        execution.lastError = nil
+        guard saveProcessingPresetExecution(execution) else { return false }
+        let token = UUID()
+        activeProcessingPresetStageToken = token
+        let started: Bool
+        switch stage {
+        case .transcription:
+            if presetSourceRevision(manifest, projectURL: projectURL) != nil {
+                completeProcessingPresetStage()
+                return true
+            }
+            started = startRun(
+                operations: [.validateTimeline], sourceHumanReviewOverride: true,
+                whisperLanguageOverride: config.sourceLanguage,
+                fillerAnalysisBeforeReviewOverride: false,
+                preserveReviewPreferences: true,
+                processingPresetStageToken: token
+            )
+        case .topics:
+            if presetTopicsReady(manifest, projectURL: projectURL, granularity: config.topicGranularity) {
+                completeProcessingPresetStage()
+                return true
+            }
+            guard let request = simpleTopicsWorkflowRequest(granularity: config.topicGranularity) else {
+                failProcessingPreset("Темы нельзя создать: проверьте утверждённую расшифровку и снимок тем.")
+                return false
+            }
+            started = startRun(
+                operations: request.operations, fillerAnalysisBeforeReviewOverride: false,
+                topicHumanReviewOverride: true, topicGranularityOverride: config.topicGranularity,
+                requireReusableTranscription: true, preserveReviewPreferences: true,
+                approvedTranscript: ApprovedTranscriptReuseRequirement(
+                    language: request.language, revisionID: request.approvedRevisionID,
+                    failureContext: "Пакет обработки: темы"
+                ), processingPresetStageToken: token
+            )
+        case .translation:
+            if presetTranslationReady(manifest, projectURL: projectURL) {
+                completeProcessingPresetStage()
+                return true
+            }
+            guard canTranslate else {
+                failProcessingPreset(translationStatus)
+                return false
+            }
+            started = startRun(
+                operations: [.translateTranscript], translationHumanReviewOverride: true,
+                preserveReviewPreferences: true, processingPresetStageToken: token
+            )
+        case .render:
+            started = startProcessingPresetRender(config, manifest: manifest, projectURL: projectURL)
+        }
+        if !started {
+            activeProcessingPresetStageToken = nil
+            failProcessingPreset(alert?.message ?? "Этап пакета не удалось запустить.")
+        }
+        return started
+    }
+
+    private func startProcessingPresetRender(
+        _ config: ProcessingPresetConfiguration, manifest: ProjectManifest, projectURL: URL
+    ) -> Bool {
+        let sourceRevision = presetSourceRevision(manifest, projectURL: projectURL)
+        let sourceLanguage = manifest.languageProfile?.effective
+        if config.needsSourceSubtitles || config.needsTranslatedSubtitles || config.scope != .fullVideo {
+            guard let sourceRevision, let sourceLanguage else {
+                failProcessingPreset("Для видео с субтитрами нужна целая утверждённая расшифровка.")
+                return false
+            }
+            if config.needsTranslatedSubtitles {
+                guard presetTranslationReady(manifest, projectURL: projectURL),
+                      config.targetLanguage == sourceLanguage.translationTarget else {
+                    failProcessingPreset("Переведённые субтитры не утверждены или повреждены.")
+                    return false
+                }
+            }
+            let subtitleSelection: SubtitleSourceSelection = config.needsTranslatedSubtitles
+                ? .approvedTranslation(config.targetLanguage) : .source
+            guard (try? SubtitleSourceResolver.resolve(
+                subtitleSelection, manifest: manifest, projectURL: projectURL
+            )) != nil else {
+                failProcessingPreset("Субтитры выбранного языка не прошли проверку.")
+                return false
+            }
+            let requirement = ApprovedTranscriptReuseRequirement(
+                language: sourceLanguage, revisionID: sourceRevision.id,
+                failureContext: "Пакет обработки: создание видео"
+            )
+            if config.scope == .approvedTopic {
+                guard let topicID = config.topicID,
+                      let snapshot = try? WorkflowEngine.approvedTopicSnapshot(
+                        manifest: manifest, projectURL: projectURL,
+                        language: sourceLanguage, granularity: .normal
+                      ), snapshot.file.topics.contains(where: { $0.id == topicID }) else {
+                    failProcessingPreset("Выбранная тема недоступна в утверждённом снимке.")
+                    return false
+                }
+                return startRun(
+                    operations: [.cutTopic], fillerAnalysisBeforeReviewOverride: false,
+                    subtitleStyleOverride: config.subtitleStyle,
+                    subtitleSourceOverride: subtitleSelection,
+                    artifactLanguageOverride: sourceLanguage,
+                    topicGranularityOverride: .normal,
+                    selectedTopicIDOverride: topicID,
+                    burnFragmentSubtitlesOverride: true,
+                    requireReusableTranscription: true, preserveReviewPreferences: true,
+                    approvedTranscript: requirement,
+                    approvedTopicSelection: ApprovedTopicSelectionRequirement(
+                        language: sourceLanguage, granularity: .normal,
+                        revisionID: snapshot.revision.id, topicID: topicID
+                    ), processingPreset: config
+                )
+            }
+            if config.scope == .timeFragment {
+                guard let duration = manifest.durationSeconds, config.fragmentEnd <= duration + 0.001 else {
+                    failProcessingPreset("Фрагмент выходит за пределы исходного видео.")
+                    return false
+                }
+                return startRun(
+                    operations: [.renderFragment], fillerAnalysisBeforeReviewOverride: false,
+                    subtitleStyleOverride: config.subtitleStyle,
+                    subtitleSourceOverride: subtitleSelection,
+                    artifactLanguageOverride: config.needsTranslatedSubtitles ? config.targetLanguage : sourceLanguage,
+                    rangeStartOverride: config.fragmentStart, rangeEndOverride: config.fragmentEnd,
+                    burnFragmentSubtitlesOverride: config.needsSourceSubtitles || config.needsTranslatedSubtitles,
+                    requireReusableTranscription: true, preserveReviewPreferences: true,
+                    approvedTranscript: requirement, processingPreset: config
+                )
+            }
+            if config.effect == .watermark {
+                return startRun(
+                    operations: [.applyWatermark], subtitleStyleOverride: config.subtitleStyle,
+                    subtitleSourceOverride: subtitleSelection,
+                    artifactLanguageOverride: config.needsTranslatedSubtitles ? config.targetLanguage : sourceLanguage,
+                    preserveReviewPreferences: true, approvedTranscript: requirement,
+                    processingPreset: config
+                )
+            }
+            return startRun(
+                operations: [.burnSubtitles], fillerAnalysisBeforeReviewOverride: false,
+                subtitleStyleOverride: config.subtitleStyle,
+                subtitleSourceOverride: subtitleSelection,
+                requireReusableTranscription: true, preserveReviewPreferences: true,
+                approvedTranscript: requirement, processingPreset: config
+            )
+        }
+        let operation: WorkflowOperation
+        switch config.effect {
+        case .speed: operation = .adjustSpeed
+        case .blur: operation = .applyBlur
+        case .watermark: operation = .applyWatermark
+        case .audioEnhancement: operation = .enhanceAudio
+        case .none: return false
+        }
+        if operation == .adjustSpeed {
+            guard let sourceRevision = presetSourceRevision(manifest, projectURL: projectURL),
+                  let language = manifest.languageProfile?.effective else {
+                failProcessingPreset("Для изменения скорости нужна утверждённая расшифровка и проверенные исходные субтитры.")
+                return false
+            }
+            return startRun(
+                operations: [operation], artifactLanguageOverride: language,
+                requireReusableTranscription: true, preserveReviewPreferences: true,
+                approvedTranscript: ApprovedTranscriptReuseRequirement(
+                    language: language, revisionID: sourceRevision.id,
+                    failureContext: "Пакет обработки: скорость"
+                ), processingPreset: config
+            )
+        }
+        return startRun(operations: [operation], preserveReviewPreferences: true, processingPreset: config)
+    }
+
+    private func completeProcessingPresetStage() {
+        guard var execution = processingPresetExecution else { return }
+        guard let projectURL, let currentManifest = try? store.load(from: projectURL),
+              processingPresetBindingsMatch(execution, manifest: currentManifest, projectURL: projectURL) else {
+            failProcessingPreset("Входные файлы изменились во время выполнения пакета.")
+            return
+        }
+        if execution.stages.indices.contains(execution.currentStage),
+           execution.stages[execution.currentStage] == .render,
+           let output = ProcessingPresetOutputSelection.select(execution, manifest: currentManifest) {
+            // engine.run has completed its strict ffprobe stage before this callback.
+            let report = ProjectLayout(root: projectURL).ffprobeReportURL
+            guard let reportText = try? String(contentsOf: report, encoding: .utf8),
+                  reportText.contains(output.path),
+                  let reportDate = try? report.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+                  reportDate >= (execution.stageStartedAt ?? .distantFuture),
+                  let digest = try? ProcessingPresetResultIntegrity.digest(URL(fileURLWithPath: output.path)) else {
+                failProcessingPreset("Результат видео не имеет актуальной проверки ffprobe.")
+                return
+            }
+            execution.resultPath = output.path
+            execution.resultSHA256 = digest
+            guard saveProcessingPresetExecution(execution) else { return }
+        }
+        guard processingPresetStageIsComplete(execution) else {
+            failProcessingPreset("Этап завершился без проверенного результата. Повторный запуск остановлен.")
+            return
+        }
+        pinProcessingPresetRevisions(&execution, manifest: currentManifest, projectURL: projectURL)
+        execution.currentStage += 1
+        execution.stageStartedAt = nil
+        execution.reviewIdentity = nil
+        execution.status = .running
+        activeProcessingPresetStageToken = nil
+        guard saveProcessingPresetExecution(execution) else { return }
+        _ = startNextProcessingPresetStage()
+    }
+
+    private func pauseProcessingPresetForReview() {
+        guard var execution = processingPresetExecution else { return }
+        execution.status = .awaitingReview
+        execution.reviewIdentity = currentProcessingPresetReviewIdentity()
+        activeProcessingPresetStageToken = nil
+        _ = saveProcessingPresetExecution(execution)
+    }
+
+    private func currentProcessingPresetReviewIdentity() -> String? {
+        if let checkpoint = humanReviewCheckpoint {
+            return "human:\(checkpoint.kind.rawValue):\(checkpoint.language.rawValue):\(checkpoint.revisionID)"
+        }
+        if let checkpoint = topicReviewCheckpoint {
+            return "topics:\(checkpoint.revisionIDs.keys.sorted().map { "\($0)=\(checkpoint.revisionIDs[$0] ?? "")" }.joined(separator: ","))"
+        }
+        return nil
+    }
+
+    private func failProcessingPreset(_ message: String) {
+        guard var execution = processingPresetExecution else { return }
+        execution.status = .failed
+        execution.lastError = message
+        activeProcessingPresetStageToken = nil
+        _ = saveProcessingPresetExecution(execution)
+        status = "Ошибка"
+        alert = AppAlert(title: "Пакет не завершён", message: message)
+    }
+
+    private func finishProcessingPreset() {
+        guard var execution = processingPresetExecution else { return }
+        guard let projectURL, let manifest = try? store.load(from: projectURL),
+              processingPresetBindingsMatch(execution, manifest: manifest, projectURL: projectURL) else {
+            failProcessingPreset("Входные файлы пакета изменились после проверки.")
+            return
+        }
+        if execution.configuration.goal.needsVideo {
+            guard ProcessingPresetResultIntegrity.matches(execution, projectURL: projectURL) else {
+                failProcessingPreset("Результат пакета не прошёл проверку целостности.")
+                return
+            }
+        } else {
+            guard let result = validatedPresetTextResultURL(
+                execution, manifest: manifest, projectURL: projectURL
+            ) else {
+                failProcessingPreset("Текстовый результат выбранного пакета отсутствует или не соответствует утверждённой ревизии.")
+                return
+            }
+            execution.resultPath = result.path
+        }
+        execution.status = .complete
+        activeProcessingPresetStageToken = nil
+        guard saveProcessingPresetExecution(execution) else { return }
+        status = "Завершено"
+        alert = AppAlert(title: "Пакет готов", message: "\(execution.configuration.goal.title) завершён.")
+        if let mediaURL {
+            Task {
+                await notifications.notifySuccess(
+                    mediaName: mediaURL.lastPathComponent,
+                    elapsed: progress.elapsed,
+                    projectURL: projectURL
+                )
+            }
+        }
+    }
+}
+
 extension WorkflowViewModel: ApplicationTerminationHandling {}
 
 struct WorkflowResult {
@@ -2038,6 +2783,23 @@ struct WorkflowResult {
     var elapsed: TimeInterval
     var checkpoint: HumanReviewCheckpoint? = nil
     var topicReviewCheckpoint: TopicReviewCheckpoint? = nil
+}
+
+enum WorkflowReviewPrompt {
+    static func human(_ checkpoint: HumanReviewCheckpoint) -> String {
+        let subject = checkpoint.kind == .translatedTranscript ? "перевод" : "расшифровку"
+        return "Проверьте \(subject) \(checkpoint.language.rawValue.uppercased()). После утверждения обработка продолжится автоматически."
+    }
+
+    static func topics(_ checkpoint: TopicReviewCheckpoint) -> String {
+        let selected: TopicGranularity? = checkpoint.revisionIDs.count == 1
+            ? checkpoint.revisionIDs.keys.first.flatMap {
+                TopicGranularity(rawValue: String($0.split(separator: ".").last ?? ""))
+            } : nil
+        let subject = selected.map { "темы выбранной детализации (\($0.title))" }
+            ?? "подробный, обычный и крупный таймкодинг"
+        return "Проверьте \(subject). После утверждения обработка продолжится автоматически."
+    }
 }
 
 final class WorkflowEngine: @unchecked Sendable {
@@ -2348,35 +3110,57 @@ final class WorkflowEngine: @unchecked Sendable {
                     log("Расшифровка bundled SeminarText: \(seminarText.path)")
                     log("SeminarText runtime identity:\n\(runtimeIdentity)")
                     tracker.update(operation, fraction: 0.05, indeterminate: true)
-                    let coreResult = try await coreSeminarTextTranscription.transcribe(
+                    let coreResult: SeminarTextCoreTranscriptionRunner.Result
+                    if let recovered = try coreSeminarTextTranscription.recoverCompletedResult(
                         mediaURL: mediaURL,
                         language: sourceLanguage,
-                        executable: seminarText,
                         modelPath: modelPath,
-                        outputRoot: layout.seminarTextCoreDirectory,
-                        onLog: { message in
-                            tracker.update(operation, fraction: 0.5, indeterminate: true)
-                            log(message)
-                        }
-                    )
+                        outputRoot: layout.seminarTextCoreDirectory
+                    ) {
+                        coreResult = recovered
+                        log("Восстановлена завершённая расшифровка bundled SeminarText; повторный ASR не запускался.")
+                    } else {
+                        let existingCues = try? srt.load(from: layout.fullSRTURL)
+                        let needsShortChunkRecovery = existingCues.flatMap {
+                            transcriptionQuality.recoveryIssue(cues: $0)
+                        } != nil
+                        coreResult = try await coreSeminarTextTranscription.transcribeWithQualityRecovery(
+                            mediaURL: mediaURL,
+                            language: sourceLanguage,
+                            executable: seminarText,
+                            modelPath: modelPath,
+                            outputRoot: layout.seminarTextCoreDirectory,
+                            preferShortChunks: needsShortChunkRecovery,
+                            onLog: { message in
+                                tracker.update(operation, fraction: 0.5, indeterminate: true)
+                                log(message)
+                            }
+                        )
+                    }
                     let importedCues = try coreSeminarTextTranscription.loadCoreSRT(from: coreResult.srtURL, srt: srt)
                     let cues = try coreSeminarTextTranscription.reconcileForVideoTextTimeline(importedCues)
+                    if let issue = transcriptionQuality.recoveryIssue(cues: cues) {
+                        throw WorkflowError.processFailed("SeminarText сохранил повреждённую расшифровку: \(issue.message). Исходные результаты проекта не заменены.")
+                    }
                     if cues.map(\.start) != importedCues.map(\.start) {
                         log("Скорректированы микроперекрытия на границах фрагментов SeminarText; исходный SRT сохранён в provenance.")
                     }
-                    try srt.writePreservingIDs(cues, to: layout.fullSRTURL)
-                    try writeTranscript(from: cues, to: layout.transcriptURL)
                     let coreWhisperJSON = try SeminarTextCoreWhisperEvidenceImporter().importSelectedWhisperJSON(
                         packageRoot: coreResult.selectedTimingPackageURL,
                         expectedMediaURL: mediaURL,
                         expectedLanguage: sourceLanguage
                     )
-                    try coreWhisperJSON.write(to: layout.whisperJSONURL, options: .atomic)
-                    guard SeminarTextCoreWhisperEvidenceImporter().validateLegacyWhisperJSON(at: layout.whisperJSONURL),
-                          nonemptyFile(layout.fullSRTURL),
-                          nonemptyFile(layout.transcriptURL) else {
+                    let validationURL = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("videotext-core-import-\(UUID().uuidString).json")
+                    defer { try? FileManager.default.removeItem(at: validationURL) }
+                    try coreWhisperJSON.write(to: validationURL, options: .atomic)
+                    guard SeminarTextCoreWhisperEvidenceImporter().validateLegacyWhisperJSON(at: validationURL) else {
                         throw WorkflowError.processFailed("SeminarText не создал полный core transcription package: full.srt, transcript.txt и whisper.json обязательны.")
                     }
+                    try Task.checkCancellation()
+                    try srt.writePreservingIDs(cues, to: layout.fullSRTURL)
+                    try writeTranscript(from: cues, to: layout.transcriptURL)
+                    try coreWhisperJSON.write(to: layout.whisperJSONURL, options: .atomic)
                     let coreEvidence = SeminarTextCoreTranscriptionEvidence(
                         schemaVersion: 1,
                         runtimeIdentity: runtimeIdentity,
@@ -2512,7 +3296,11 @@ final class WorkflowEngine: @unchecked Sendable {
                         )
                         log("Legacy full.srt materialized as the active \(sourceLanguage.rawValue.uppercased()) source without rerunning ASR.")
                     }
-                    guard workingSubtitleMatchesRevision(
+                    guard workingCanonicalSubtitleMatchesRevision(
+                        sourceRevision,
+                        language: sourceLanguage,
+                        projectURL: projectURL
+                    ), workingLocalizedSubtitleMatchesRevision(
                         sourceRevision,
                         language: sourceLanguage,
                         projectURL: projectURL
@@ -2522,8 +3310,8 @@ final class WorkflowEngine: @unchecked Sendable {
                     if current.activeTranscriptRevision(for: targetLanguage)?.origin == .userEdited {
                         throw WorkflowError.processFailed("Перевод содержит ручные правки. Новый профиль перевода не будет автоматически заменять принятую пользователем ревизию.")
                     }
-                    let result: TranslationAdapterResult
-                    let usesLegacyFullSRTPath: Bool
+                    var result: TranslationAdapterResult?
+                    var usesLegacyFullSRTPath = false
                     if isLegacyFullSRTAtEntry {
                         log("Legacy full.srt translation uses the established ownership adapter; ASR is not rerun.")
                         result = try await translationAdapter.translate(
@@ -2551,10 +3339,37 @@ final class WorkflowEngine: @unchecked Sendable {
                             url: layout.selectedTimingSourceUnitsURL,
                             in: projectURL
                         )
-                        let sourceDocument = try selectedTimingTranslation.sourceDocument(
-                            selectedSource,
-                            reconciledWith: activeSourceCues
-                        )
+                        let sourceDocument: TimedSourceDocument?
+                        do {
+                            sourceDocument = try selectedTimingTranslation.sourceDocument(
+                                selectedSource,
+                                reconciledWith: activeSourceCues
+                            )
+                        } catch let incompatibility as SelectedTimingSourceCompatibilityError {
+                            sourceDocument = nil
+                            let fallbackIdentity = "\(sourceRevision.id)|selected-timing-incompatible:\(selectedSource.upstreamManifestSHA256)"
+                            switch incompatibility {
+                            case .temporalCoverage(let cueID):
+                                log("Canonical selected timing verified (manifest \(selectedSource.upstreamManifestSHA256)), but does not cover approved cueId \(cueID). Перевод использует approved SRT ownership adapter; ASR и source artifacts не изменяются.")
+                            }
+                            result = try await translationAdapter.translate(
+                                cues: activeSourceCues,
+                                source: sourceLanguage,
+                                target: targetLanguage,
+                                documentTitle: TranslationContextPlan.documentTitle(for: mediaURL),
+                                sourceIdentity: fallbackIdentity,
+                                checkpointDirectory: layout.translationCacheDirectory(
+                                    source: sourceLanguage,
+                                    target: targetLanguage
+                                ),
+                                onProgress: { tracker.update(operation, fraction: $0) },
+                                onLog: log
+                            )
+                            // Translation Human Review remains enabled here;
+                            // this is not the legacy no-review compatibility path.
+                            usesLegacyFullSRTPath = false
+                        }
+                        if let sourceDocument {
                         log("Перевод \(sourceLanguage.rawValue.uppercased())→\(targetLanguage.rawValue.uppercased()) использует canonical selected timing; TranslateGemma получает только текст unit.")
                         let translated = try await selectedTimingTranslation.translate(
                             sourceDocument: sourceDocument,
@@ -2587,6 +3402,10 @@ final class WorkflowEngine: @unchecked Sendable {
                         result = try translated.adapterResult()
                         tracker.update(operation, fraction: 1)
                         usesLegacyFullSRTPath = false
+                        }
+                    }
+                    guard let result else {
+                        throw WorkflowError.processFailed("Не удалось выбрать безопасный путь перевода.")
                     }
                     try Task.checkCancellation()
                     let report = try registerTranslation(
@@ -3503,6 +4322,38 @@ final class WorkflowEngine: @unchecked Sendable {
         return working == immutable
     }
 
+    private func workingLocalizedSubtitleMatchesRevision(
+        _ revision: TranscriptRevision,
+        language: ArtifactLanguage,
+        projectURL: URL
+    ) -> Bool {
+        let layout = ProjectLayout(root: projectURL)
+        let workingURL = layout.subtitlesURL(language: language)
+        let revisionURL = layout.subtitleRevisionURL(id: revision.id, language: language)
+        guard let working = try? Data(contentsOf: workingURL),
+              let immutable = try? Data(contentsOf: revisionURL) else { return false }
+        return working == immutable
+    }
+
+    private func workingCanonicalSubtitleMatchesRevision(
+        _ revision: TranscriptRevision,
+        language: ArtifactLanguage,
+        projectURL: URL
+    ) -> Bool {
+        let layout = ProjectLayout(root: projectURL)
+        let revisionURL = layout.subtitleRevisionURL(id: revision.id, language: language)
+        guard let working = try? Data(contentsOf: layout.fullSRTURL),
+              let immutable = try? Data(contentsOf: revisionURL) else { return false }
+        return working == immutable
+    }
+
+    private func targetArtifactsAreReady(_ revision: TranscriptRevision, manifest: ProjectManifest) -> Bool {
+        let ids = Set([revision.transcriptArtifactID, revision.subtitleArtifactID])
+        guard ids.count == 2 else { return false }
+        let related = (manifest.artifacts ?? []).filter { ids.contains($0.id) }
+        return Set(related.map(\.id)) == ids && related.allSatisfy { $0.validationStatus == .ready }
+    }
+
     private func restoreCoreWorkflowAfterTranslation(
         projectURL: URL,
         previous: ProjectWorkflowState
@@ -3888,7 +4739,7 @@ final class WorkflowEngine: @unchecked Sendable {
         log("Проверка ffprobe сохранена.")
     }
 
-    private func shouldSkip(
+    func shouldSkip(
         _ operation: WorkflowOperation,
         settings: WorkflowSettings,
         manifest: ProjectManifest,
@@ -3908,6 +4759,11 @@ final class WorkflowEngine: @unchecked Sendable {
                   manifest.languageProfile != nil else { return false }
             return true
         case .transcribe:
+            if let checkpoint = manifest.workflow?.operations[WorkflowOperation.transcribe.rawValue],
+               checkpoint.status != .completed && checkpoint.status != .skipped {
+                log("Предыдущее сохранение расшифровки не завершено; проверяю исходный пакет SeminarText перед восстановлением.")
+                return false
+            }
             guard nonemptyFile(layout.fullSRTURL),
                   nonemptyFile(layout.whisperJSONURL),
                   SeminarTextCoreWhisperEvidenceImporter().validateLegacyWhisperJSON(at: layout.whisperJSONURL) else { return false }
@@ -3965,6 +4821,26 @@ final class WorkflowEngine: @unchecked Sendable {
             } ?? false
             guard (report.status == .ready && report.reviewTaskIDs.isEmpty) || approvedUserEdit else {
                 return false
+            }
+            // A protocol change invalidates machine checkpoints, but must not
+            // make an already approved human target impossible to resume. Its
+            // source/target revision bytes and report lineage are immutable
+            // authority here; pending or stale artifacts still fail closed.
+            if let targetRevision = manifest.activeTranscriptRevision(for: targetLanguage),
+               sourceRevision.reviewStatus == .approved,
+               targetRevision.origin == .userEdited,
+               targetRevision.reviewStatus == .approved,
+               report.schemaVersion == 3,
+               report.sourceLanguage == sourceLanguage,
+               report.targetLanguage == targetLanguage,
+               report.sourceRevisionID == sourceRevision.id,
+               !report.targetRevisionID.isEmpty,
+               workingCanonicalSubtitleMatchesRevision(sourceRevision, language: sourceLanguage, projectURL: projectURL),
+               workingLocalizedSubtitleMatchesRevision(sourceRevision, language: sourceLanguage, projectURL: projectURL),
+               workingLocalizedSubtitleMatchesRevision(targetRevision, language: targetLanguage, projectURL: projectURL),
+               targetArtifactsAreReady(targetRevision, manifest: manifest),
+               TranslationResumeValidator.outputsMatch(report: report, manifest: manifest, layout: layout) {
+                return true
             }
             // An approved translation is intentionally not byte-identical to
             // the machine selected-timing document. Its immutable approved

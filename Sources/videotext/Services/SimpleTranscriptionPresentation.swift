@@ -47,9 +47,43 @@ struct SimpleTranscriptionPresentation {
             display.message = "Расшифровка не завершена. Её можно продолжить в этом проекте."
         } else if alert.title == "Ошибка" || alert.title == "Ошибка обработки" {
             display.title = "Не удалось создать расшифровку"
-            display.message = "Проверьте доступность исходного файла и повторите попытку. Если ошибка повторится, проверьте установку приложения."
+            display.message = Self.displayMessage(for: alert.message)
         }
         return display
+    }
+
+    private static func displayMessage(for workflowMessage: String) -> String {
+        let reason = redactPaths(in: workflowMessage)
+        let normalized = workflowMessage.lowercased()
+        if isSourceUnavailable(normalized) {
+            return "Причина: \(reason)\n\nПроверьте, что исходный файл доступен, и повторите попытку."
+        }
+        if isMissingPackagedComponent(normalized) {
+            return "Причина: \(reason)\n\nПроверьте установку VideoText и повторите попытку."
+        }
+        return "Причина: \(reason)\n\nОткройте папку проекта, чтобы посмотреть журнал, затем повторите попытку."
+    }
+
+    private static func isSourceUnavailable(_ message: String) -> Bool {
+        if message.contains("сначала выберите видео- или аудиофайл") { return true }
+        let refersToSource = message.contains("исходн") || message.contains("медиафайл")
+        let isUnavailable = message.contains("недоступ") || message.contains("не найден") || message.contains("не уда")
+        return refersToSource && isUnavailable
+    }
+
+    private static func isMissingPackagedComponent(_ message: String) -> Bool {
+        message.contains("не найден обязательный инструмент")
+            || message.contains("не найден совместимый компонент seminartext")
+            || (message.contains("ffmpeg") && (message.contains("не установ") || message.contains("не найден")))
+    }
+
+    /// A workflow error can contain an implementation path. The cause remains
+    /// actionable, but the Simple surface should not expose unrelated folders.
+    private static func redactPaths(in message: String) -> String {
+        let pattern = #"(?:file://)?/(?:[^\s:]+/)*[^\s:]+"#
+        guard let expression = try? NSRegularExpression(pattern: pattern) else { return message }
+        let range = NSRange(message.startIndex..., in: message)
+        return expression.stringByReplacingMatches(in: message, range: range, withTemplate: "<путь скрыт>")
     }
 
     private func matches(_ checkpoint: HumanReviewCheckpoint, projectURL: URL?) -> Bool {

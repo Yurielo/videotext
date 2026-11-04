@@ -179,6 +179,15 @@ struct SelectedTimingVerticalSliceProbe {
         let corrected = try SelectedTimingVerticalSlice().sourceDocument(source, reconciledWith: acceptedCues)
         try require(corrected.units[1].text == " Corrected accepted source text.", "accepted source correction was not bound to selected timing")
         try require(corrected.units[1].textSHA256 != source.units[1].textSHA256, "accepted source correction did not invalidate unit cache identity")
+        var temporallyIncompatibleCues = acceptedCues
+        temporallyIncompatibleCues.append(SubtitleCue(id: 99, start: 3.0, end: 3.1, text: "Unmapped approved cue."))
+        do {
+            _ = try SelectedTimingVerticalSlice().sourceDocument(source, reconciledWith: temporallyIncompatibleCues)
+            throw WorkflowError.processFailed("temporally incompatible selected timing unexpectedly reconciled")
+        } catch SelectedTimingSourceCompatibilityError.temporalCoverage(let cueID) {
+            try require(cueID == 99, "selected timing incompatibility reported the wrong approved cue")
+        }
+        print("SELECTED_TIMING_TEMPORAL_COMPATIBILITY_CLASSIFICATION_PASS")
 
         var fillerSource = source
         fillerSource.tokenTimeline = [
@@ -237,6 +246,47 @@ struct SelectedTimingVerticalSliceProbe {
             "collapsed token segment did not use its native source-unit envelope"
         )
         print("COLLAPSED_TOKEN_VALID_SEGMENT_ENVELOPE_PASS")
+        let collapsedBoundaryPackage = root.appendingPathComponent("collapsed-boundary-package")
+        try makeSentenceBoundaryPackage(at: collapsedBoundaryPackage, media: media, firstSentenceCollapsed: true, nextSentenceStart: 200)
+        let collapsedBoundarySource = try importer.importSelectedPackage(
+            packageRoot: collapsedBoundaryPackage, expectedMediaURL: media, expectedLanguage: .en
+        )
+        let expectedCollapsedTokens: [(String, TimeInterval, TimeInterval)] = [
+            (" First", 0.1, 0.1), (".", 0.1, 0.1), (" Second", 0.2, 0.23), (".", 0.23, 0.25)
+        ]
+        try require(
+            collapsedBoundarySource.tokenTimeline.count == expectedCollapsedTokens.count
+                && zip(collapsedBoundarySource.tokenTimeline, expectedCollapsedTokens).allSatisfy {
+                    $0.text == $1.0 && $0.start == $1.1 && $0.end == $1.2
+                },
+            "collapsed boundary correction rewrote raw token evidence"
+        )
+        try require(
+            collapsedBoundarySource.sourceText == " First. Second."
+                && collapsedBoundarySource.units.count == 2
+                && collapsedBoundarySource.units[0].start == 0.1
+                && collapsedBoundarySource.units[0].end == 0.2
+                && collapsedBoundarySource.units[1].start == 0.2
+                && collapsedBoundarySource.units[1].end == 0.25,
+            "collapsed native envelope was not bounded at the following raw sentence start"
+        )
+        try collapsedBoundarySource.validateCoverage()
+        print("COLLAPSED_ENVELOPE_BOUNDARY_CORRECTION_PASS")
+        let uncorrectableCollapsedBoundary = root.appendingPathComponent("uncorrectable-collapsed-boundary")
+        try makeSentenceBoundaryPackage(at: uncorrectableCollapsedBoundary, media: media, firstSentenceCollapsed: true, nextSentenceStart: 100)
+        try expectFailure {
+            _ = try importer.importSelectedPackage(
+                packageRoot: uncorrectableCollapsedBoundary, expectedMediaURL: media, expectedLanguage: .en
+            )
+        }
+        let ordinaryOverlapBoundary = root.appendingPathComponent("ordinary-overlap-boundary")
+        try makeSentenceBoundaryPackage(at: ordinaryOverlapBoundary, media: media, firstSentenceCollapsed: false, nextSentenceStart: 140)
+        try expectFailure {
+            _ = try importer.importSelectedPackage(
+                packageRoot: ordinaryOverlapBoundary, expectedMediaURL: media, expectedLanguage: .en
+            )
+        }
+        print("UNCORRECTABLE_AND_ORDINARY_BOUNDARY_OVERLAPS_REJECTED")
         let invalidCollapsedSegmentPackage = root.appendingPathComponent("invalid-collapsed-segment-package")
         try makeZeroWidthSegmentPackage(at: invalidCollapsedSegmentPackage, media: media, invalidSegment: true)
         try expectFailure {
@@ -464,6 +514,60 @@ struct SelectedTimingVerticalSliceProbe {
                 "id": partID, "order": 0, "absolute_offset_seconds": 0.0,
                 "absolute_range": ["start_seconds": 0.0, "end_seconds": 0.3],
                 "selected_timing_absolute_range": ["start_seconds": 0.0, "end_seconds": 0.3],
+                "selected_attempt": "initial",
+                "artifacts": ["txt": artifact(txtURL), "srt": artifact(srtURL), "json_full": artifact(jsonURL)]
+            ]]
+        ]
+        try JSONSerialization.data(withJSONObject: manifest).write(to: root.appendingPathComponent("manifest.json"))
+    }
+
+    private static func makeSentenceBoundaryPackage(
+        at root: URL,
+        media: URL,
+        firstSentenceCollapsed: Bool,
+        nextSentenceStart: Int
+    ) throws {
+        let parts = root.appendingPathComponent("parts")
+        try FileManager.default.createDirectory(at: parts, withIntermediateDirectories: true)
+        let firstTokens: [[String: Any]] = firstSentenceCollapsed
+            ? [token(" First", 100, 100), token(".", 100, 100)]
+            : [token(" First", 100, 130), token(".", 130, 160)]
+        let firstSegmentEnd = firstSentenceCollapsed ? 300 : 160
+        let json: [String: Any] = ["transcription": [
+            ["offsets": ["from": 100, "to": firstSegmentEnd], "tokens": firstTokens],
+            ["offsets": ["from": nextSentenceStart, "to": nextSentenceStart + 50], "tokens": [
+                token(" Second", nextSentenceStart, nextSentenceStart + 30),
+                token(".", nextSentenceStart + 30, nextSentenceStart + 50)
+            ]]
+        ]]
+        let jsonURL = parts.appendingPathComponent("part_0000.json")
+        try JSONSerialization.data(withJSONObject: json).write(to: jsonURL)
+        let txtURL = parts.appendingPathComponent("part_0000.txt")
+        try Data(" First. Second.".utf8).write(to: txtURL)
+        let srtURL = parts.appendingPathComponent("part_0000.srt")
+        let firstSRTEnd = firstSentenceCollapsed ? nextSentenceStart : 160
+        let srt = """
+        1
+        00:00:00,100 --> 00:00:00,\(String(format: "%03d", firstSRTEnd))
+        First.
+
+        2
+        00:00:00,\(String(format: "%03d", nextSentenceStart)) --> 00:00:00,\(String(format: "%03d", nextSentenceStart + 50))
+        Second.
+        """
+        try Data(srt.utf8).write(to: srtURL)
+        func artifact(_ url: URL) -> [String: String] {
+            ["path": "parts/\(url.lastPathComponent)", "sha256": SelectedTimingHash.file(url)]
+        }
+        let manifest: [String: Any] = [
+            "schema_version": 1,
+            "artifact_type": "seminartext.selected_whisper_timing",
+            "source": ["media_sha256": SelectedTimingHash.file(media)],
+            "transcription": ["language": "en"],
+            "parts": [[
+                "id": "part_0000", "order": 0, "absolute_offset_seconds": 0.0,
+                "absolute_range": ["start_seconds": 0.0, "end_seconds": 0.5],
+                "selected_timing_absolute_range": ["start_seconds": 0.0, "end_seconds": 0.5],
                 "selected_attempt": "initial",
                 "artifacts": ["txt": artifact(txtURL), "srt": artifact(srtURL), "json_full": artifact(jsonURL)]
             ]]

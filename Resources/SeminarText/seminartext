@@ -50,6 +50,10 @@ fi
 PROJECT_MODE=0
 PROJECT_OUTPUT_DIR=""
 PROJECT_SOURCE_ID=""
+PROJECT_ROOT=""
+PROJECT_COMPLETION_LEDGER=""
+PROJECT_BACKUP_LEDGER=""
+PROJECT_COMPLETION_COMMITTED=0
 
 PROMPT="Семинар на русском языке. Целостное Метоисцеление, кинезиология, прикладная кинезиология, Биологическое Центрирование, иглорефлексотерапия, акупунктура, меридиан, мышечное тестирование, психосоматика, метафизика, каббала, кли, масах, клипот, сфирот, Новолуние, Полнолуние."
 
@@ -63,6 +67,150 @@ sha256_file() {
     echo "Ошибка: для runtime-диагностики требуется shasum или sha256sum." >&2
     return 1
   fi
+}
+
+project_completion() {
+  local action="$1" output_dir="${2:-}" source_id="${3:-}" source_type="${4:-}"
+  local reference="${5:-}" media_path="${6:-}" ledger="${7:-}" expected_digest="${8:-}"
+  local whisper_threads
+  whisper_threads="$(sysctl -n hw.logicalcpu 2>/dev/null || echo 4)"
+  if (( whisper_threads > 8 )); then whisper_threads=8; fi
+  python3 - "$SEMINARTEXT_ENTRYPOINT_DIR" "$action" "$output_dir" "$PROJECT_ROOT" \
+    "$source_id" "$source_type" "$reference" "$media_path" "$ledger" \
+    "$SOURCE_LANGUAGE" "$MODE" "${SEMINARTEXT_CHUNK_SECONDS:-300}" "$MODEL" "$VAD_MODEL" \
+    "$(command -v whisper-cli)" "$SEMINARTEXT_ENTRYPOINT" "$VERSION" "$whisper_threads" "$STRUCTURED_TIMING" "$expected_digest" <<'PYCOMPLETION'
+import json
+import sys
+from pathlib import Path
+
+module_root = Path(sys.argv[1])
+sys.path.insert(0, str(module_root))
+from seminartext_modules.asr_completion import build_configuration, sha256_file, verify_completion, write_completion
+
+action, output_dir, project_root = sys.argv[2:5]
+source_id, source_type, reference, media_path, ledger = sys.argv[5:10]
+language, mode, chunk_seconds, model, vad_model, whisper, producer, version, threads, structured, expected_digest = sys.argv[10:]
+if action in {"backup", "restore", "discard"}:
+    root = Path(project_root)
+    ledger_path = Path(ledger)
+    records = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()] if ledger_path.exists() else []
+    if action == "backup":
+        relative_paths = [
+            f"transcript/{source_id}/.seminartext_complete",
+            f"transcript/{source_id}/.seminartext_completion.json",
+            f"transcript/{source_id}/.source_path",
+            f"transcript/{source_id}/transcript.txt",
+            f"transcript/{source_id}/transcript_clean.txt",
+            f"transcript/{source_id}/transcript_review.txt",
+            f"transcript/{source_id}/transcript.srt",
+            f"transcript/{source_id}/transcript.docx",
+            f"transcript/{source_id}/transcription.log",
+            f"transcript/{source_id}/info.txt",
+            f"transcript/{source_id}/structured_timing",
+            f"transcript/{source_id}.json",
+            "transcript/combined.json",
+        ]
+        existing = [relative for relative in relative_paths if (root / relative).exists()]
+        if existing:
+            import shutil, tempfile
+            backup_root = Path(tempfile.mkdtemp(prefix=".seminartext-asr-backup-", dir=root))
+            backup_files = []
+            for relative in existing:
+                original = root / relative
+                saved = backup_root / relative
+                saved.parent.mkdir(parents=True, exist_ok=True)
+                if original.is_dir(): shutil.copytree(original, saved, symlinks=True)
+                else: shutil.copy2(original, saved, follow_symlinks=False)
+                backup_files.append(relative)
+            with ledger_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"backup_root": str(backup_root), "source_id": source_id,
+                                         "files": backup_files}) + "\n")
+        raise SystemExit(0)
+    import shutil
+    for record in reversed(records):
+        backup_root = Path(record["backup_root"])
+        if action == "restore":
+            for relative in record["files"]:
+                target = root / relative
+                if target.is_dir() and not target.is_symlink(): shutil.rmtree(target)
+                else: target.unlink(missing_ok=True)
+                saved = backup_root / relative
+                if saved.is_dir(): shutil.copytree(saved, target, symlinks=True)
+                elif saved.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(saved, target, follow_symlinks=False)
+        shutil.rmtree(backup_root, ignore_errors=True)
+    ledger_path.unlink(missing_ok=True)
+    raise SystemExit(0)
+
+if action == "finalize":
+    root = Path(project_root)
+    for line in Path(ledger).read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        if record["source"]["type"] == "project-local":
+            current_media = Path(record["source"]["reference"]).resolve(strict=True)
+            if sha256_file(current_media) != record["source"]["sha256"]:
+                raise SystemExit("source bytes changed before completion publication")
+        write_completion(root, record["source_id"], record["source"], record["configuration"])
+    raise SystemExit(0)
+
+media = Path(media_path).resolve(strict=True)
+media_digest = sha256_file(media)
+if expected_digest and media_digest != expected_digest:
+    raise SystemExit("source bytes changed during completion verification")
+registry = json.loads((Path(project_root) / "sources.json").read_text(encoding="utf-8"))
+record = next((item for item in registry.get("videos", []) if item.get("source_id") == source_id), None)
+if not isinstance(record, dict):
+    raise SystemExit(f"source identity is missing from sources.json: {source_id}")
+projection = {key: record.get(key) for key in ("source_id", "type", "file", "url")}
+manifest_projection = json.dumps(projection, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+source = {
+    "source_id": source_id,
+    "type": source_type,
+    "reference": reference,
+    "sha256": media_digest,
+    "source_manifest_identity_sha256": __import__("hashlib").sha256(manifest_projection).hexdigest(),
+}
+
+configuration = build_configuration(
+    language=language,
+    mode=mode,
+    chunk_seconds=int(chunk_seconds),
+    model_path=model,
+    vad_model_path=vad_model,
+    whisper_path=whisper,
+    producer_path=producer,
+    producer_version=version,
+    whisper_threads=int(threads),
+    structured_timing=structured == "1",
+)
+
+if action == "verify":
+    compatible, reason = verify_completion(project_root, source_id, source, configuration)
+    print(reason)
+    raise SystemExit(0 if compatible else 1)
+if action == "pending":
+    with Path(ledger).open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({"source_id": source_id, "source": source,
+                                 "configuration": configuration}, ensure_ascii=False) + "\n")
+    raise SystemExit(0)
+raise SystemExit(f"unknown completion operation: {action}")
+PYCOMPLETION
+}
+
+project_completion_cleanup() {
+  [[ -n "$PROJECT_BACKUP_LEDGER" ]] || return 0
+  local action="restore"
+  (( PROJECT_COMPLETION_COMMITTED == 1 )) && action="discard"
+  project_completion "$action" "" "" "" "" "" "$PROJECT_BACKUP_LEDGER" || {
+    echo "Ошибка: не удалось $action previous ASR artifacts." >&2
+    return 1
+  }
+  PROJECT_BACKUP_LEDGER=""
+  PROJECT_ROOT=""
+  PROJECT_COMPLETION_LEDGER=""
 }
 
 resolve_runtime_module() {
@@ -220,6 +368,10 @@ cat <<'HELP'
 
       Расшифровка аудио/видео.
       Старый вызов без команды сохранён и равнозначен transcribe.
+
+  seminartext group SOURCE... [--output DIR]
+
+      Групповая расшифровка папок и выбранных файлов в единый clean-файл.
       Язык источника по умолчанию: ru. Поддерживаются ru и en.
 
   seminartext topics файл.mp4
@@ -258,7 +410,15 @@ cat <<'HELP'
   seminartext project-promote-transcript PROJECT --source-id ID --text-file FILE --state verified --reviewer NAME
   seminartext project-align PROJECT --source-id ID --revision-id REVISION --alignment-json FILE [--media FILE]
   seminartext project-evidence-check PROJECT [--json]
+  seminartext project-semantic-workflow {prepare,inspect,status,decide,submit,apply,validate,next-round,result} --help
+      Source-checkout CLI: подготовленные admission-v1 proposals → явные решения → Canonical Knowledge.
   seminartext project-review-prepare PROJECT --drafts FILE --output DIR
+  seminartext project-topic-review {generate,replay,status,inspect} --help
+      Source-checkout: Canonical Evidence → существующий Topic Engine → REVIEW_REQUIRED.
+  seminartext project-topic-review-batch {prepare,run,resume,status,inspect} --help
+      Явно выбранные источники → отдельные пакеты REVIEW_REQUIRED без семантических решений.
+  seminartext project-media-review {prepare,run,resume,status,inspect} --help
+      Явно выбранные медиа → проверяемая подготовка Evidence и review.
   seminartext project-review-status PROJECT --package FILE [--decisions FILE]
   seminartext project-review-apply PROJECT --package FILE --decisions FILE --output FILE
   seminartext project-review-v2-status PROJECT --package FILE --decisions FILE
@@ -273,6 +433,17 @@ cat <<'HELP'
   seminartext project-topics PROJECT
 
       Создание, наполнение, проверка и обработка seminar-проекта.
+
+ГРУППОВАЯ РАСШИФРОВКА
+
+  seminartext group "/путь/к/папке"
+  seminartext group "запись 1.ogg" "запись 2.mp4"
+  seminartext group "/папка" "выбранная запись.m4a" --output "/путь/к/группе"
+
+      Каждый SOURCE может быть медиафайлом или папкой. Папки сканируются
+      рекурсивно. Одинаковые по содержимому файлы определяются по SHA-256 и
+      не расшифровываются повторно. Результаты: group/transcript/
+      combined_clear.txt, combined_clear_with_sources.txt и provenance-manifest.
 
       --combined-clear дополнительно собирает чистые individual transcripts
       локальных частей в один chronological derived artifact. Источники
@@ -935,6 +1106,20 @@ if words:
     if len(w) <= 12 and n >= 40 and n/len(words) >= .55:
         reject('single_word_loop', f'repeats={n} word_ratio={n/len(words):.2f}')
 
+    # Very short Whisper loops can be one punctuation-free periodic phrase.
+    # They contain too few tokens for the fuzzy 12-word contextual detector
+    # below and evade the long single-word-loop threshold above.  Requiring at
+    # least four matching positions keeps ordinary conversational repetition
+    # eligible for a normal first-pass transcript.
+    for period in range(1, min(12, len(words)//2) + 1):
+        comparisons=len(words)-period
+        matches=sum(words[index] == words[index + period] for index in range(comparisons))
+        if comparisons >= 4 and matches >= 4 and matches/comparisons >= .80:
+            reject(
+                'short_periodic_token_loop',
+                f'period={period} comparisons={comparisons} match_ratio={matches/comparisons:.2f}',
+            )
+
 # Whisper contextual loops often keep a long local anchor while changing a few
 # surrounding words.  Whole-sentence equality misses that pattern, especially
 # when several repetitions land inside one punctuated sentence.  Look for four
@@ -1251,19 +1436,14 @@ PYTIMING
 process_record() {
   local input="$1" requested="$2" source_type="${3:-файл}"
   local name="" dir="" wav="" raw="" clean="" review="" srt="" docx="" log="" info="" marker="" transcript_number="" quality_message=""
+  local completion_reason="" unresolved_quality=0
   local timing_dir="" timing_stage="" timing_ledger=""
-  local media_input="$input" youtube_media=""
+  local media_input="$input" youtube_media="" download_log=""
   name="$(sanitize_name "$requested")"
   dir="$(choose_output_dir "$name" "$input")"
   marker="$dir/.seminartext_complete"
 
-  if [[ -f "$marker" && "$FORCE" -eq 0 ]]; then
-    echo "Пропущено (уже готово): $(basename "$dir")"
-    return 0
-  fi
-
   mkdir -p "$dir"
-  printf '%s' "$input" > "$dir/.source_path"
   if (( PROJECT_MODE == 1 )); then
     transcript_number=""
   else
@@ -1300,8 +1480,11 @@ process_record() {
   cleanup_temp() {
     [[ -n "${wav:-}" ]] && rm -f "$wav"
     [[ -n "${youtube_media:-}" ]] && rm -f "$youtube_media"
+    [[ -n "${download_log:-}" ]] && rm -f "$download_log"
     [[ -n "${chunks:-}" ]] && rm -rf "$chunks"
-    [[ -n "${parts:-}" ]] && rm -rf "$parts"
+    if (( ${unresolved_quality:-0} == 0 )); then
+      [[ -n "${parts:-}" ]] && rm -rf "$parts"
+    fi
   }
   trap cleanup_temp RETURN INT TERM
 
@@ -1311,13 +1494,63 @@ process_record() {
   echo "Источник: $input"
   echo "Тип источника: $source_type"
   echo "Результаты: $dir"
-  : > "$log"
+
+  # Standalone reuse needs no download or mutation of the completed package.
+  if (( PROJECT_MODE == 0 && FORCE == 0 )) && [[ -f "$marker" ]]; then
+    echo "Пропущено (уже готово): $(basename "$dir")"
+    cleanup_temp
+    trap - RETURN INT TERM
+    return 0
+  fi
 
   if [[ "$source_type" == "YouTube" ]] || is_youtube_url "$input"; then
-    youtube_media="$(download_youtube_audio "$input" "$dir" "$log")" || return 1
+    download_log="$(mktemp "$dir/.youtube_download.XXXXXX")" || return 1
+    if ! youtube_media="$(download_youtube_audio "$input" "$dir" "$download_log")"; then
+      echo "Журнал ошибки скачивания: $download_log" >&2
+      # Retain failed intake diagnostics independently of any earlier ASR log.
+      download_log=""
+      return 1
+    fi
     media_input="$youtube_media"
   fi
+  if (( PROJECT_MODE == 1 )); then
+    source_digest="$(sha256_file "$media_input")" || return 1
+  fi
+  if [[ -f "$marker" && "$FORCE" -eq 0 ]]; then
+    if (( PROJECT_MODE == 1 )); then
+      if completion_reason="$(project_completion verify "$dir" "$PROJECT_SOURCE_ID" "$source_type" "$input" "$media_input" "$PROJECT_COMPLETION_LEDGER" "$source_digest")"; then
+        if [[ "$completion_reason" == *"transcript_clean.txt"* || "$completion_reason" == *"transcript_review.txt"* ]]; then
+          clean_text "$raw" "$clean" "$review" "$SOURCE_LANGUAGE"
+          local prior_bad="0"
+          if [[ -f "$info" ]]; then
+            prior_bad="$(sed -n 's/^Подозрительных фрагментов: //p' "$info" | tail -n1)"
+            [[ "$prior_bad" =~ ^[0-9]+$ ]] || prior_bad="0"
+          fi
+          if (( prior_bad > 0 )); then
+            printf '\nПРЕДУПРЕЖДЕНИЕ: %s фрагмент(а/ов) требуют ручной проверки по аудио. См. transcription.log.\n' "$prior_bad" >> "$review"
+          fi
+        fi
+        project_completion pending "$dir" "$PROJECT_SOURCE_ID" "$source_type" "$input" "$media_input" "$PROJECT_COMPLETION_LEDGER" "$source_digest" || return 1
+        echo "Переиспользую проверенную расшифровку: $(basename "$dir")${completion_reason:+ ($completion_reason)}"
+        cleanup_temp
+        trap - RETURN INT TERM
+        return 0
+      fi
+      echo "Непроверенная или несовместимая расшифровка ($completion_reason); повторно распознаю: $(basename "$dir")" >&2
+    fi
+  fi
+  # Preserve an existing partial project even when no completion marker exists.
+  if (( PROJECT_MODE == 1 )); then
+    project_completion backup "$dir" "$PROJECT_SOURCE_ID" "" "" "" "$PROJECT_BACKUP_LEDGER" || return 1
+  fi
+  if [[ -n "$download_log" ]]; then
+    cat "$download_log" > "$log"
+  else
+    : > "$log"
+  fi
+  printf '%s' "$input" > "$dir/.source_path"
   rm -f "$marker" "$raw" "$clean" "$review" "$srt" "$docx"
+  rm -f "$dir/.seminartext_completion.json"
   rm -rf "$timing_dir"
   mkdir -p "$chunks" "$parts"
   if (( STRUCTURED_TIMING == 1 )); then
@@ -1363,12 +1596,17 @@ process_record() {
       [[ -z "$quality_message" ]] || printf '%s\n' "$quality_message" | tee -a "$log"
       echo "Обнаружено возможное зацикливание; повторяю с защитными параметрами." | tee -a "$log"
       cp -f "$prefix.txt" "$prefix.first.txt" 2>/dev/null || true
-      run_whisper_piece "$piece" "$prefix" "$log" 1 || true
+      if ! run_whisper_piece "$piece" "$prefix" "$log" 1; then
+        unresolved_quality=1
+        echo "Ошибка: защитная попытка фрагмента $((idx+1)) завершилась сбоем; диагностика сохранена в $parts." | tee -a "$log" >&2
+        return 1
+      fi
       selected_attempt="retry"
       if ! quality_message="$(quality_check "$prefix.txt" 2>&1)"; then
         [[ -z "$quality_message" ]] || printf '%s\n' "$quality_message" | tee -a "$log"
-        echo "ПРЕДУПРЕЖДЕНИЕ: фрагмент $((idx+1)) остаётся подозрительным." | tee -a "$log"
-        ((bad+=1))
+        unresolved_quality=1
+        echo "Ошибка: фрагмент $((idx+1)) остаётся подозрительным после повтора; расшифровка не завершена. Диагностика: $parts. Повторите с SEMINARTEXT_CHUNK_SECONDS=60." | tee -a "$log" >&2
+        return 1
       else
         echo "Повторная расшифровка фрагмента успешна." | tee -a "$log"
       fi
@@ -1436,7 +1674,15 @@ process_record() {
     fi
   } > "$info"
 
-  touch "$marker"
+  if (( PROJECT_MODE == 1 )); then
+    if [[ "$(sha256_file "$media_input")" != "$source_digest" ]]; then
+      echo "Ошибка: исходные байты изменились во время распознавания; результат не публикуется." >&2
+      return 1
+    fi
+    project_completion pending "$dir" "$PROJECT_SOURCE_ID" "$source_type" "$input" "$media_input" "$PROJECT_COMPLETION_LEDGER" "$source_digest" || return 1
+  else
+    touch "$marker"
+  fi
   cleanup_temp
   trap - RETURN INT TERM
   echo "ГОТОВО: $clean"
@@ -2594,6 +2840,123 @@ print(f"Видеоисточников всего: {len(data['videos'])}")
 print(f"Документов всего: {len(data['documents'])}")
 print(f"Реестр: {registry_path}")
 PYADD
+}
+
+group_command() {
+  local output_dir="" list_only=0 careful=0 force=0
+  local -a sources=()
+
+  if [[ $# -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'HELP'
+Использование:
+
+  seminartext group SOURCE... [--output DIR] [--list] [--force] [--careful] [--no-open]
+
+SOURCE — медиафайл или папка. Папки сканируются рекурсивно; можно передать
+папки и выбранные файлы в одном вызове.
+
+Примеры:
+
+  seminartext group "/путь/к/папке"
+  seminartext group "запись 1.ogg" "запись 2.mp4"
+  seminartext group "/папка" "/путь/к/выбранной записи.m4a" --output "/путь/к/группе"
+
+Без --output группа создаётся в подкаталоге group рядом с первым источником.
+--output DIR задаёт постоянную папку группы. В ней создаются source/,
+transcript/combined_clear.txt, transcript/combined_clear_with_sources.txt и
+transcript/combined_clear_manifest.json.
+
+Одинаковые по содержимому файлы распознаются по SHA-256 и не добавляются или
+расшифровываются повторно. --list только показывает новые и повторяющиеся
+источники. --force заново обрабатывает все уникальные записи группы.
+
+Результат создаётся машиной: при важных фрагментах сверяйте clean-текст и
+transcript_review.txt с исходным аудио.
+HELP
+    return 0
+  fi
+
+  while (($#)); do
+    case "$1" in
+      --output)
+        [[ $# -ge 2 ]] || { echo "Ошибка: после --output нужна папка группы." >&2; return 2; }
+        output_dir="$2"
+        shift 2
+        ;;
+      --list)
+        list_only=1
+        shift
+        ;;
+      --force)
+        force=1
+        shift
+        ;;
+      --careful)
+        careful=1
+        shift
+        ;;
+      --no-open)
+        OPEN_RESULTS=0
+        shift
+        ;;
+      -h|--help)
+        group_command --help
+        return 0
+        ;;
+      -*)
+        echo "Ошибка: неизвестный параметр group: $1" >&2
+        return 2
+        ;;
+      *)
+        sources+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  ((${#sources[@]} > 0)) || {
+    echo "Ошибка: укажите хотя бы один файл или папку." >&2
+    return 2
+  }
+
+  local result
+  result="$(mktemp -t seminartext_group.XXXXXX)"
+  trap 'rm -f "$result"' RETURN
+
+  local -a prepare_args=(--result "$result")
+  [[ -n "$output_dir" ]] && prepare_args+=(--output "$output_dir")
+  (( list_only == 1 )) && prepare_args+=(--list)
+  python3 "$SEMINARTEXT_ENTRYPOINT_DIR/seminartext_modules/group_sources.py" \
+    "${prepare_args[@]}" "${sources[@]}" || return $?
+
+  if (( list_only == 1 )); then
+    rm -f "$result"
+    trap - RETURN
+    return 0
+  fi
+
+  local group_dir
+  group_dir="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["group_dir"])' "$result")"
+
+  local line source
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    source="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["path"])' <<<"$line")"
+    project_add "$group_dir" --video-link "$source" || return 1
+  done < <(python3 -c 'import json,sys; [print(json.dumps(item, ensure_ascii=False)) for item in json.load(open(sys.argv[1], encoding="utf-8"))["new_sources"]]' "$result")
+
+  rm -f "$result"
+  trap - RETURN
+
+  (( force == 1 )) && FORCE=1
+  local -a transcribe_args=(--combined-with-sources --no-open)
+  (( careful == 1 )) && transcribe_args+=(--careful)
+  project_transcribe "$group_dir" "${transcribe_args[@]}" || return 1
+
+  echo
+  echo "ГОТОВО: групповая расшифровка"
+  echo "Clean: $group_dir/transcript/combined_clear.txt"
+  echo "С источниками: $group_dir/transcript/combined_clear_with_sources.txt"
 }
 
 
@@ -4999,6 +5362,15 @@ PYDRY
 
   local failed=0
   local line source_id order type title source outdir
+  local completion_ledger="${queue}.completion.jsonl"
+  local backup_ledger="${queue}.backup.jsonl"
+  : > "$completion_ledger"
+  : > "$backup_ledger"
+  PROJECT_ROOT="$project_dir"
+  PROJECT_COMPLETION_LEDGER="$completion_ledger"
+  PROJECT_BACKUP_LEDGER="$backup_ledger"
+  PROJECT_COMPLETION_COMMITTED=0
+  trap project_completion_cleanup EXIT
 
   while IFS= read -r line <&3; do
     [[ -n "$line" ]] || continue
@@ -5041,6 +5413,9 @@ PYDRY
   rm -f "$queue"
 
   if (( failed > 0 )); then
+    rm -f "$completion_ledger"
+    project_completion_cleanup || return 1
+    trap - EXIT
     echo
     echo "Ошибка: не удалось обработать видеоисточников: $failed" >&2
     return 1
@@ -5171,6 +5546,21 @@ for video in combined["videos"]:
 
 print(f"  combined.json — {len(combined['videos'])} видео")
 PYJSON
+
+  if ! project_completion finalize "" "" "" "" "" "$completion_ledger"; then
+    echo "Ошибка: не удалось подтвердить целостность завершённых ASR-артефактов." >&2
+    rm -f "$completion_ledger"
+    project_completion_cleanup || return 1
+    trap - EXIT
+    return 1
+  fi
+  rm -f "$completion_ledger"
+  PROJECT_COMPLETION_COMMITTED=1
+  project_completion_cleanup
+  trap - EXIT
+  PROJECT_ROOT=""
+  PROJECT_COMPLETION_LEDGER=""
+  PROJECT_BACKUP_LEDGER=""
 
   if (( combined_clear == 1 )); then
     echo
@@ -5984,6 +6374,30 @@ main() {
       evidence_foundation_command evidence-check "$@"
       exit $?
       ;;
+    project-semantic-workflow)
+      shift
+      [[ -f "$SEMINARTEXT_ENTRYPOINT_DIR/seminartext_modules/semantic_workflow.py" ]] || {
+        echo "Semantic workflow is unavailable in this runtime; use the supported source checkout." >&2
+        exit 2
+      }
+      "$SEMINARTEXT_PYTHON" "$SEMINARTEXT_ENTRYPOINT_DIR/seminartext_modules/semantic_workflow.py" "$@"
+      exit $?
+      ;;
+    project-topic-review)
+      shift
+      "$SEMINARTEXT_PYTHON" "$SEMINARTEXT_ENTRYPOINT_DIR/seminartext_modules/automatic_topic_review.py" "$@"
+      exit $?
+      ;;
+    project-topic-review-batch)
+      shift
+      "$SEMINARTEXT_PYTHON" "$SEMINARTEXT_ENTRYPOINT_DIR/seminartext_modules/batch_topic_review.py" "$@"
+      exit $?
+      ;;
+    project-media-review)
+      shift
+      "$SEMINARTEXT_PYTHON" "$SEMINARTEXT_ENTRYPOINT_DIR/seminartext_modules/media_to_review.py" "$@"
+      exit $?
+      ;;
     project-review-prepare)
       shift
       human_review_workflow_command prepare "$@"
@@ -6027,6 +6441,11 @@ main() {
     project-obsidian-export)
       shift
       project_knowledge_bridge_command "$@"
+      exit $?
+      ;;
+    group)
+      shift
+      group_command "$@"
       exit $?
       ;;
     init)

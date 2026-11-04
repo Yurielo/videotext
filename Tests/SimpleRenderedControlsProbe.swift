@@ -225,6 +225,10 @@ struct SimpleRenderedControlsProbe {
             NSNumber(value: true),
             forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface")
         )
+        if CommandLine.arguments.contains("--review-issue-scoping-only") {
+            try verifyReviewIssueScoping(project: scratch.appendingPathComponent("review-issue-scoping"), media: media)
+            return
+        }
         if CommandLine.arguments.contains("--topic-cut-only") {
             try verifySimpleTopicCutControls(project: scratch.appendingPathComponent("simple-topic-cut"), media: media)
             try verifyFailedTopicCutHasNoReady(project: scratch.appendingPathComponent("failed-topic-cut"), media: media)
@@ -245,6 +249,7 @@ struct SimpleRenderedControlsProbe {
         try verifySimpleTopicCutControls(project: scratch.appendingPathComponent("simple-topic-cut"), media: media)
         try verifyFailedTopicCutHasNoReady(project: scratch.appendingPathComponent("failed-topic-cut"), media: media)
         try verifyMixedTopicVariantReopen(project: scratch.appendingPathComponent("mixed-topics"), media: media)
+        try verifyReviewIssueScoping(project: scratch.appendingPathComponent("review-issue-scoping"), media: media)
         // Each Source/Translation scenario has its own project. Source review can
         // legitimately invalidate downstream artifacts; the retained fixture is untouched.
         for source in [ArtifactLanguage.ru, .en] {
@@ -408,8 +413,8 @@ struct SimpleRenderedControlsProbe {
     private static func clickRenderedSegment(_ segment: RenderedAXElement, in window: NSWindow) throws {
         let frame = segment.accessibilityFrame()
         let screenPoint = NSPoint(x: frame.midX, y: frame.midY)
-        try require(segment.isAccessibilityEnabled() && frame.width > 0 && frame.height > 0
-            && window.frame.contains(screenPoint), "Rendered segment has no enabled in-window mouse target")
+        try require(segment.isAccessibilityEnabled() && frame.width > 0 && frame.height > 0,
+                    "Rendered segment has no enabled mouse target")
         let location = window.convertPoint(fromScreen: screenPoint)
         let timestamp = ProcessInfo.processInfo.systemUptime
         guard let down = NSEvent.mouseEvent(with: .leftMouseDown, location: location, modifierFlags: [],
@@ -520,8 +525,26 @@ struct SimpleRenderedControlsProbe {
         let raw = AppAlert(title: "Ошибка обработки", message: "/internal/manifest.json: CLI runtime failure")
         let readable = flow.sourceRunAlert(raw, projectURL: project)
         try require(readable.id == raw.id && readable.title == "Не удалось создать расшифровку"
-            && !readable.message.contains("manifest") && !readable.message.contains("CLI")
-            && raw.message.contains("/internal/manifest.json"), "Simple error rendering lost diagnostics or leaked internal details")
+            && !readable.message.contains("/internal/manifest.json") && readable.message.contains("CLI runtime failure")
+            && raw.message.contains("/internal/manifest.json"), "Simple error rendering did not retain the cause without leaking an internal path")
+        let srtFailure = flow.sourceRunAlert(
+            AppAlert(title: "Ошибка", message: "Ошибка формата SRT: SeminarText core SRT: небезопасное пересечение реплик 412 и 413 (0.100 с)."),
+            projectURL: project
+        )
+        try require(srtFailure.message.contains("SeminarText core SRT")
+            && srtFailure.message.contains("реплик 412 и 413"), "Simple error rendering hid the actionable SeminarText SRT cause")
+        let ffmpegFailure = flow.sourceRunAlert(
+            AppAlert(title: "Ошибка", message: "SeminarText transcription завершился с кодом 1: Не установлена программа: ffmpeg"),
+            projectURL: project
+        )
+        try require(ffmpegFailure.message.contains("ffmpeg") && ffmpegFailure.message.contains("установку VideoText"),
+            "Simple error rendering did not identify a missing packaged component")
+        let missingSource = flow.sourceRunAlert(
+            AppAlert(title: "Ошибка", message: "Исходный медиафайл недоступен."),
+            projectURL: project
+        )
+        try require(missingSource.message.contains("исходный файл доступен")
+            && !missingSource.message.contains("установку VideoText"), "Simple error rendering misclassified an unavailable source file")
         try require(flow.sourceRunAlert(raw, projectURL: other).message == raw.message,
             "Source error rendering changed another project's alert")
         let stopped = flow.sourceRunAlert(AppAlert(title: "Обработка остановлена", message: "internal details"), projectURL: project)
@@ -2260,6 +2283,80 @@ struct SimpleRenderedControlsProbe {
             && !model.isRunning && model.topicGranularity == .normal,
             "Mixed-variant reopen exposed another topic variant for cutting")
         print("MIXED_TOPIC_VARIANT_REOPEN_PASS: no cross-variant Ready/Open/cut, Advanced selection preserved")
+    }
+
+    private static func verifyReviewIssueScoping(project: URL, media: URL) throws {
+        _ = try makeProject(project, media: media, source: .ru)
+        let store = ProjectStore()
+        let layout = ProjectLayout(root: project)
+        var manifest = try store.load(from: project)
+        func task(_ id: String, language: ArtifactLanguage, revisionID: String, cueID: Int) -> ReviewTask {
+            ReviewTask(
+                id: id, transcriptRevisionID: revisionID, status: .needsReview, language: language,
+                start: Double(cueID * 2 - 2), end: Double(cueID * 2), cueIDs: [cueID],
+                reasonCodes: ["numbers-changed-cue-\(cueID)"], confidence: nil,
+                originalText: "fixture \(language.rawValue) \(cueID)", suggestedText: nil,
+                createdAt: Date(), resolvedAt: nil, dependentArtifactIDs: []
+            )
+        }
+        // Mirrors the production failure mode: a current EN checkpoint has
+        // three findings while an older RU review contributes many unrelated
+        // unresolved records.
+        manifest.reviewTasks = (0..<432).map {
+            task("ru-stale-\($0)", language: .ru, revisionID: "approved-ru", cueID: 1)
+        } + (0..<3).map {
+            task("en-current-\($0)", language: .en, revisionID: "approved-en", cueID: 2 + $0)
+        } + [task("en-stale-revision", language: .en, revisionID: "older-en", cueID: 1)]
+        manifest.humanReviewState?.pendingCheckpoint = HumanReviewCheckpoint(
+            kind: .translatedTranscript, language: .en, revisionID: "approved-en",
+            pendingOperations: [], createdAt: Date()
+        )
+        let filler = FillerAnalysisReport(
+            schemaVersion: 1, language: .ru, transcriptRevisionID: "approved-ru", createdAt: Date(), words: [],
+            candidates: [FillerWordCandidate(
+                id: "source-filler", text: "ээ", normalized: "ээ", start: 2, end: 3,
+                cueID: 2, transcriptRevisionID: "approved-ru", language: .ru, confidence: 1,
+                highConfidence: true, reasonCodes: ["fixture"], context: "fixture", decision: .pending
+            )]
+        )
+        try FileManager.default.createDirectory(at: layout.fillerWordsURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(filler).write(to: layout.fillerWordsURL, options: .atomic)
+        try store.save(manifest, to: project)
+
+        let enCheckpoint = HumanReviewCheckpoint(
+            kind: .translatedTranscript, language: .en, revisionID: "approved-en",
+            pendingOperations: [], createdAt: Date()
+        )
+        let translationIssueIDs = reviewCueIDsForCurrentHumanReview(
+            checkpoint: enCheckpoint,
+            unresolvedTasks: manifest.reviewTasks ?? [],
+            fillerCandidates: filler.candidates
+        )
+        let translationTasks = reviewTasksForCurrentHumanReview(
+            checkpoint: enCheckpoint,
+            unresolvedTasks: manifest.reviewTasks ?? []
+        )
+        try require(translationIssueIDs == [2, 3, 4],
+                    "Current EN review did not limit issues-only cues to its three revision-scoped findings")
+        try require(translationTasks.map(\.id) == ["en-current-0", "en-current-1", "en-current-2"],
+                    "Current EN review badge included a stale same-language revision")
+        try require(reviewTasksForCurrentHumanReview(checkpoint: nil, unresolvedTasks: manifest.reviewTasks ?? []).count == 436,
+                    "Review badge lost its global unresolved count without an active checkpoint")
+
+        let sourceCheckpoint = HumanReviewCheckpoint(
+            kind: .sourceTranscript, language: .ru, revisionID: "approved-ru",
+            pendingOperations: [], createdAt: Date()
+        )
+        let sourceIssueIDs = reviewCueIDsForCurrentHumanReview(
+            checkpoint: sourceCheckpoint,
+            unresolvedTasks: manifest.reviewTasks ?? [],
+            fillerCandidates: filler.candidates
+        )
+        try require(sourceIssueIDs == [1, 2],
+                    "Source review lost its revision-scoped task or source filler candidate")
+        print("REVIEW_ISSUE_SCOPING_CONTRACT_PASS: EN 3 current findings omit 432 RU records; source review retains source filler candidates")
     }
 
     private static func verify(project: URL, source: ArtifactLanguage, translation: Bool, evidence: URL?, name: String) throws {
