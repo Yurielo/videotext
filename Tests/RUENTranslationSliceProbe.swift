@@ -17,6 +17,8 @@ struct RUENTranslationSliceProbe {
         try await verifyTargetLanguagePromptContract()
         try await verifyDisabledHumanReviewPreflightDoesNotCreateProject(root: root.appendingPathComponent("preflight"))
         try await verifyLegacyFullSRTSuccessWithoutHumanReview(root: root.appendingPathComponent("legacy-success"))
+        try await verifyApprovedUserEditedTargetSurvivesProtocolUpgrade(root: root.appendingPathComponent("approved-v6-to-v7"))
+        try await verifyENToRUApprovedTargetRejectsTamperedLocalizedSource(root: root.appendingPathComponent("approved-en-to-ru-stale-localized"))
         try await verifyRelocatedSourceReferenceRecovery(root: root.appendingPathComponent("relocated-ru"), sourceLanguage: .ru)
         try await verifyRelocatedSourceReferenceRecovery(root: root.appendingPathComponent("relocated-en"), sourceLanguage: .en)
         try await verifyRelocatedSourceReferenceRecovery(
@@ -152,6 +154,245 @@ struct RUENTranslationSliceProbe {
         try require(provider.calls == callsBeforeReopen
                     && reopened.activeTranscriptRevision(for: .en)?.reviewStatus == .approved,
                     "Reopen lost the ready legacy translation")
+    }
+
+    private static func verifyApprovedUserEditedTargetSurvivesProtocolUpgrade(root: URL) async throws {
+        let fixture = try makeFixture(root: root)
+        try FileManager.default.removeItem(at: fixture.layout.subtitlesURL(language: .ru))
+        try FileManager.default.removeItem(at: fixture.layout.transcriptURL(language: .ru))
+        let legacy = VersionedLegacyTranslationProvider(protocolVersion: "translategemma-booktext-owned-tasks-v6-docmeta512-lineage2-overlap2x600-source-echo1-ctx8k")
+        let selectedTiming = SelectedTimingVerticalSlice(translator: RecordingRUENTranslator())
+        let initial = WorkflowEngine(
+            store: fixture.store,
+            translationAdapter: TranslationAdapter(provider: legacy),
+            selectedTimingTranslation: selectedTiming
+        )
+        _ = try await initial.run(settings: settings(fixture), onLog: { _ in })
+        _ = try HumanReviewService(store: fixture.store).approve(projectURL: fixture.project)
+
+        let approved = try fixture.store.load(from: fixture.project)
+        guard let source = approved.activeTranscriptRevision(for: .ru),
+              let target = approved.activeTranscriptRevision(for: .en) else {
+            throw ProbeFailure(message: "v6 fixture did not create approved RU/EN revisions")
+        }
+        try require(source.reviewStatus == .approved && target.origin == .userEdited && target.reviewStatus == .approved,
+                    "v6 fixture target is not an approved immutable user edit")
+        let report = try fixture.store.decoder.decode(
+            TranslationReport.self,
+            from: Data(contentsOf: fixture.layout.translationReportURL(source: .ru, target: .en))
+        )
+        try require(report.protocolVersion == legacy.protocolVersion,
+                    "v6 fixture did not retain previous protocol provenance")
+        let sourceFullSRT = try Data(contentsOf: fixture.layout.fullSRTURL)
+        let sourceSRT = try Data(contentsOf: fixture.layout.subtitlesURL(language: .ru))
+        let sourceTXT = try Data(contentsOf: fixture.layout.transcriptURL(language: .ru))
+        let targetSRT = try Data(contentsOf: fixture.layout.subtitlesURL(language: .en))
+        let targetTXT = try Data(contentsOf: fixture.layout.transcriptURL(language: .en))
+        let sourceRevisionSRT = try Data(contentsOf: fixture.layout.subtitleRevisionURL(id: source.id, language: .ru))
+        let targetRevisionSRT = try Data(contentsOf: fixture.layout.subtitleRevisionURL(id: target.id, language: .en))
+        let targetRevisionTXT = try Data(contentsOf: fixture.layout.transcriptRevisionURL(id: target.id, language: .en))
+        try require(report.schemaVersion == 3 && report.sourceRevisionID == source.id,
+                    "v6 report does not prove the active approved source lineage")
+        try require(sourceSRT == sourceRevisionSRT && targetSRT == targetRevisionSRT && targetTXT == targetRevisionTXT,
+                    "v6 fixture working artifacts do not match immutable approved revisions")
+        try require(TranslationResumeValidator.outputsMatch(report: report, manifest: approved, layout: fixture.layout),
+                    "v6 fixture report does not match the immutable approved target")
+
+        let current = VersionedLegacyTranslationProvider(protocolVersion: OllamaTranslationProvider.protocolVersion)
+        let resumed = WorkflowEngine(
+            store: fixture.store,
+            translationAdapter: TranslationAdapter(provider: current),
+            selectedTimingTranslation: selectedTiming
+        )
+        _ = try await resumed.run(settings: settings(fixture), onLog: { _ in })
+
+        try require(current.calls == 0, "v7 resumed an already approved user-edited target")
+        let reopened = try fixture.store.load(from: fixture.project)
+        try require(reopened.activeTranscriptRevision(for: .ru)?.id == source.id
+                    && reopened.activeTranscriptRevision(for: .en)?.id == target.id,
+                    "v7 resume changed immutable approved revision lineage")
+        try require(
+            Data(contentsOf: fixture.layout.subtitlesURL(language: .ru)) == sourceSRT
+                && Data(contentsOf: fixture.layout.transcriptURL(language: .ru)) == sourceTXT
+                && Data(contentsOf: fixture.layout.subtitlesURL(language: .en)) == targetSRT
+                && Data(contentsOf: fixture.layout.transcriptURL(language: .en)) == targetTXT
+                && Data(contentsOf: fixture.layout.subtitleRevisionURL(id: source.id, language: .ru)) == sourceRevisionSRT
+                && Data(contentsOf: fixture.layout.subtitleRevisionURL(id: target.id, language: .en)) == targetRevisionSRT,
+            "v7 resume changed immutable approved source or target bytes"
+        )
+
+        try fixture.store.mutate(fixture.project) { manifest in
+            guard var artifacts = manifest.artifacts,
+                  let index = artifacts.firstIndex(where: { $0.id == target.subtitleArtifactID }) else {
+                throw ProbeFailure(message: "approved target subtitle artifact disappeared before pending-artifact regression")
+            }
+            artifacts[index].validationStatus = .needsReview
+            manifest.artifacts = artifacts
+        }
+        do {
+            _ = try await resumed.run(settings: settings(fixture), onLog: { _ in })
+            throw ProbeFailure(message: "pending target artifact incorrectly skipped translation")
+        } catch WorkflowError.processFailed(let message) {
+            try require(message == "Перевод содержит ручные правки. Новый профиль перевода не будет автоматически заменять принятую пользователем ревизию.",
+                        "pending target artifact did not remain non-skippable")
+        }
+        try require(current.calls == 0 && Data(contentsOf: fixture.layout.subtitlesURL(language: .en)) == targetSRT,
+                    "pending target artifact invoked v7 provider or changed approved bytes")
+        try fixture.store.mutate(fixture.project) { manifest in
+            guard var artifacts = manifest.artifacts,
+                  let index = artifacts.firstIndex(where: { $0.id == target.subtitleArtifactID }) else {
+                throw ProbeFailure(message: "target artifact disappeared before restoring ready state")
+            }
+            artifacts[index].validationStatus = .ready
+            manifest.artifacts = artifacts
+        }
+
+        var staleSource = try SRTService().load(from: fixture.layout.subtitlesURL(language: .ru))
+        staleSource[0].text += " stale"
+        try SRTService().writePreservingIDs(staleSource, to: fixture.layout.subtitlesURL(language: .ru))
+        do {
+            _ = try await resumed.run(settings: settings(fixture), onLog: { _ in })
+            throw ProbeFailure(message: "stale approved source incorrectly skipped translation")
+        } catch WorkflowError.processFailed(let message) {
+            try require(message == "Текущий SRT не совпадает с утверждённой исходной ревизией.",
+                        "stale source did not fail at immutable source validation")
+        }
+        try require(current.calls == 0 && Data(contentsOf: fixture.layout.subtitlesURL(language: .en)) == targetSRT,
+                    "stale source invoked the v7 provider or changed the approved target")
+
+        try sourceSRT.write(to: fixture.layout.subtitlesURL(language: .ru), options: .atomic)
+        var staleFullSource = try SRTService().load(from: fixture.layout.fullSRTURL)
+        staleFullSource[0].text += " stale"
+        try SRTService().writePreservingIDs(staleFullSource, to: fixture.layout.fullSRTURL)
+        do {
+            _ = try await resumed.run(settings: settings(fixture), onLog: { _ in })
+            throw ProbeFailure(message: "stale RU canonical source incorrectly skipped translation")
+        } catch WorkflowError.processFailed(let message) {
+            try require(message == "Текущий SRT не совпадает с утверждённой исходной ревизией.",
+                        "stale RU canonical source did not fail immutable source validation")
+        }
+        try require(current.calls == 0 && Data(contentsOf: fixture.layout.subtitlesURL(language: .en)) == targetSRT,
+                    "stale RU canonical source invoked the v7 provider or changed approved target")
+        try sourceFullSRT.write(to: fixture.layout.fullSRTURL, options: .atomic)
+        try fixture.store.mutate(fixture.project) { manifest in
+            guard var revisions = manifest.transcriptRevisions,
+                  let sourceIndex = revisions.firstIndex(where: { $0.id == source.id }) else {
+                throw ProbeFailure(message: "approved v6 source disappeared before unapproved-source regression")
+            }
+            revisions[sourceIndex].reviewStatus = .pending
+            manifest.transcriptRevisions = revisions
+        }
+        do {
+            _ = try await resumed.run(settings: settings(fixture), onLog: { _ in })
+            throw ProbeFailure(message: "unapproved source incorrectly skipped translation")
+        } catch WorkflowError.processFailed(let message) {
+            try require(message == "Перевод запускается только из существующего проекта с утверждённой исходной расшифровкой.",
+                        "unapproved source did not remain non-skippable")
+        }
+        try require(current.calls == 0 && Data(contentsOf: fixture.layout.subtitlesURL(language: .en)) == targetSRT,
+                    "unapproved source invoked the v7 provider or changed approved bytes")
+
+        try fixture.store.mutate(fixture.project) { manifest in
+            guard var revisions = manifest.transcriptRevisions,
+                  let sourceIndex = revisions.firstIndex(where: { $0.id == source.id }),
+                  let targetIndex = revisions.firstIndex(where: { $0.id == target.id }) else {
+                throw ProbeFailure(message: "approved v6 revisions disappeared before unapproved-target regression")
+            }
+            revisions[sourceIndex].reviewStatus = .approved
+            revisions[targetIndex].reviewStatus = .pending
+            manifest.transcriptRevisions = revisions
+        }
+        do {
+            _ = try await resumed.run(settings: settings(fixture), onLog: { _ in })
+            throw ProbeFailure(message: "unapproved target incorrectly skipped translation")
+        } catch WorkflowError.processFailed(let message) {
+            try require(message == "Перевод содержит ручные правки. Новый профиль перевода не будет автоматически заменять принятую пользователем ревизию.",
+                        "unapproved target did not remain non-skippable")
+        }
+        try require(current.calls == 0 && Data(contentsOf: fixture.layout.subtitlesURL(language: .en)) == targetSRT,
+                    "unapproved target invoked the v7 provider or changed approved bytes")
+    }
+
+    private static func verifyENToRUApprovedTargetRejectsTamperedLocalizedSource(root: URL) async throws {
+        let fixture = try makeFixture(root: root, sourceLanguage: .en)
+        try FileManager.default.removeItem(at: fixture.layout.subtitlesURL(language: .en))
+        try FileManager.default.removeItem(at: fixture.layout.transcriptURL(language: .en))
+        let legacy = VersionedLegacyTranslationProvider(protocolVersion: "translategemma-booktext-owned-tasks-v6-docmeta512-lineage2-overlap2x600-source-echo1-ctx8k")
+        let selectedTiming = SelectedTimingVerticalSlice(translator: RecordingENRUTranslator())
+        let initial = WorkflowEngine(
+            store: fixture.store,
+            translationAdapter: TranslationAdapter(provider: legacy),
+            selectedTimingTranslation: selectedTiming
+        )
+        _ = try await initial.run(settings: settings(fixture), onLog: { _ in })
+        _ = try HumanReviewService(store: fixture.store).approve(projectURL: fixture.project)
+        let approved = try fixture.store.load(from: fixture.project)
+        guard let target = approved.activeTranscriptRevision(for: .ru),
+              target.origin == .userEdited, target.reviewStatus == .approved else {
+            throw ProbeFailure(message: "EN→RU fixture did not create an approved user-edited target")
+        }
+        let sourceFullSRT = try Data(contentsOf: fixture.layout.fullSRTURL)
+        let sourceLocalizedSRT = try Data(contentsOf: fixture.layout.subtitlesURL(language: .en))
+        let targetSRT = try Data(contentsOf: fixture.layout.subtitlesURL(language: .ru))
+        let current = VersionedLegacyTranslationProvider(protocolVersion: OllamaTranslationProvider.protocolVersion)
+        let resumed = WorkflowEngine(
+            store: fixture.store,
+            translationAdapter: TranslationAdapter(provider: current),
+            selectedTimingTranslation: selectedTiming
+        )
+        _ = try await resumed.run(settings: settings(fixture), onLog: { _ in })
+        try require(current.calls == 0, "v7 EN→RU resume reran an approved user-edited target")
+
+        var stale = try SRTService().load(from: fixture.layout.subtitlesURL(language: .en))
+        stale[0].text += " stale"
+        try SRTService().writePreservingIDs(stale, to: fixture.layout.subtitlesURL(language: .en))
+        do {
+            _ = try await resumed.run(settings: settings(fixture), onLog: { _ in })
+            throw ProbeFailure(message: "tampered EN localized source incorrectly skipped translation")
+        } catch WorkflowError.processFailed(let message) {
+            try require(message == "Текущий SRT не совпадает с утверждённой исходной ревизией.",
+                        "tampered EN localized source did not fail immutable source validation")
+        }
+        try require(current.calls == 0 && Data(contentsOf: fixture.layout.subtitlesURL(language: .ru)) == targetSRT,
+                    "tampered EN localized source invoked v7 provider or changed approved RU target")
+
+        try sourceLocalizedSRT.write(to: fixture.layout.subtitlesURL(language: .en), options: .atomic)
+        var staleFull = try SRTService().load(from: fixture.layout.fullSRTURL)
+        staleFull[0].text += " stale"
+        try SRTService().writePreservingIDs(staleFull, to: fixture.layout.fullSRTURL)
+        do {
+            _ = try await resumed.run(settings: settings(fixture), onLog: { _ in })
+            throw ProbeFailure(message: "tampered EN full source incorrectly skipped translation")
+        } catch WorkflowError.processFailed(let message) {
+            try require(message == "Текущий SRT не совпадает с утверждённой исходной ревизией.",
+                        "tampered EN full source did not fail immutable source validation")
+        }
+        try require(current.calls == 0
+                    && Data(contentsOf: fixture.layout.subtitlesURL(language: .ru)) == targetSRT
+                    && sourceFullSRT != Data(contentsOf: fixture.layout.fullSRTURL),
+                    "tampered EN full source invoked v7 provider or changed approved RU target")
+
+        try sourceFullSRT.write(to: fixture.layout.fullSRTURL, options: .atomic)
+        try fixture.store.mutate(fixture.project) { manifest in
+            guard var revisions = manifest.transcriptRevisions,
+                  let index = revisions.firstIndex(where: { $0.id == target.id }) else {
+                throw ProbeFailure(message: "EN→RU target disappeared before unapproved-target source guard regression")
+            }
+            revisions[index].reviewStatus = .pending
+            manifest.transcriptRevisions = revisions
+        }
+        var staleUnapproved = try SRTService().load(from: fixture.layout.subtitlesURL(language: .en))
+        staleUnapproved[0].text += " stale again"
+        try SRTService().writePreservingIDs(staleUnapproved, to: fixture.layout.subtitlesURL(language: .en))
+        do {
+            _ = try await resumed.run(settings: settings(fixture), onLog: { _ in })
+            throw ProbeFailure(message: "unapproved target allowed tampered EN localized source translation")
+        } catch WorkflowError.processFailed(let message) {
+            try require(message == "Текущий SRT не совпадает с утверждённой исходной ревизией.",
+                        "unapproved target bypassed EN localized source validation")
+        }
+        try require(current.calls == 0 && Data(contentsOf: fixture.layout.subtitlesURL(language: .ru)) == targetSRT,
+                    "unapproved target tampered EN source invoked v7 provider or changed approved RU target")
     }
 
     private static func verifyRelocatedSourceReferenceRecovery(
@@ -1010,6 +1251,56 @@ private final class ScriptedLegacyTranslationProvider: TranslationAIProvider {
             case 1: text = "Yuri did not cancel the meeting at 7 o'clock."
             case 3: text = "The report lists 12 participants."
             default: text = "English translation \(cue.id)."
+            }
+            return (cue.id, text)
+        })
+    }
+}
+
+private final class VersionedLegacyTranslationProvider: TranslationAIProvider {
+    let protocolVersion: String
+    private(set) var calls = 0
+
+    init(protocolVersion: String) {
+        self.protocolVersion = protocolVersion
+    }
+
+    func preferredModel() async throws -> String { "versioned-legacy-translation" }
+
+    func preferredIdentity() async throws -> TranslationModelIdentity {
+        TranslationModelIdentity(
+            model: "versioned-legacy-translation",
+            digest: "versioned-legacy-digest",
+            protocolVersion: protocolVersion
+        )
+    }
+
+    func translate(
+        cues: [TranslationRequestCue],
+        source: ArtifactLanguage,
+        target: ArtifactLanguage,
+        model: String,
+        correction: String?
+    ) async throws -> [Int: String] {
+        calls += 1
+        guard model == "versioned-legacy-translation", correction == nil,
+              (source == .ru && target == .en) || (source == .en && target == .ru) else {
+            throw ProbeFailure(message: "Versioned legacy provider received an unexpected translation request")
+        }
+        return Dictionary(uniqueKeysWithValues: cues.map { cue in
+            let text: String
+            if source == .ru {
+                switch cue.id {
+                case 1: text = "Yuri did not cancel the meeting at 7 o'clock."
+                case 3: text = "The report lists 12 participants."
+                default: text = "English translation \(cue.id)."
+                }
+            } else {
+                switch cue.id {
+                case 1: text = "Юрий не отменил встречу в 7 часов."
+                case 3: text = "В отчёте указано 12 участников."
+                default: text = "Русский перевод \(cue.id)."
+                }
             }
             return (cue.id, text)
         })

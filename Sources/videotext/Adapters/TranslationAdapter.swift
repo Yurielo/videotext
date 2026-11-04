@@ -19,6 +19,27 @@ struct TranslationIssue: Equatable {
     var candidateText: String?
 }
 
+/// A structurally valid response can still lose cue ownership if the model
+/// changes `sourceEcho`. It is never accepted; the provider may make one
+/// correction request for exactly the failed internal subbatch.
+enum TranslationOwnershipResponseError: LocalizedError, Equatable {
+    case sourceEchoMismatch(cueIDs: [Int])
+
+    var errorDescription: String? {
+        switch self {
+        case .sourceEchoMismatch(let cueIDs):
+            return "TranslateGemma изменила sourceEcho для cueId: \(cueIDs)."
+        }
+    }
+
+    var correction: String {
+        switch self {
+        case .sourceEchoMismatch(let cueIDs):
+            return "PREVIOUS RESPONSE REJECTED: sourceEcho for cueId \(cueIDs) was altered. Return every sourceEcho byte-for-byte exactly as the corresponding source, including punctuation and whitespace. Do not translate, normalize, shorten, or rewrite sourceEcho."
+        }
+    }
+}
+
 struct TranslationAdapterResult {
     var cues: [SubtitleCue]
     var issues: [TranslationIssue]
@@ -121,6 +142,14 @@ struct TranslationAdapter {
                     receivedResponse = true
                 } catch is CancellationError {
                     throw CancellationError()
+                } catch is TranslationOwnershipResponseError {
+                    // The provider already used its sole correction retry for
+                    // the failed internal subbatch. Do not reissue the whole
+                    // execution unit with the same invalid ownership request.
+                    reasonsByID = Dictionary(uniqueKeysWithValues: pending.map {
+                        ($0.id, ["provider-error: source-echo-ownership-mismatch"])
+                    })
+                    break
                 } catch {
                     try Task.checkCancellation()
                     reasonsByID = Dictionary(uniqueKeysWithValues: pending.map { ($0.id, ["provider-error: \(error.localizedDescription)"]) })
@@ -245,7 +274,7 @@ struct OllamaTranslationProvider: TranslationAIProvider {
     private let baseURL = URL(string: "http://127.0.0.1:11434")!
     private let transport: ((URLRequest) async throws -> Data)?
     static let model = "translategemma:4b"
-    static let protocolVersion = "translategemma-booktext-owned-tasks-v6-docmeta512-lineage2-overlap2x600-source-echo1-ctx8k"
+    static let protocolVersion = "translategemma-booktext-owned-tasks-v7-docmeta512-lineage2-overlap2x600-source-echo2-pair-schema1-ctx8k"
     private let maximumOutputTokens = 4096
     private let maximumContextTokens = 8192
     private let contextSafetyTokens = 256
@@ -283,7 +312,35 @@ struct OllamaTranslationProvider: TranslationAIProvider {
         var translated: [Int: String] = [:]
         for batch in try ownershipBatches(cues: cues, source: source, target: target, model: model, correction: correction) {
             try Task.checkCancellation()
-            let response = try await translateBatch(cues: batch, source: source, target: target, model: model, correction: correction)
+            let response: [Int: String]
+            do {
+                response = try await translateBatch(cues: batch, source: source, target: target, model: model, correction: correction)
+            } catch let ownership as TranslationOwnershipResponseError where correction == nil {
+                // Keep the same owned cues and schema. The correction can make
+                // a near-limit batch larger, so re-plan it against the same
+                // context budget before its one permitted recovery request.
+                var corrected: [Int: String] = [:]
+                for correctionBatch in try ownershipBatches(
+                    cues: batch,
+                    source: source,
+                    target: target,
+                    model: model,
+                    correction: ownership.correction
+                ) {
+                    let correctionResponse = try await translateBatch(
+                        cues: correctionBatch,
+                        source: source,
+                        target: target,
+                        model: model,
+                        correction: ownership.correction
+                    )
+                    guard Set(corrected.keys).isDisjoint(with: correctionResponse.keys) else {
+                        throw WorkflowError.processFailed("TranslateGemma повторила cueId между correction subbatch.")
+                    }
+                    corrected.merge(correctionResponse) { current, _ in current }
+                }
+                response = corrected
+            }
             guard Set(translated.keys).isDisjoint(with: response.keys) else {
                 throw WorkflowError.processFailed("TranslateGemma повторила cueId между execution batch.")
             }
@@ -360,9 +417,14 @@ struct OllamaTranslationProvider: TranslationAIProvider {
         let rows = try JSONDecoder().decode([OwnedTranslation].self, from: Data(translated.utf8))
         let sourceByID = Dictionary(uniqueKeysWithValues: cues.map { ($0.id, $0.text) })
         guard rows.count == cues.count, Set(rows.map(\.cueId)).count == rows.count,
-              Set(rows.map(\.cueId)) == Set(cues.map(\.id)),
-              rows.allSatisfy({ sourceByID[$0.cueId] == $0.sourceEcho }) else {
+              Set(rows.map(\.cueId)) == Set(cues.map(\.id)) else {
             throw WorkflowError.processFailed("TranslateGemma нарушила ownership cueId в ответе.")
+        }
+        let mismatchedEchoes = rows.compactMap { row in
+            sourceByID[row.cueId] == row.sourceEcho ? nil : row.cueId
+        }.sorted()
+        guard mismatchedEchoes.isEmpty else {
+            throw TranslationOwnershipResponseError.sourceEchoMismatch(cueIDs: mismatchedEchoes)
         }
         return Dictionary(uniqueKeysWithValues: rows.map { ($0.cueId, $0.text.trimmingCharacters(in: .whitespacesAndNewlines)) })
     }
@@ -379,6 +441,7 @@ struct OllamaTranslationProvider: TranslationAIProvider {
         let protectedInstruction = protected.isEmpty
             ? ""
             : " Reproduce these tokens exactly, without translating or changing them: \(protected.joined(separator: ", "))."
+        let correctionInstruction = correction.map { "\n\($0)" } ?? ""
         let tasks = cues.map { cue in
             TranslationOwnershipTask(
                 cueId: cue.id,
@@ -401,7 +464,7 @@ struct OllamaTranslationProvider: TranslationAIProvider {
         You are a professional \(sourceName) (\(source.rawValue)) to \(targetName) (\(target.rawValue)) translator. Your goal is to accurately convey meaning and nuances while using natural, established \(targetName) terminology.
         This is a timecoded spoken transcript. Short utterances can belong to different speakers. Original subtitle cues are immutable semantic owners. Execution batching is not a sentence boundary.
         DOCUMENT_CONTEXT (read-only): \(quoted((cues.first?.context?.document ?? "Timecoded spoken transcript.").replacingOccurrences(of: "\n", with: " ")))
-        SOURCE OWNERSHIP CONTRACT: Each TRANSLATION_TASK contains exactly one cueId and source plus read-only contextBefore/contextAfter. For every task, first copy that task's source exactly into sourceEcho, then translate ONLY that source into text. Read context only to interpret idioms, pronouns, ellipsis, discourse roles and recurring terminology. Never translate, copy, move, complete or emit a proposition from context or another task. Preserve source incompleteness. Preserve every proposition, negation, number, frequency, modifier, evaluation, name, referent and natural repetition expressed in source. Use established idiomatic \(targetName) terminology rather than literal calques when context determines ordinary meaning. Never redistribute clauses for fluency.\(protectedInstruction)
+        SOURCE OWNERSHIP CONTRACT: Each TRANSLATION_TASK contains exactly one cueId and source plus read-only contextBefore/contextAfter. For every task, first copy that task's source exactly into sourceEcho, then translate ONLY that source into text. Read context only to interpret idioms, pronouns, ellipsis, discourse roles and recurring terminology. Never translate, copy, move, complete or emit a proposition from context or another task. Preserve source incompleteness. Preserve every proposition, negation, number, frequency, modifier, evaluation, name, referent and natural repetition expressed in source. Use established idiomatic \(targetName) terminology rather than literal calques when context determines ordinary meaning. Never redistribute clauses for fluency.\(protectedInstruction)\(correctionInstruction)
         Before answering, silently verify: (1) every cueId has its own exact sourceEcho, (2) every source proposition appears once under its own cueId, (3) no context proposition appears, (4) recurring source terms have contextually consistent idiomatic translations.
         Return exactly one JSON array object per task with cueId, exact sourceEcho, and text. No explanations.
         TRANSLATION_TASKS:
@@ -419,11 +482,17 @@ struct OllamaTranslationProvider: TranslationAIProvider {
         func json<T: Encodable>(_ value: T) -> String {
             String(decoding: try! encoder.encode(value), as: UTF8.self)
         }
-        // Ollama derives the constrained-object emission order from these
-        // schema bytes. Identity must lead the row so text cannot drift ahead
-        // of its cue owner on small local models.
+        // Each oneOf alternative binds a cueId to its own exact sourceEcho.
+        // Independent enums would permit a small model to rotate valid echoes
+        // between otherwise valid owners. The post-response validator remains
+        // authoritative for any decoder/runtime deviation.
+        let ownerPairs = cues.map { cue in
+            """
+            {"type":"object","properties":{"cueId":{"type":"integer","const":\(cue.id)},"sourceEcho":{"type":"string","const":\(json(cue.text))},"text":{"type":"string"}},"required":["cueId","sourceEcho","text"],"additionalProperties":false}
+            """
+        }.joined(separator: ",")
         let body = """
-        {"model":\(json(model)),"stream":false,"format":{"type":"array","minItems":\(cues.count),"maxItems":\(cues.count),"items":{"type":"object","properties":{"cueId":{"type":"integer","enum":\(json(cues.map(\.id)))},"sourceEcho":{"type":"string","enum":\(json(cues.map(\.text)))},"text":{"type":"string"}},"required":["cueId","sourceEcho","text"],"additionalProperties":false}},"messages":[{"role":"user","content":\(json(prompt))}],"options":{"temperature":0,"num_ctx":8192,"num_predict":\(outputBudget(for: cues))}}
+        {"model":\(json(model)),"stream":false,"format":{"type":"array","minItems":\(cues.count),"maxItems":\(cues.count),"items":{"oneOf":[\(ownerPairs)]}},"messages":[{"role":"user","content":\(json(prompt))}],"options":{"temperature":0,"num_ctx":8192,"num_predict":\(outputBudget(for: cues))}}
         """
         return Data(body.utf8)
     }

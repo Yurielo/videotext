@@ -12,14 +12,16 @@ struct TranslationOwnershipProbe {
         try await verifySourceAnchorContractWiring()
         try await verifyProductionSingleBatchContract()
         try await verifyProductionBatchFailures()
+        try await verifyProductionSourceEchoCorrectionRetry()
         print("ownership_task_prompt=PASS source_span_isolation=PASS scripted_context_routing=PASS scripted_alignment=PASS live_semantics=NOT_TESTED")
         print("source_echo_rejection=PASS scripted_http_single_batch_contract=PASS production_schema_truncation_failure_cancellation=PASS")
         try await verifyOwnershipAndBoundaries()
         print("ownership=PASS boundary_context=PASS alignment=PASS duplicate_input=PASS")
         try await verifyContextResponseRejection()
         try await verifySelectiveRetryAndProviderFailure()
+        try await verifyOwnershipMismatchStopsAtAdapter(directory: root.appendingPathComponent("ownership-mismatch"))
         try await verifyUnresolvedPrefix(directory: root.appendingPathComponent("unresolved"))
-        print("context_only_response=PASS selective_retry=PASS provider_failure_retry=PASS unresolved_prefix=PASS")
+        print("context_only_response=PASS selective_retry=PASS provider_failure_retry=PASS ownership_mismatch_fail_closed=PASS unresolved_prefix=PASS")
         try await verifyCheckpointWriteFailure(directory: root.appendingPathComponent("write-failure"))
         print("checkpoint_write_failure_fatal=PASS")
         try await verifyCancellationAndResume(directory: root.appendingPathComponent("cancellation"))
@@ -30,12 +32,13 @@ struct TranslationOwnershipProbe {
         try verifySparseContextPrompt()
         try verifyOutputBudget()
         try verifyAdaptiveRequestBatches()
+        try verifyCorrectionAdaptiveRequestBatches()
         print("cancelled_unit_not_committed=PASS source_echo_review=PASS name_exception=PASS quoted_context=PASS")
-        print("sparse_context_direction=PASS owner_context_association=PASS output_budget=PASS adaptive_request_batches=PASS generic_fragment_instruction=PASS")
+        print("sparse_context_direction=PASS owner_context_association=PASS output_budget=PASS adaptive_request_batches=PASS correction_batch_safety=PASS generic_fragment_instruction=PASS")
         try await verifyNeutralTokens()
         print("numeric_only=PASS protected_token_passthrough=PASS token_changes_rejected=PASS")
         try await verifyInvalidation(directory: root.appendingPathComponent("invalidation"))
-        print("unchanged_cache=PASS ancestor_context_invalidation=PASS v5_to_v6_protocol_invalidation=PASS title_source_overlap_digest_protocol_identity_invalidation=PASS")
+        print("unchanged_cache=PASS ancestor_context_invalidation=PASS v5_to_v7_protocol_invalidation=PASS title_source_overlap_digest_protocol_identity_invalidation=PASS")
         try await verifyCheckpointCorruption(directory: root.appendingPathComponent("corruption"))
         print("corrupt_checkpoint=PASS tampered_checkpoint=PASS")
         try verifyReportCompatibilityAndResume(directory: root.appendingPathComponent("report-resume"))
@@ -203,6 +206,26 @@ struct TranslationOwnershipProbe {
         try require(throwingCalls[1] == throwingCalls[2], "Provider-error retry changed its owned unit/context")
     }
 
+    private static func verifyOwnershipMismatchStopsAtAdapter(directory: URL) async throws {
+        let config = configuration(Array(fixture().prefix(3)))
+        let provider = OwnershipProvider(identity: config.identity, behavior: .throwOwnershipMismatch)
+        let result = try await run(config, provider: provider, directory: directory)
+        let calls = await provider.calls
+        try assertAlignment(result, source: config.cues)
+        try require(calls.map { $0.map(\.id) } == [config.cues.map(\.id)],
+                    "sourceEcho mismatch retried the complete adapter execution unit")
+        try require(result.issues.map(\.cueID) == config.cues.map(\.id)
+                    && result.issues.allSatisfy { $0.reasonCodes == ["provider-error: source-echo-ownership-mismatch"] && $0.candidateText == nil },
+                    "sourceEcho mismatch was not preserved as a typed fail-closed review issue")
+        try require(zip(result.cues, config.cues).allSatisfy { $0.text == $1.text },
+                    "sourceEcho mismatch replaced a source cue with unverified output")
+        let plan = try TranslationContextPlan(cues: config.cues, documentTitle: config.title, chunkSize: 3)
+        let store = try checkpointStore(config, plan: plan, directory: directory)
+        try require(store.load(plan.units[0]).isEmpty, "sourceEcho mismatch wrote an unverified checkpoint")
+        let record = directory.appendingPathComponent(store.runIdentity, isDirectory: true).appendingPathComponent("unit-0.json")
+        try require(!FileManager.default.fileExists(atPath: record.path), "sourceEcho mismatch left a checkpoint record")
+    }
+
     private static func verifyUnresolvedPrefix(directory: URL) async throws {
         let config = configuration(Array(fixture().prefix(3)))
         let failedID = config.cues[1].id
@@ -368,7 +391,7 @@ struct TranslationOwnershipProbe {
     private static func verifySourceAnchorContractWiring() async throws {
         // Scripted responses exercise transport and assembly, not model semantics.
         let scenarios = sourceAnchorScenarios()
-        try require(OllamaTranslationProvider.protocolVersion.contains("owned-tasks-v6-") && OllamaTranslationProvider.protocolVersion.contains("source-echo1"), "Ownership-task contract lacks new protocol provenance")
+        try require(OllamaTranslationProvider.protocolVersion.contains("owned-tasks-v7-") && OllamaTranslationProvider.protocolVersion.contains("pair-schema1"), "Ownership-task contract lacks pair-bound protocol provenance")
         var contextByScenario: [String: String] = [:]
         for scenario in scenarios {
             let ids = [601, 304, 892]
@@ -460,20 +483,30 @@ struct TranslationOwnershipProbe {
               let messages = body["messages"] as? [[String: Any]], messages.count == 1,
               let prompt = messages[0]["content"] as? String,
               let schema = body["format"] as? [String: Any], let items = schema["items"] as? [String: Any],
-              let properties = items["properties"] as? [String: Any],
-              let idSchema = properties["cueId"] as? [String: Any],
-              let sourceSchema = properties["sourceEcho"] as? [String: Any] else {
+              let ownerPairs = items["oneOf"] as? [[String: Any]] else {
             throw OwnershipFailure(message: "Production single batch lacks its JSON chat/schema envelope")
         }
         let bodyText = String(decoding: data, as: UTF8.self)
-        try require(bodyText.contains(#""properties":{"cueId":{"type":"integer""#),
-                    "Production schema bytes no longer emit cueId before sourceEcho/text")
+        try require(bodyText.contains(#""items":{"oneOf":["#),
+                    "Production schema bytes no longer emit pair-bound owner alternatives")
         let repeatedBody = provider.orderedRequestBody(prompt: prompt, cues: owned, model: identity.model)
         try require(repeatedBody == data, "Production request bytes are not stable across identical construction")
         try require(schema["type"] as? String == "array" && schema["minItems"] as? Int == owned.count && schema["maxItems"] as? Int == owned.count, "Production schema does not require the exact owned row count")
-        try require(idSchema["enum"] as? [Int] == owned.map(\.id) && items["additionalProperties"] as? Bool == false, "Production schema permits wrong owner IDs or extra fields")
-        try require(sourceSchema["enum"] as? [String] == owned.map(\.text), "Production schema lost the exact source-echo domain")
-        try require(Set(items["required"] as? [String] ?? []) == Set(["cueId", "sourceEcho", "text"]), "Production schema lost required ownership fields")
+        try require(ownerPairs.count == owned.count, "Production schema does not bind every owned cue pair")
+        let boundPairs = try ownerPairs.map { pair -> (Int, String) in
+            guard let properties = pair["properties"] as? [String: Any],
+                  let idSchema = properties["cueId"] as? [String: Any],
+                  let sourceSchema = properties["sourceEcho"] as? [String: Any],
+                  let id = idSchema["const"] as? Int,
+                  let source = sourceSchema["const"] as? String,
+                  pair["additionalProperties"] as? Bool == false,
+                  Set(pair["required"] as? [String] ?? []) == Set(["cueId", "sourceEcho", "text"]) else {
+                throw OwnershipFailure(message: "Production pair schema permits an unbound owner")
+            }
+            return (id, source)
+        }
+        try require(boundPairs.map(\.0) == owned.map(\.id) && boundPairs.map(\.1) == owned.map(\.text),
+                    "Production schema permits a cueId/sourceEcho cross-pair")
         try assertSourceAnchorPrompt(prompt)
         let tasks = try promptTasks(prompt)
         try require(tasks.map(\.cueId) == owned.map(\.id) && tasks.map(\.source) == owned.map(\.text),
@@ -536,8 +569,59 @@ struct TranslationOwnershipProbe {
             }
             try require(failed, "\(failure.rawValue) production batch published an invalid response")
             let requests = await transport.requests
-            try require(requests.count == 1 && requests[0].url?.path == "/api/chat", "Failed production batch retried or made unexpected requests")
+            let expectedRequests = failure == .sourceEcho ? 2 : 1
+            try require(requests.count == expectedRequests && requests.allSatisfy { $0.url?.path == "/api/chat" },
+                        "Failed production batch made an unexpected ownership-recovery request")
         }
+    }
+
+    private static func verifyProductionSourceEchoCorrectionRetry() async throws {
+        let config = configuration(Array(fixture().prefix(2)))
+        let plan = try TranslationContextPlan(cues: config.cues, documentTitle: config.title, chunkSize: 2)
+        let owned = plan.units[0].owned
+        let incorrectRows: [[String: Any]] = owned.enumerated().map { index, cue in
+            [
+                "cueId": cue.id,
+                "sourceEcho": index == 0 ? cue.text + " altered" : cue.text,
+                "text": "Scripted translation \(cue.id)."
+            ]
+        }
+        let correctedRows: [[String: Any]] = owned.map { cue in
+            ["cueId": cue.id, "sourceEcho": cue.text, "text": "Scripted translation \(cue.id)."]
+        }
+        func reply(_ rows: [[String: Any]]) throws -> Data {
+            try JSONSerialization.data(withJSONObject: [
+                "done": true,
+                "done_reason": "stop",
+                "message": ["content": String(decoding: try JSONSerialization.data(withJSONObject: rows), as: UTF8.self)]
+            ])
+        }
+        let transport = OwnershipCorrectionTransport(replies: [try reply(incorrectRows), try reply(correctedRows)])
+        let provider = OllamaTranslationProvider(transport: { request in try await transport.respond(to: request) })
+        let response = try await provider.translate(
+            cues: owned,
+            source: .ru,
+            target: .en,
+            model: OllamaTranslationProvider.model,
+            correction: nil
+        )
+        try require(response.keys.sorted() == owned.map(\.id).sorted(),
+                    "corrected sourceEcho response lost cue ownership")
+        let requests = await transport.requests
+        try require(requests.count == 2, "sourceEcho recovery exceeded one bounded subbatch retry")
+        guard let correctionBody = requests[1].httpBody,
+              let correctionRoot = try JSONSerialization.jsonObject(with: correctionBody) as? [String: Any],
+              let correctionPrompt = ((correctionRoot["messages"] as? [[String: Any]])?.first?["content"] as? String) else {
+            throw OwnershipFailure(message: "sourceEcho correction request lacks prompt")
+        }
+        try require(correctionPrompt.contains("PREVIOUS RESPONSE REJECTED")
+                    && correctionPrompt.contains("sourceEcho for cueId [\(owned[0].id)] was altered")
+                    && correctionPrompt.contains("byte-for-byte exactly"),
+                    "sourceEcho correction was not explicit or bounded to the failed owner")
+        let correctionTasks = try promptTasks(correctionPrompt)
+        try require(correctionTasks.map(\.cueId) == owned.map(\.id)
+                    && correctionTasks.map(\.source) == owned.map(\.text),
+                    "sourceEcho correction changed owned source inputs")
     }
 
     private static func verifySparseContextPrompt() throws {
@@ -604,6 +688,47 @@ struct TranslationOwnershipProbe {
             rejected = message.contains("Human Review")
         }
         try require(rejected, "A single oversized owner was not rejected explicitly for Human Review")
+    }
+
+    private static func verifyCorrectionAdaptiveRequestBatches() throws {
+        let provider = OllamaTranslationProvider()
+        let requests = (0..<11).map { index in
+            TranslationRequestCue(
+                id: 2_000 + index,
+                text: "Owned cue \(index) " + String(repeating: "content ", count: 34),
+                context: TranslationCueContext(
+                    document: "Timecoded spoken transcript.",
+                    before: [TranslationContextCue(id: 1_900 + index, text: String(repeating: "before ", count: 24))],
+                    after: [TranslationContextCue(id: 2_100 + index, text: String(repeating: "after ", count: 24))]
+                )
+            )
+        }
+        let correction = TranslationOwnershipResponseError.sourceEchoMismatch(cueIDs: [requests[4].id]).correction
+        let batches = try provider.ownershipBatches(
+            cues: requests,
+            source: .ru,
+            target: .en,
+            model: OllamaTranslationProvider.model,
+            correction: correction
+        )
+        try require(batches.flatMap { $0.map(\.id) } == requests.map(\.id),
+                    "sourceEcho correction changed cue ownership/order")
+        for batch in batches {
+            try require(
+                provider.estimatedContextTokens(
+                    cues: batch,
+                    source: .ru,
+                    target: .en,
+                    model: OllamaTranslationProvider.model,
+                    correction: correction
+                ) <= 7_936,
+                "sourceEcho correction batch exceeded the context safety budget"
+            )
+        }
+        let baseline = provider.translationPrompt(cues: requests, source: .ru, target: .en, correction: nil)
+        let corrected = provider.translationPrompt(cues: requests, source: .ru, target: .en, correction: correction)
+        try require(corrected != baseline && corrected.contains("PREVIOUS RESPONSE REJECTED"),
+                    "sourceEcho correction did not materially change the retry prompt")
     }
 
     private static func verifyCheckpointWriteFailure(directory: URL) async throws {
@@ -697,7 +822,7 @@ struct TranslationOwnershipProbe {
         cases.append(("model-name", changed))
         changed = base
         changed.identity.protocolVersion = OllamaTranslationProvider.protocolVersion
-        cases.append(("v5-to-v6-source-echo-protocol", changed))
+        cases.append(("v5-to-v7-pair-schema-protocol", changed))
         changed = base
         changed.sourceIdentity = "source-revision-b"
         cases.append(("source-identity", changed))
@@ -939,7 +1064,7 @@ private actor OwnershipBatchTransport {
                 "digest": Self.digest
             ]]])
         }
-        guard request.url?.path == "/api/chat", request.httpMethod == "POST", chatCalls == 0 else {
+        guard request.url?.path == "/api/chat", request.httpMethod == "POST" else {
             throw OwnershipFailure(message: "Unexpected request to single-batch scripted HTTP transport")
         }
         chatCalls += 1
@@ -947,6 +1072,24 @@ private actor OwnershipBatchTransport {
         if urlCancelReply { throw URLError(.cancelled) }
         if cancelReply { withUnsafeCurrentTask { $0?.cancel() } }
         return reply
+    }
+}
+
+private actor OwnershipCorrectionTransport {
+    private let replies: [Data]
+    private var nextReply = 0
+    private(set) var requests: [URLRequest] = []
+
+    init(replies: [Data]) { self.replies = replies }
+
+    func respond(to request: URLRequest) throws -> Data {
+        requests.append(request)
+        guard request.url?.path == "/api/chat", request.httpMethod == "POST",
+              replies.indices.contains(nextReply) else {
+            throw OwnershipFailure(message: "Unexpected sourceEcho correction request")
+        }
+        defer { nextReply += 1 }
+        return replies[nextReply]
     }
 }
 
@@ -958,6 +1101,7 @@ private actor OwnershipProvider: TranslationAIProvider {
         case emptyOnce(target: Int)
         case alwaysEmpty(target: Int)
         case throwOnCallOnce(Int)
+        case throwOwnershipMismatch
         case cancelOnCall(Int, throwError: Bool)
         case fixedText(String)
         case scriptedOutputs([Int: String])
@@ -1004,6 +1148,8 @@ private actor OwnershipProvider: TranslationAIProvider {
             if response[target] != nil { response[target] = "" }
         case let .throwOnCallOnce(number):
             if calls.count == number { throw OwnershipFailure(message: "Provider failed the complete owned unit") }
+        case .throwOwnershipMismatch:
+            throw TranslationOwnershipResponseError.sourceEchoMismatch(cueIDs: cues.map(\.id))
         case let .cancelOnCall(number, throwError):
             if calls.count == number {
                 withUnsafeCurrentTask { $0?.cancel() }

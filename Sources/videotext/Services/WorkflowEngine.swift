@@ -3296,7 +3296,11 @@ final class WorkflowEngine: @unchecked Sendable {
                         )
                         log("Legacy full.srt materialized as the active \(sourceLanguage.rawValue.uppercased()) source without rerunning ASR.")
                     }
-                    guard workingSubtitleMatchesRevision(
+                    guard workingCanonicalSubtitleMatchesRevision(
+                        sourceRevision,
+                        language: sourceLanguage,
+                        projectURL: projectURL
+                    ), workingLocalizedSubtitleMatchesRevision(
                         sourceRevision,
                         language: sourceLanguage,
                         projectURL: projectURL
@@ -4318,6 +4322,38 @@ final class WorkflowEngine: @unchecked Sendable {
         return working == immutable
     }
 
+    private func workingLocalizedSubtitleMatchesRevision(
+        _ revision: TranscriptRevision,
+        language: ArtifactLanguage,
+        projectURL: URL
+    ) -> Bool {
+        let layout = ProjectLayout(root: projectURL)
+        let workingURL = layout.subtitlesURL(language: language)
+        let revisionURL = layout.subtitleRevisionURL(id: revision.id, language: language)
+        guard let working = try? Data(contentsOf: workingURL),
+              let immutable = try? Data(contentsOf: revisionURL) else { return false }
+        return working == immutable
+    }
+
+    private func workingCanonicalSubtitleMatchesRevision(
+        _ revision: TranscriptRevision,
+        language: ArtifactLanguage,
+        projectURL: URL
+    ) -> Bool {
+        let layout = ProjectLayout(root: projectURL)
+        let revisionURL = layout.subtitleRevisionURL(id: revision.id, language: language)
+        guard let working = try? Data(contentsOf: layout.fullSRTURL),
+              let immutable = try? Data(contentsOf: revisionURL) else { return false }
+        return working == immutable
+    }
+
+    private func targetArtifactsAreReady(_ revision: TranscriptRevision, manifest: ProjectManifest) -> Bool {
+        let ids = Set([revision.transcriptArtifactID, revision.subtitleArtifactID])
+        guard ids.count == 2 else { return false }
+        let related = (manifest.artifacts ?? []).filter { ids.contains($0.id) }
+        return Set(related.map(\.id)) == ids && related.allSatisfy { $0.validationStatus == .ready }
+    }
+
     private func restoreCoreWorkflowAfterTranslation(
         projectURL: URL,
         previous: ProjectWorkflowState
@@ -4785,6 +4821,26 @@ final class WorkflowEngine: @unchecked Sendable {
             } ?? false
             guard (report.status == .ready && report.reviewTaskIDs.isEmpty) || approvedUserEdit else {
                 return false
+            }
+            // A protocol change invalidates machine checkpoints, but must not
+            // make an already approved human target impossible to resume. Its
+            // source/target revision bytes and report lineage are immutable
+            // authority here; pending or stale artifacts still fail closed.
+            if let targetRevision = manifest.activeTranscriptRevision(for: targetLanguage),
+               sourceRevision.reviewStatus == .approved,
+               targetRevision.origin == .userEdited,
+               targetRevision.reviewStatus == .approved,
+               report.schemaVersion == 3,
+               report.sourceLanguage == sourceLanguage,
+               report.targetLanguage == targetLanguage,
+               report.sourceRevisionID == sourceRevision.id,
+               !report.targetRevisionID.isEmpty,
+               workingCanonicalSubtitleMatchesRevision(sourceRevision, language: sourceLanguage, projectURL: projectURL),
+               workingLocalizedSubtitleMatchesRevision(sourceRevision, language: sourceLanguage, projectURL: projectURL),
+               workingLocalizedSubtitleMatchesRevision(targetRevision, language: targetLanguage, projectURL: projectURL),
+               targetArtifactsAreReady(targetRevision, manifest: manifest),
+               TranslationResumeValidator.outputsMatch(report: report, manifest: manifest, layout: layout) {
+                return true
             }
             // An approved translation is intentionally not byte-identical to
             // the machine selected-timing document. Its immutable approved
