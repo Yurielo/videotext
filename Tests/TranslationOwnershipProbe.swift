@@ -13,8 +13,10 @@ struct TranslationOwnershipProbe {
         try await verifyProductionSingleBatchContract()
         try await verifyProductionBatchFailures()
         try await verifyProductionSourceEchoCorrectionRetry()
+        try await verifyProductionLengthRecovery()
+        try await verifyFormattingEntitySuffixNormalization()
         print("ownership_task_prompt=PASS source_span_isolation=PASS scripted_context_routing=PASS scripted_alignment=PASS live_semantics=NOT_TESTED")
-        print("source_echo_rejection=PASS scripted_http_single_batch_contract=PASS production_schema_truncation_failure_cancellation=PASS")
+        print("source_echo_rejection=PASS scripted_http_single_batch_contract=PASS production_schema_truncation_failure_cancellation=PASS length_recovery=PASS formatting_entity_suffix=PASS")
         try await verifyOwnershipAndBoundaries()
         print("ownership=PASS boundary_context=PASS alignment=PASS duplicate_input=PASS")
         try await verifyContextResponseRejection()
@@ -38,7 +40,7 @@ struct TranslationOwnershipProbe {
         try await verifyNeutralTokens()
         print("numeric_only=PASS protected_token_passthrough=PASS token_changes_rejected=PASS")
         try await verifyInvalidation(directory: root.appendingPathComponent("invalidation"))
-        print("unchanged_cache=PASS ancestor_context_invalidation=PASS v5_to_v7_protocol_invalidation=PASS title_source_overlap_digest_protocol_identity_invalidation=PASS")
+        print("unchanged_cache=PASS ancestor_context_invalidation=PASS v5_to_v8_protocol_invalidation=PASS title_source_overlap_digest_protocol_identity_invalidation=PASS")
         try await verifyCheckpointCorruption(directory: root.appendingPathComponent("corruption"))
         print("corrupt_checkpoint=PASS tampered_checkpoint=PASS")
         try verifyReportCompatibilityAndResume(directory: root.appendingPathComponent("report-resume"))
@@ -391,7 +393,7 @@ struct TranslationOwnershipProbe {
     private static func verifySourceAnchorContractWiring() async throws {
         // Scripted responses exercise transport and assembly, not model semantics.
         let scenarios = sourceAnchorScenarios()
-        try require(OllamaTranslationProvider.protocolVersion.contains("owned-tasks-v7-") && OllamaTranslationProvider.protocolVersion.contains("pair-schema1"), "Ownership-task contract lacks pair-bound protocol provenance")
+        try require(OllamaTranslationProvider.protocolVersion.contains("owned-tasks-v8-") && OllamaTranslationProvider.protocolVersion.contains("formatting-entity1"), "Ownership-task contract lacks formatting-normalization protocol provenance")
         var contextByScenario: [String: String] = [:]
         for scenario in scenarios {
             let ids = [601, 304, 892]
@@ -624,6 +626,64 @@ struct TranslationOwnershipProbe {
                     "sourceEcho correction changed owned source inputs")
     }
 
+    private static func verifyProductionLengthRecovery() async throws {
+        let config = configuration(Array(fixture().prefix(4)))
+        let plan = try TranslationContextPlan(cues: config.cues, documentTitle: config.title, chunkSize: 4)
+        let owned = plan.units[0].owned
+        func reply(rows: [TranslationRequestCue], doneReason: String = "stop") throws -> Data {
+            let payload = rows.map { ["cueId": $0.id, "sourceEcho": $0.text, "text": "Scripted translation \($0.id)."] }
+            return try JSONSerialization.data(withJSONObject: [
+                "done": true,
+                "done_reason": doneReason,
+                "message": ["content": doneReason == "length" ? "[" : String(decoding: try JSONSerialization.data(withJSONObject: payload), as: UTF8.self)]
+            ])
+        }
+        let split = owned.count / 2
+        let transport = OwnershipCorrectionTransport(replies: [
+            try reply(rows: owned, doneReason: "length"),
+            try reply(rows: Array(owned[..<split])),
+            try reply(rows: Array(owned[split...]))
+        ])
+        let provider = OllamaTranslationProvider(transport: { request in try await transport.respond(to: request) })
+        let response = try await provider.translate(
+            cues: owned, source: .ru, target: .en, model: OllamaTranslationProvider.model, correction: nil
+        )
+        try require(response.keys.sorted() == owned.map(\.id).sorted(),
+                    "length recovery lost exact cue ownership")
+        let requests = await transport.requests
+        try require(requests.count == 3, "length recovery did not use exactly one split retry")
+        let requestIDs = try requests.map { request -> [Int] in
+            guard let body = request.httpBody,
+                  let root = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+                  let prompt = ((root["messages"] as? [[String: Any]])?.first?["content"] as? String) else {
+                throw OwnershipFailure(message: "length recovery request lacks owned prompt")
+            }
+            return try promptTasks(prompt).map(\.cueId)
+        }
+        try require(requestIDs == [owned.map(\.id), Array(owned[..<split]).map(\.id), Array(owned[split...]).map(\.id)],
+                    "length recovery changed owner order or retried beyond the exact failing batch")
+    }
+
+    private static func verifyFormattingEntitySuffixNormalization() async throws {
+        let cues = [TranslationRequestCue(id: 77, text: "Исходная фраза.", context: nil)]
+        func reply(_ text: String) throws -> Data {
+            let rows = [["cueId": 77, "sourceEcho": "Исходная фраза.", "text": text]]
+            return try JSONSerialization.data(withJSONObject: [
+                "done": true, "done_reason": "stop",
+                "message": ["content": String(decoding: try JSONSerialization.data(withJSONObject: rows), as: UTF8.self)]
+            ])
+        }
+        let strippedTransport = OwnershipCorrectionTransport(replies: [try reply("Translated phrase.&#x20;&#x0002;")])
+        let strippedProvider = OllamaTranslationProvider(transport: { request in try await strippedTransport.respond(to: request) })
+        let stripped = try await strippedProvider.translate(cues: cues, source: .ru, target: .en, model: OllamaTranslationProvider.model, correction: nil)
+        try require(stripped[77] == "Translated phrase.", "terminal formatting entities were not removed before validation")
+
+        let preservedTransport = OwnershipCorrectionTransport(replies: [try reply("Translated phrase.&#x2026;")])
+        let preservedProvider = OllamaTranslationProvider(transport: { request in try await preservedTransport.respond(to: request) })
+        let preserved = try await preservedProvider.translate(cues: cues, source: .ru, target: .en, model: OllamaTranslationProvider.model, correction: nil)
+        try require(preserved[77] == "Translated phrase.&#x2026;", "normalization removed an entity outside the exact formatting allowlist")
+    }
+
     private static func verifySparseContextPrompt() throws {
         let config = configuration()
         let plan = try TranslationContextPlan(cues: config.cues, documentTitle: config.title, chunkSize: 5)
@@ -822,7 +882,7 @@ struct TranslationOwnershipProbe {
         cases.append(("model-name", changed))
         changed = base
         changed.identity.protocolVersion = OllamaTranslationProvider.protocolVersion
-        cases.append(("v5-to-v7-pair-schema-protocol", changed))
+        cases.append(("v5-to-v8-formatting-entity-protocol", changed))
         changed = base
         changed.sourceIdentity = "source-revision-b"
         cases.append(("source-identity", changed))

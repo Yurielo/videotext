@@ -40,6 +40,16 @@ enum TranslationOwnershipResponseError: LocalizedError, Equatable {
     }
 }
 
+/// A `length` completion is a partial constrained response. It is never
+/// decoded or accepted; the provider may retry only a smaller exact owner set.
+enum TranslationResponseLengthError: LocalizedError, Equatable {
+    case truncated
+
+    var errorDescription: String? {
+        "TranslateGemma исчерпала лимит ответа OWNED_CONTENT."
+    }
+}
+
 struct TranslationAdapterResult {
     var cues: [SubtitleCue]
     var issues: [TranslationIssue]
@@ -274,7 +284,7 @@ struct OllamaTranslationProvider: TranslationAIProvider {
     private let baseURL = URL(string: "http://127.0.0.1:11434")!
     private let transport: ((URLRequest) async throws -> Data)?
     static let model = "translategemma:4b"
-    static let protocolVersion = "translategemma-booktext-owned-tasks-v7-docmeta512-lineage2-overlap2x600-source-echo2-pair-schema1-ctx8k"
+    static let protocolVersion = "translategemma-booktext-owned-tasks-v8-docmeta512-lineage2-overlap2x600-source-echo2-pair-schema1-formatting-entity1-ctx8k"
     private let maximumOutputTokens = 4096
     private let maximumContextTokens = 8192
     private let contextSafetyTokens = 256
@@ -315,6 +325,23 @@ struct OllamaTranslationProvider: TranslationAIProvider {
             let response: [Int: String]
             do {
                 response = try await translateBatch(cues: batch, source: source, target: target, model: model, correction: correction)
+            } catch is TranslationResponseLengthError where correction == nil {
+                // `done_reason=length` proves only this internal batch was
+                // partial. Retry its same owners once as two smaller bounded
+                // subbatches; a further length error remains fail-closed.
+                guard batch.count > 1 else { throw TranslationResponseLengthError.truncated }
+                let split = batch.count / 2
+                var recovered: [Int: String] = [:]
+                for recoveryBatch in [Array(batch[..<split]), Array(batch[split...])] {
+                    let recoveryResponse = try await translateBatch(
+                        cues: recoveryBatch, source: source, target: target, model: model, correction: nil
+                    )
+                    guard Set(recovered.keys).isDisjoint(with: recoveryResponse.keys) else {
+                        throw WorkflowError.processFailed("TranslateGemma повторила cueId между length-recovery subbatch.")
+                    }
+                    recovered.merge(recoveryResponse) { current, _ in current }
+                }
+                response = recovered
             } catch let ownership as TranslationOwnershipResponseError where correction == nil {
                 // Keep the same owned cues and schema. The correction can make
                 // a near-limit batch larger, so re-plan it against the same
@@ -408,6 +435,9 @@ struct OllamaTranslationProvider: TranslationAIProvider {
               let content = message["content"] as? String else {
             throw WorkflowError.processFailed("TranslateGemma вернула ответ без текста перевода.")
         }
+        if root["done_reason"] as? String == "length" {
+            throw TranslationResponseLengthError.truncated
+        }
         let translated = normalize(content)
         guard root["done"] as? Bool != false,
               root["done_reason"] as? String == nil || root["done_reason"] as? String == "stop",
@@ -426,7 +456,22 @@ struct OllamaTranslationProvider: TranslationAIProvider {
         guard mismatchedEchoes.isEmpty else {
             throw TranslationOwnershipResponseError.sourceEchoMismatch(cueIDs: mismatchedEchoes)
         }
-        return Dictionary(uniqueKeysWithValues: rows.map { ($0.cueId, $0.text.trimmingCharacters(in: .whitespacesAndNewlines)) })
+        return Dictionary(uniqueKeysWithValues: rows.map {
+            ($0.cueId, removingAppendedFormattingEntities($0.text).trimmingCharacters(in: .whitespacesAndNewlines))
+        })
+    }
+
+    private func removingAppendedFormattingEntities(_ text: String) -> String {
+        // TranslateGemma has emitted these literal XML encodings only as
+        // terminal layout/control artifacts. They are not source content and
+        // would otherwise be misread as numeric translations. Do not decode
+        // or alter any other entity, nor an occurrence inside the text.
+        let artifacts = ["&#x0002;", "&#x20;", "&#x0A;"]
+        var normalized = text
+        while let artifact = artifacts.first(where: { normalized.hasSuffix($0) }) {
+            normalized.removeLast(artifact.count)
+        }
+        return normalized
     }
 
     func translationPrompt(
