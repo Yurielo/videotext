@@ -152,6 +152,17 @@ struct TranslationAdapter {
                     receivedResponse = true
                 } catch is CancellationError {
                     throw CancellationError()
+                } catch is TranslationResponseLengthError {
+                    // The provider may split a length-truncated internal
+                    // batch once. If that still truncates (including a
+                    // singleton), do not reissue this execution unit on the
+                    // adapter's ordinary attempt loop: no complete response
+                    // exists to validate or checkpoint. Preserve the owners
+                    // as fail-closed Human Review work instead.
+                    reasonsByID = Dictionary(uniqueKeysWithValues: pending.map {
+                        ($0.id, ["provider-error: response-length-exhausted"])
+                    })
+                    break
                 } catch is TranslationOwnershipResponseError {
                     // The provider already used its sole correction retry for
                     // the failed internal subbatch. Do not reissue the whole

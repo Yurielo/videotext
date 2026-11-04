@@ -14,9 +14,10 @@ struct TranslationOwnershipProbe {
         try await verifyProductionBatchFailures()
         try await verifyProductionSourceEchoCorrectionRetry()
         try await verifyProductionLengthRecovery()
+        try await verifyLengthExhaustionStopsAtAdapter(directory: root.appendingPathComponent("length-exhaustion"))
         try await verifyFormattingEntitySuffixNormalization()
         print("ownership_task_prompt=PASS source_span_isolation=PASS scripted_context_routing=PASS scripted_alignment=PASS live_semantics=NOT_TESTED")
-        print("source_echo_rejection=PASS scripted_http_single_batch_contract=PASS production_schema_truncation_failure_cancellation=PASS length_recovery=PASS formatting_entity_suffix=PASS")
+        print("source_echo_rejection=PASS scripted_http_single_batch_contract=PASS production_schema_truncation_failure_cancellation=PASS length_recovery=PASS length_exhaustion_fail_closed=PASS formatting_entity_suffix=PASS")
         try await verifyOwnershipAndBoundaries()
         print("ownership=PASS boundary_context=PASS alignment=PASS duplicate_input=PASS")
         try await verifyContextResponseRejection()
@@ -664,6 +665,76 @@ struct TranslationOwnershipProbe {
                     "length recovery changed owner order or retried beyond the exact failing batch")
     }
 
+    private static func verifyLengthExhaustionStopsAtAdapter(directory: URL) async throws {
+        func reply(rows: [TranslationRequestCue], doneReason: String = "stop") throws -> Data {
+            let payload = rows.map { ["cueId": $0.id, "sourceEcho": $0.text, "text": "Scripted translation \($0.id)."] }
+            return try JSONSerialization.data(withJSONObject: [
+                "done": true,
+                "done_reason": doneReason,
+                "message": ["content": doneReason == "length" ? "[" : String(decoding: try JSONSerialization.data(withJSONObject: payload), as: UTF8.self)]
+            ])
+        }
+        func assertFailClosed(
+            _ config: OwnershipConfiguration,
+            replies: [Data],
+            expectedRequestIDs: [[Int]],
+            cacheName: String
+        ) async throws {
+            let transport = OwnershipCorrectionTransport(replies: replies)
+            let provider = OllamaTranslationProvider(transport: { request in try await transport.respond(to: request) })
+            var adapter = TranslationAdapter(provider: provider)
+            adapter.batchSize = config.cues.count
+            let cache = directory.appendingPathComponent(cacheName)
+            let result = try await adapter.translate(
+                cues: config.cues, source: .ru, target: .en,
+                documentTitle: config.title, sourceIdentity: config.sourceIdentity,
+                checkpointDirectory: cache, onProgress: { _ in }, onLog: { _ in }
+            )
+            let requests = await transport.requests
+            let requestIDs = try requests.map { request -> [Int] in
+                guard let body = request.httpBody,
+                      let root = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+                      let prompt = ((root["messages"] as? [[String: Any]])?.first?["content"] as? String) else {
+                    throw OwnershipFailure(message: "length exhaustion request lacks owned prompt")
+                }
+                return try promptTasks(prompt).map(\.cueId)
+            }
+            try require(requestIDs == expectedRequestIDs, "length exhaustion reissued an execution unit beyond its bounded provider recovery")
+            try require(result.issues.map(\.cueID) == config.cues.map(\.id)
+                        && result.issues.allSatisfy { $0.reasonCodes == ["provider-error: response-length-exhausted"] && $0.candidateText == nil },
+                        "length exhaustion was not preserved as a typed fail-closed review issue")
+            try require(zip(result.cues, config.cues).allSatisfy { $0.text == $1.text },
+                        "length exhaustion published unverified text as ready output")
+            let plan = try TranslationContextPlan(cues: config.cues, documentTitle: config.title, chunkSize: config.cues.count)
+            let store = try checkpointStore(config, plan: plan, directory: cache)
+            try require(store.load(plan.units[0]).isEmpty, "length exhaustion wrote a ready checkpoint")
+        }
+
+        let persistentConfig = configuration(Array(fixture().prefix(4)))
+        let persistentPlan = try TranslationContextPlan(cues: persistentConfig.cues, documentTitle: persistentConfig.title, chunkSize: 4)
+        let persistentOwned = persistentPlan.units[0].owned
+        let split = persistentOwned.count / 2
+        try await assertFailClosed(
+            persistentConfig,
+            replies: [
+                try reply(rows: persistentOwned, doneReason: "length"),
+                try reply(rows: Array(persistentOwned[..<split]), doneReason: "length")
+            ],
+            expectedRequestIDs: [persistentOwned.map(\.id), Array(persistentOwned[..<split]).map(\.id)],
+            cacheName: "persistent-recovery"
+        )
+
+        let singletonConfig = configuration(Array(fixture().prefix(1)))
+        let singletonPlan = try TranslationContextPlan(cues: singletonConfig.cues, documentTitle: singletonConfig.title, chunkSize: 1)
+        let singletonOwned = singletonPlan.units[0].owned
+        try await assertFailClosed(
+            singletonConfig,
+            replies: [try reply(rows: singletonOwned, doneReason: "length")],
+            expectedRequestIDs: [singletonOwned.map(\.id)],
+            cacheName: "singleton"
+        )
+    }
+
     private static func verifyFormattingEntitySuffixNormalization() async throws {
         let cues = [TranslationRequestCue(id: 77, text: "Исходная фраза.", context: nil)]
         func reply(_ text: String) throws -> Data {
@@ -1143,6 +1214,13 @@ private actor OwnershipCorrectionTransport {
     init(replies: [Data]) { self.replies = replies }
 
     func respond(to request: URLRequest) throws -> Data {
+        if request.url?.path == "/api/tags", request.httpMethod != "POST" {
+            return try JSONSerialization.data(withJSONObject: ["models": [[
+                "name": OllamaTranslationProvider.model,
+                "model": OllamaTranslationProvider.model,
+                "digest": "scripted-length-recovery-digest"
+            ]]])
+        }
         requests.append(request)
         guard request.url?.path == "/api/chat", request.httpMethod == "POST",
               replies.indices.contains(nextReply) else {
