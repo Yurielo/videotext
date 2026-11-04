@@ -3687,8 +3687,11 @@ struct ContentView: View {
     }
 
     private var reviewCueIDs: Set<Int> {
-        Set(model.unresolvedReviewTasks.flatMap(\.cueIDs))
-            .union(model.fillerCandidates.map(\.cueID))
+        reviewCueIDsForCurrentHumanReview(
+            checkpoint: model.humanReviewCheckpoint,
+            unresolvedTasks: model.unresolvedReviewTasks,
+            fillerCandidates: model.fillerCandidates
+        )
     }
 
     private var filteredReviewCues: [SubtitleCue] {
@@ -3752,6 +3755,31 @@ private func topicReviewCues(projectURL: URL, language: ArtifactLanguage) -> [Su
     let localized = layout.subtitlesURL(language: language)
     let source = FileManager.default.fileExists(atPath: localized.path) ? localized : layout.fullSRTURL
     return (try? SRTService().load(from: source)) ?? []
+}
+
+/// Presentation-only scoping for the active Human Review checkpoint. Tasks
+/// from another language or immutable revision must not make this review look
+/// broader than it is.
+func reviewCueIDsForCurrentHumanReview(
+    checkpoint: HumanReviewCheckpoint?,
+    unresolvedTasks: [ReviewTask],
+    fillerCandidates: [FillerWordCandidate]
+) -> Set<Int> {
+    guard let checkpoint else {
+        return Set(unresolvedTasks.flatMap(\.cueIDs))
+    }
+    let currentReviewTasks = unresolvedTasks.filter {
+        $0.language == checkpoint.language && $0.transcriptRevisionID == checkpoint.revisionID
+    }
+    var cueIDs = Set(currentReviewTasks.flatMap(\.cueIDs))
+    // Filler analysis belongs to source-transcript review only. A translation
+    // checkpoint must not inherit source-review candidates.
+    if checkpoint.kind == .sourceTranscript {
+        cueIDs.formUnion(fillerCandidates.filter {
+            $0.language == checkpoint.language && $0.transcriptRevisionID == checkpoint.revisionID
+        }.map(\.cueID))
+    }
+    return cueIDs
 }
 
 private struct TopicReviewSurface: View {
