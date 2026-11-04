@@ -3191,7 +3191,7 @@ struct ContentView: View {
                 .tabItem { Label("Темы", systemImage: "list.bullet.rectangle") }
                 .tag(1)
             reviewTasksPanel
-                .tabItem { Label("Проверка (\(model.unresolvedReviewTasks.count))", systemImage: "exclamationmark.bubble") }
+                .tabItem { Label("Проверка (\(currentReviewTasks.count))", systemImage: "exclamationmark.bubble") }
                 .tag(2)
             journal
                 .tabItem { Label("Журнал", systemImage: "text.alignleft") }
@@ -3689,8 +3689,15 @@ struct ContentView: View {
     private var reviewCueIDs: Set<Int> {
         reviewCueIDsForCurrentHumanReview(
             checkpoint: model.humanReviewCheckpoint,
-            unresolvedTasks: model.unresolvedReviewTasks,
+            unresolvedTasks: currentReviewTasks,
             fillerCandidates: model.fillerCandidates
+        )
+    }
+
+    private var currentReviewTasks: [ReviewTask] {
+        reviewTasksForCurrentHumanReview(
+            checkpoint: model.humanReviewCheckpoint,
+            unresolvedTasks: model.unresolvedReviewTasks
         )
     }
 
@@ -3765,21 +3772,29 @@ func reviewCueIDsForCurrentHumanReview(
     unresolvedTasks: [ReviewTask],
     fillerCandidates: [FillerWordCandidate]
 ) -> Set<Int> {
-    guard let checkpoint else {
-        return Set(unresolvedTasks.flatMap(\.cueIDs))
-    }
-    let currentReviewTasks = unresolvedTasks.filter {
-        $0.language == checkpoint.language && $0.transcriptRevisionID == checkpoint.revisionID
-    }
+    let currentReviewTasks = reviewTasksForCurrentHumanReview(
+        checkpoint: checkpoint,
+        unresolvedTasks: unresolvedTasks
+    )
     var cueIDs = Set(currentReviewTasks.flatMap(\.cueIDs))
     // Filler analysis belongs to source-transcript review only. A translation
     // checkpoint must not inherit source-review candidates.
-    if checkpoint.kind == .sourceTranscript {
+    if let checkpoint, checkpoint.kind == .sourceTranscript {
         cueIDs.formUnion(fillerCandidates.filter {
             $0.language == checkpoint.language && $0.transcriptRevisionID == checkpoint.revisionID
         }.map(\.cueID))
     }
     return cueIDs
+}
+
+func reviewTasksForCurrentHumanReview(
+    checkpoint: HumanReviewCheckpoint?,
+    unresolvedTasks: [ReviewTask]
+) -> [ReviewTask] {
+    guard let checkpoint else { return unresolvedTasks }
+    return unresolvedTasks.filter {
+        $0.language == checkpoint.language && $0.transcriptRevisionID == checkpoint.revisionID
+    }
 }
 
 private struct TopicReviewSurface: View {

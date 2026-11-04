@@ -2306,7 +2306,7 @@ struct SimpleRenderedControlsProbe {
             task("ru-stale-\($0)", language: .ru, revisionID: "approved-ru", cueID: 1)
         } + (0..<3).map {
             task("en-current-\($0)", language: .en, revisionID: "approved-en", cueID: 2 + $0)
-        }
+        } + [task("en-stale-revision", language: .en, revisionID: "older-en", cueID: 1)]
         manifest.humanReviewState?.pendingCheckpoint = HumanReviewCheckpoint(
             kind: .translatedTranscript, language: .en, revisionID: "approved-en",
             pendingOperations: [], createdAt: Date()
@@ -2334,8 +2334,16 @@ struct SimpleRenderedControlsProbe {
             unresolvedTasks: manifest.reviewTasks ?? [],
             fillerCandidates: filler.candidates
         )
+        let translationTasks = reviewTasksForCurrentHumanReview(
+            checkpoint: enCheckpoint,
+            unresolvedTasks: manifest.reviewTasks ?? []
+        )
         try require(translationIssueIDs == [2, 3, 4],
                     "Current EN review did not limit issues-only cues to its three revision-scoped findings")
+        try require(translationTasks.map(\.id) == ["en-current-0", "en-current-1", "en-current-2"],
+                    "Current EN review badge included a stale same-language revision")
+        try require(reviewTasksForCurrentHumanReview(checkpoint: nil, unresolvedTasks: manifest.reviewTasks ?? []).count == 436,
+                    "Review badge lost its global unresolved count without an active checkpoint")
 
         let sourceCheckpoint = HumanReviewCheckpoint(
             kind: .sourceTranscript, language: .ru, revisionID: "approved-ru",
