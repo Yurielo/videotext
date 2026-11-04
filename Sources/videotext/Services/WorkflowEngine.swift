@@ -169,6 +169,11 @@ struct ApprovedTopicSelectionRequirement: Equatable {
     let topicID: String
 }
 
+struct ApprovedTopicResolution {
+    let topic: TopicSegment
+    let revision: TopicRevision
+}
+
 struct WorkflowExecutionPolicy {
     var requireReusableTranscription = false
     var preserveReviewPreferences = false
@@ -3576,7 +3581,7 @@ final class WorkflowEngine: @unchecked Sendable {
                             projectURL: projectURL
                         )
                     }
-                    let topic = try Self.approvedTopic(
+                    let selection = try Self.approvedTopicResolution(
                         manifest: manifest,
                         projectURL: projectURL,
                         selectedTopicID: settings.selectedTopicID,
@@ -3584,6 +3589,7 @@ final class WorkflowEngine: @unchecked Sendable {
                         granularity: settings.topicGranularity,
                         requirement: policy.approvedTopicSelection
                     )
+                    let topic = selection.topic
                     let subtitleSource = try resolvedSubtitleSource(settings: settings, manifest: manifest, projectURL: projectURL)
                     activeFragment = try await createFragment(
                         mediaURL: mediaURL,
@@ -3597,6 +3603,14 @@ final class WorkflowEngine: @unchecked Sendable {
                         topicID: topic.id,
                         quoteStart: nil,
                         quoteEnd: nil,
+                        cutTopicRenderProvenance: TopicCutRenderProvenance(
+                            approvedRevisionID: selection.revision.id,
+                            approvedRevisionContentHash: selection.revision.contentHash,
+                            approvedSnapshotURL: URL(fileURLWithPath: selection.revision.jsonPath),
+                            language: topicLanguage,
+                            granularity: settings.topicGranularity,
+                            topicID: topic.id
+                        ),
                         onProgress: {
                             tracker.update(operation, fraction: settings.burnFragmentSubtitles ? $0 * 0.55 : $0)
                         },
@@ -4391,6 +4405,7 @@ final class WorkflowEngine: @unchecked Sendable {
         topicID: String?,
         quoteStart: String?,
         quoteEnd: String?,
+        cutTopicRenderProvenance: TopicCutRenderProvenance? = nil,
         onProgress: @escaping (Double) -> Void,
         log: (String) -> Void
     ) async throws -> FragmentRecord {
@@ -4409,8 +4424,63 @@ final class WorkflowEngine: @unchecked Sendable {
         try FileManager.default.createDirectory(at: subtitleURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: reportURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try srt.write(cues, to: subtitleURL)
-        try await ffmpeg.cutAccurate(mediaURL: mediaURL, start: start, end: end, outputURL: videoURL, onProgress: onProgress)
-        let report = try await ffmpeg.strictValidationReport(mediaURL: videoURL, expectedDuration: end - start)
+
+        var cutVideoReuseKey: String?
+        var cutVideoSHA256: String?
+        let report: String
+        var snapshotWorkspace: OwnedTemporaryWorkspace?
+        defer { snapshotWorkspace?.close() }
+        var reuseResult: (identity: FragmentCutRenderReuseIdentity, runtime: FFmpegCutRuntimeIdentity, outcome: FragmentCutRenderReuseService.Outcome)?
+        if let cutTopicRenderProvenance,
+           let runtimeIdentity = await ffmpeg.accurateCutRuntimeIdentity(),
+           let workspace = try? OwnedTemporaryWorkspace() {
+            snapshotWorkspace = workspace
+            if let snapshotURL = FragmentCutSourceSnapshot.create(mediaURL: mediaURL, workspaceURL: workspace.url),
+               let identity = FragmentCutRenderReuseIdentity.make(
+                   mediaURL: snapshotURL,
+                   start: start,
+                   end: end,
+                   provenance: cutTopicRenderProvenance,
+                   ffmpegRuntime: runtimeIdentity
+               ) {
+                let records = (try? store.load(from: projectURL).fragments) ?? []
+                let outcome = try await FragmentCutRenderReuseService().renderOrReuse(
+                    records: records,
+                    projectURL: projectURL,
+                    key: identity.key,
+                    start: start,
+                    end: end,
+                    topicID: cutTopicRenderProvenance.topicID,
+                    granularity: cutTopicRenderProvenance.granularity,
+                    outputURL: videoURL,
+                    validate: { try await ffmpeg.strictValidationReport(mediaURL: $0, expectedDuration: end - start) },
+                    render: { try await ffmpeg.cutAccurate(mediaURL: snapshotURL, start: start, end: end, outputURL: videoURL, onProgress: onProgress) }
+                )
+                reuseResult = (identity, runtimeIdentity, outcome)
+            }
+        }
+
+        if let reuseResult {
+            report = reuseResult.outcome.validationReport
+            let runtimeStillMatches: Bool
+            if reuseResult.outcome.reused {
+                runtimeStillMatches = true
+                onProgress(1)
+            } else {
+                runtimeStillMatches = await ffmpeg.accurateCutRuntimeIdentity()?.fingerprint == reuseResult.runtime.fingerprint
+            }
+            if runtimeStillMatches,
+               let digest = FragmentCutRenderReuseIdentity.sha256(of: videoURL) {
+                cutVideoReuseKey = reuseResult.identity.key
+                cutVideoSHA256 = digest
+            }
+            if reuseResult.outcome.reused && cutVideoReuseKey != nil {
+                log("Повторно использован проверенный видеорендер фрагмента \(identifier); файлы и запись результата созданы отдельно.")
+            }
+        } else {
+            try await ffmpeg.cutAccurate(mediaURL: mediaURL, start: start, end: end, outputURL: videoURL, onProgress: onProgress)
+            report = try await ffmpeg.strictValidationReport(mediaURL: videoURL, expectedDuration: end - start)
+        }
         try report.write(to: reportURL, atomically: true, encoding: .utf8)
 
         try store.registerOutput(kind: "fragment-video", url: videoURL, in: projectURL)
@@ -4431,7 +4501,9 @@ final class WorkflowEngine: @unchecked Sendable {
             topicGranularity: topicGranularity,
             topicID: topicID,
             quoteStart: quoteStart,
-            quoteEnd: quoteEnd
+            quoteEnd: quoteEnd,
+            cutVideoReuseKey: cutVideoReuseKey,
+            cutVideoSHA256: cutVideoSHA256
         )
         try store.registerFragment(record, in: projectURL)
         log("Создан точный фрагмент \(identifier) и синхронизированный fragment.srt (\(subtitleSource.language.rawValue.uppercased())).")
@@ -5892,14 +5964,14 @@ final class WorkflowEngine: @unchecked Sendable {
     /// `.cutTopic` is fail-closed even for Advanced callers: no implicit first
     /// topic fallback, no draft/current-file substitution, and no computed
     /// range. The selected range is copied verbatim from the approved snapshot.
-    static func approvedTopic(
+    static func approvedTopicResolution(
         manifest: ProjectManifest,
         projectURL: URL,
         selectedTopicID: String?,
         language: ArtifactLanguage,
         granularity: TopicGranularity,
         requirement: ApprovedTopicSelectionRequirement? = nil
-    ) throws -> TopicSegment {
+    ) throws -> ApprovedTopicResolution {
         guard let selectedTopicID = selectedTopicID?.trimmingCharacters(in: .whitespacesAndNewlines),
               !selectedTopicID.isEmpty else {
             throw WorkflowError.processFailed("Для создания фрагмента выберите утверждённую тему.")
@@ -5926,7 +5998,25 @@ final class WorkflowEngine: @unchecked Sendable {
               topic.start >= 0, topic.end > topic.start else {
             throw WorkflowError.processFailed("Утверждённая тема имеет недопустимый диапазон.")
         }
-        return topic
+        return ApprovedTopicResolution(topic: topic, revision: snapshot.revision)
+    }
+
+    static func approvedTopic(
+        manifest: ProjectManifest,
+        projectURL: URL,
+        selectedTopicID: String?,
+        language: ArtifactLanguage,
+        granularity: TopicGranularity,
+        requirement: ApprovedTopicSelectionRequirement? = nil
+    ) throws -> TopicSegment {
+        try approvedTopicResolution(
+            manifest: manifest,
+            projectURL: projectURL,
+            selectedTopicID: selectedTopicID,
+            language: language,
+            granularity: granularity,
+            requirement: requirement
+        ).topic
     }
 
     private func requiredDuration(of mediaURL: URL, manifest: ProjectManifest) async throws -> TimeInterval {

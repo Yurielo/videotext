@@ -236,6 +236,176 @@ struct FFmpegAdapter {
         self.runner = runner
     }
 
+    func accurateCutExecutableURL() -> URL? {
+        guard let path = runner.resolve("ffmpeg") else { return nil }
+        return URL(fileURLWithPath: path).standardizedFileURL
+    }
+
+    func accurateCutRuntimeIdentity() async -> FFmpegCutRuntimeIdentity? {
+        guard !Self.hasDynamicLoaderOverrides(environment: ProcessInfo.processInfo.environment),
+              let executableURL = accurateCutExecutableURL(),
+              let executableSHA256 = FragmentCutRenderReuseIdentity.sha256(of: executableURL),
+              let otool = runner.resolve("otool"),
+              let swVers = runner.resolve("sw_vers"),
+              let version = try? await runner.run(executableURL.path, ["-version"]),
+              version.exitCode == 0,
+              let operatingSystem = try? await runner.run(swVers, ["-buildVersion"]),
+              operatingSystem.exitCode == 0 else {
+            return nil
+        }
+
+        let operatingSystemBuild = operatingSystem.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !operatingSystemBuild.isEmpty else { return nil }
+        var pending: [(url: URL, inheritedRunPaths: [URL])] = [(executableURL, [])]
+        var visitedContexts: Set<String> = []
+        var dependencies: Set<String> = []
+        var loadCommandReports: [String: String] = [:]
+
+        while !pending.isEmpty {
+            let batch = pending
+            pending.removeAll(keepingCapacity: true)
+            let missingPaths = Set(batch.map { $0.url.standardizedFileURL.path })
+                .subtracting(loadCommandReports.keys)
+                .sorted()
+            for pathBatch in Self.chunks(missingPaths, maximumCount: 32) {
+                let result: CommandResult
+                do { result = try await runner.run(otool, ["-L", "-l"] + pathBatch) }
+                catch { return nil }
+                guard result.exitCode == 0 else { return nil }
+                loadCommandReports.merge(
+                    Self.loadCommandReports(in: result.stdout, expectedPaths: Set(pathBatch))
+                ) { _, newest in newest }
+                guard pathBatch.allSatisfy({ loadCommandReports[$0] != nil }) else { return nil }
+            }
+
+            for item in batch {
+                let binaryURL = item.url
+                let binaryPath = binaryURL.standardizedFileURL.path
+                guard let report = loadCommandReports[binaryPath],
+                      let ownRunPaths = Self.runPaths(in: report, loaderURL: binaryURL, executableURL: executableURL) else {
+                    return nil
+                }
+                let runPaths = Array(Set(ownRunPaths + item.inheritedRunPaths)).sorted { $0.path < $1.path }
+                let contextKey = binaryPath + "\n" + runPaths.map(\.path).joined(separator: "\n")
+                guard visitedContexts.insert(contextKey).inserted else { continue }
+                let lines = report.split(separator: "\n").filter {
+                    $0.contains("(compatibility version ")
+                }
+                for line in lines {
+                    let declaration = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard let dependency = declaration.components(separatedBy: " (").first,
+                          !dependency.isEmpty else {
+                        continue
+                    }
+                    if dependency.hasPrefix("/System/Library/") || dependency.hasPrefix("/usr/lib/") {
+                        dependencies.insert("system:\(dependency):\(operatingSystemBuild)")
+                        continue
+                    }
+                    let candidates: [URL]
+                    if dependency.hasPrefix("/") {
+                        candidates = [URL(fileURLWithPath: dependency)]
+                    } else if dependency.hasPrefix("@loader_path/") {
+                        candidates = [URL(fileURLWithPath: String(dependency.dropFirst("@loader_path/".count)), relativeTo: binaryURL.deletingLastPathComponent())]
+                    } else if dependency.hasPrefix("@executable_path/") {
+                        candidates = [URL(fileURLWithPath: String(dependency.dropFirst("@executable_path/".count)), relativeTo: executableURL.deletingLastPathComponent())]
+                    } else if dependency.hasPrefix("@rpath/") {
+                        let suffix = String(dependency.dropFirst("@rpath/".count))
+                        candidates = runPaths.map { $0.appendingPathComponent(suffix) }
+                            .filter { FileManager.default.isReadableFile(atPath: $0.path) }
+                    } else {
+                        return nil
+                    }
+                    let resolvedCandidates = candidates.map { $0.resolvingSymlinksInPath().standardizedFileURL }
+                    guard !resolvedCandidates.isEmpty else { return nil }
+                    for resolvedURL in resolvedCandidates {
+                        guard let dependencySHA256 = FragmentCutRenderReuseIdentity.sha256(of: resolvedURL) else {
+                            return nil
+                        }
+                        dependencies.insert("library:\(dependency)->\(resolvedURL.path):\(dependencySHA256)")
+                        pending.append((resolvedURL, runPaths))
+                    }
+                }
+            }
+        }
+
+        let fingerprint = [
+            executableURL.path,
+            executableSHA256,
+            version.stdout,
+            version.stderr,
+            operatingSystemBuild,
+            dependencies.sorted().joined(separator: "\n")
+        ].joined(separator: "\n")
+        return FFmpegCutRuntimeIdentity(
+            executableURL: executableURL,
+            executableSHA256: executableSHA256,
+            fingerprint: fingerprint
+        )
+    }
+
+    static func hasDynamicLoaderOverrides(environment: [String: String]) -> Bool {
+        environment.keys.contains { $0.hasPrefix("DYLD_") }
+    }
+
+    private static func runPaths(in loadCommands: String, loaderURL: URL, executableURL: URL) -> [URL]? {
+        let lines = loadCommands.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var paths: [URL] = []
+        for index in lines.indices where lines[index].contains("cmd LC_RPATH") {
+            guard let pathLine = lines.dropFirst(index + 1).prefix(4)
+                .first(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("path ") }),
+                  let rawPath = pathLine.trimmingCharacters(in: .whitespaces)
+                    .dropFirst("path ".count).split(separator: " (", maxSplits: 1).first.map(String.init) else {
+                return nil
+            }
+            let expandedPath: String
+            if rawPath.hasPrefix("@loader_path/") {
+                expandedPath = loaderURL.deletingLastPathComponent()
+                    .appendingPathComponent(String(rawPath.dropFirst("@loader_path/".count))).path
+            } else if rawPath.hasPrefix("@executable_path/") {
+                expandedPath = executableURL.deletingLastPathComponent()
+                    .appendingPathComponent(String(rawPath.dropFirst("@executable_path/".count))).path
+            } else if rawPath.hasPrefix("/") {
+                expandedPath = rawPath
+            } else {
+                return nil
+            }
+            let resolvedPath = URL(fileURLWithPath: expandedPath).resolvingSymlinksInPath().standardizedFileURL
+            guard FileManager.default.isReadableFile(atPath: resolvedPath.path) else { return nil }
+            paths.append(resolvedPath)
+        }
+        return paths
+    }
+
+    private static func loadCommandReports(in output: String, expectedPaths: Set<String>) -> [String: String] {
+        var reports: [String: String] = [:]
+        var currentPath: String?
+        var currentLines: [String] = []
+        func saveCurrent() {
+            guard let currentPath else { return }
+            reports[currentPath] = currentLines.joined(separator: "\n")
+        }
+        for line in output.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            let headerPath = trimmed.hasSuffix(":") ? String(trimmed.dropLast()) : nil
+            if let headerPath, expectedPaths.contains(headerPath) {
+                saveCurrent()
+                currentPath = headerPath
+                currentLines = []
+            } else if currentPath != nil {
+                currentLines.append(line)
+            }
+        }
+        saveCurrent()
+        return reports
+    }
+
+    private static func chunks(_ values: [String], maximumCount: Int) -> [[String]] {
+        guard maximumCount > 0 else { return [] }
+        return stride(from: 0, to: values.count, by: maximumCount).map {
+            Array(values[$0..<min($0 + maximumCount, values.count)])
+        }
+    }
+
     func duration(of mediaURL: URL) async throws -> TimeInterval? {
         guard let ffprobe = runner.resolve("ffprobe") else { throw WorkflowError.missingTool("ffprobe") }
         let result = try await runner.run(ffprobe, [

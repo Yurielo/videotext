@@ -14,8 +14,14 @@ enum ToolOutputStream: Equatable {
 
 final class ProcessController: @unchecked Sendable {
     private let lock = NSLock()
+    private let capturesLaunchArguments: Bool
     private var process: Process?
     private var launchLog: [String] = []
+    private var launchArgumentsLog: [[String]] = []
+
+    init(capturesLaunchArguments: Bool = false) {
+        self.capturesLaunchArguments = capturesLaunchArguments
+    }
 
     var activeProcessID: Int32? {
         lock.lock()
@@ -30,16 +36,24 @@ final class ProcessController: @unchecked Sendable {
         return launchLog
     }
 
+    var launchedArguments: [[String]] {
+        lock.lock()
+        defer { lock.unlock() }
+        return launchArgumentsLog
+    }
+
     func resetLaunchLog() {
         lock.lock()
         launchLog.removeAll()
+        launchArgumentsLog.removeAll()
         lock.unlock()
     }
 
-    func register(_ process: Process, executable: String) {
+    func register(_ process: Process, executable: String, arguments: [String]) {
         lock.lock()
         self.process = process
         launchLog.append(executable)
+        if capturesLaunchArguments { launchArgumentsLog.append(arguments) }
         lock.unlock()
     }
 
@@ -165,7 +179,7 @@ struct ToolRunner {
             if !process.isRunning && process.processIdentifier == 0 { try workspace.abortFailedLaunch() }
             throw error
         }
-        controller.register(process, executable: executable)
+        controller.register(process, executable: executable, arguments: arguments)
         try workspace.attachChild(process.processIdentifier)
         var stdoutData = Data()
         var stderrData = Data()
