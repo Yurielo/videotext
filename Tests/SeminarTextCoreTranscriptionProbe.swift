@@ -5,6 +5,8 @@ struct SeminarTextCoreTranscriptionProbe {
     static func main() async {
         do {
             try await verifyCoreRunner()
+            try await verifyBoundedQualityRecovery()
+            try await verifyIncompleteTranscriptionCheckpoint()
             try verifyRealCompletedRecoveryIfConfigured()
             try verifyAbsoluteOffsetImport()
             try verifyReverseRawImport()
@@ -368,6 +370,29 @@ struct SeminarTextCoreTranscriptionProbe {
                     "recovery accepted a completed package from a different Whisper model")
         try FileManager.default.removeItem(at: modelMismatch.deletingLastPathComponent())
 
+        let corrupt = try copiedPackage("corrupt-loop")
+        try fuzzyLoopSRT.write(to: corrupt.appendingPathComponent("transcript.srt"), atomically: true, encoding: .utf8)
+        let corruptResult = SeminarTextCoreTranscriptionRunner.Result(
+            srtURL: corrupt.appendingPathComponent("transcript.srt"),
+            outputDirectory: corrupt,
+            selectedTimingPackageURL: corrupt.appendingPathComponent("structured_timing")
+        )
+        let corruptIssue = try runner.qualityRecoveryIssue(in: corruptResult)
+        try require(corruptIssue != nil,
+                    "fuzzy-loop test package was not recognized as quality-invalid")
+        let rejectedCorrupt = try runner.recoverCompletedResult(
+            mediaURL: media, language: .en, modelPath: model.path, outputRoot: fixtureRoot
+        )
+        try require(rejectedCorrupt == nil, "recovery accepted an identity-matching package with an ASR loop")
+        let validAlongsideCorrupt = try copiedPackage("valid-after-corrupt")
+        let recoveredValid = try runner.recoverCompletedResult(
+            mediaURL: media, language: .en, modelPath: model.path, outputRoot: fixtureRoot
+        )
+        try require(recoveredValid?.srtURL.standardizedFileURL == validAlongsideCorrupt.appendingPathComponent("transcript.srt").standardizedFileURL,
+                    "invalid old package made the valid recovered package ambiguous")
+        try FileManager.default.removeItem(at: corrupt.deletingLastPathComponent())
+        try FileManager.default.removeItem(at: validAlongsideCorrupt.deletingLastPathComponent())
+
         _ = try copiedPackage("first")
         _ = try copiedPackage("second")
         do {
@@ -378,6 +403,228 @@ struct SeminarTextCoreTranscriptionProbe {
         } catch {
             // Expected: matching multiple completed packages must fail closed.
         }
+    }
+
+    private static let fuzzyLoopSRT = """
+    00:00:00,000 --> 00:00:04,000
+    И с чего начать хотелось с того что самые большие ценности в нашей жизни не материальные
+
+    00:00:04,000 --> 00:00:08,000
+    И с чего же начать хотелось с того что самые большие ценности в нашей жизни вовсе не материальные
+
+    00:00:08,000 --> 00:00:12,000
+    И с чего начать мне хотелось с того что самые большие ценности в нашей жизни обычно не материальные
+
+    00:00:12,000 --> 00:00:16,000
+    И все таки с чего начать хотелось с того что самые большие ценности в нашей жизни не бывают материальными
+
+    00:00:16,000 --> 00:00:20,000
+    Затем лектор переходит к следующему разделу и показывает таблицу
+    """
+
+    private static func verifyBoundedQualityRecovery() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("videotext-core-quality-recovery-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let media = root.appendingPathComponent("source.mp4")
+        let model = root.appendingPathComponent("model.bin")
+        let bad = root.appendingPathComponent("bad.srt")
+        let good = root.appendingPathComponent("good.srt")
+        let calls = root.appendingPathComponent("calls.txt")
+        try Data("quality-media".utf8).write(to: media)
+        try Data("quality-model".utf8).write(to: model)
+        try fuzzyLoopSRT.write(to: bad, atomically: true, encoding: .utf8)
+        try Data("00:00:00,000 --> 00:00:01,000\nClear transcription.\n".utf8).write(to: good)
+
+        func fakeExecutable(
+            _ name: String,
+            shortResult: URL,
+            ordinaryQualityExit: Bool = false,
+            ordinaryFailure: String? = nil
+        ) throws -> URL {
+            let executable = root.appendingPathComponent(name)
+            let script = """
+            #!/bin/sh
+            printf '%s\\n' "${SEMINARTEXT_CHUNK_SECONDS:-300}" >> '\(calls.path)'
+            if [ "${SEMINARTEXT_CHUNK_SECONDS:-300}" != 60 ] && [ '\(ordinaryQualityExit ? "1" : "0")' = 1 ]; then
+              echo 'ASR quality gate: REJECT reason=fuzzy_loop' >&2
+              echo 'Ошибка: фрагмент остаётся подозрительным после повтора. Повторите с SEMINARTEXT_CHUNK_SECONDS=60.' >&2
+              exit 1
+            fi
+            if [ "${SEMINARTEXT_CHUNK_SECONDS:-300}" != 60 ] && [ -n '\(ordinaryFailure ?? "")' ]; then
+              echo '\(ordinaryFailure ?? "")' >&2
+              exit 2
+            fi
+            mkdir -p "$SEMINARTEXT_OUTPUT/run/structured_timing"
+            if [ "${SEMINARTEXT_CHUNK_SECONDS:-300}" = 60 ]; then
+              cp '\(shortResult.path)' "$SEMINARTEXT_OUTPUT/run/transcript.srt"
+            else
+              cp '\(bad.path)' "$SEMINARTEXT_OUTPUT/run/transcript.srt"
+            fi
+            touch "$SEMINARTEXT_OUTPUT/run/.seminartext_complete"
+            media_sha=$(shasum -a 256 "$2" | awk '{print $1}')
+            model_sha=$(shasum -a 256 "$SEMINARTEXT_MODEL" | awk '{print $1}')
+            cat > "$SEMINARTEXT_OUTPUT/run/structured_timing/manifest.json" <<JSON
+            {"source":{"media_sha256":"$media_sha"},"transcription":{"language":"en","whisper_model":{"sha256":"$model_sha"}}}
+            JSON
+            """
+            try script.write(to: executable, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+            return executable
+        }
+
+        let runner = SeminarTextCoreTranscriptionRunner()
+        let goodExecutable = try fakeExecutable("fake-good", shortResult: good)
+        let outputRoot = root.appendingPathComponent("recovered", isDirectory: true)
+        let recovered = try await runner.transcribeWithQualityRecovery(
+            mediaURL: media, language: .en, executable: goodExecutable,
+            modelPath: model.path, outputRoot: outputRoot, preferShortChunks: false
+        )
+        let recoveredIssue = try runner.qualityRecoveryIssue(in: recovered)
+        try require(recoveredIssue == nil, "60-second fallback retained the ASR loop")
+        let successfulCalls = try String(contentsOf: calls, encoding: .utf8).split(separator: "\n")
+        try require(successfulCalls == ["300", "60"], "quality fallback did not run exactly once at 60 seconds")
+        let retainedPackages = try FileManager.default.contentsOfDirectory(at: outputRoot, includingPropertiesForKeys: nil)
+        try require(retainedPackages.count == 2, "quality fallback removed the rejected diagnostic package")
+
+        try Data().write(to: calls)
+        let upstreamQualityExecutable = try fakeExecutable(
+            "fake-upstream-quality", shortResult: good, ordinaryQualityExit: true
+        )
+        let upstreamOutput = root.appendingPathComponent("upstream-quality", isDirectory: true)
+        let upstreamRecovered = try await runner.transcribeWithQualityRecovery(
+            mediaURL: media, language: .en, executable: upstreamQualityExecutable,
+            modelPath: model.path, outputRoot: upstreamOutput, preferShortChunks: false
+        )
+        let upstreamIssue = try runner.qualityRecoveryIssue(in: upstreamRecovered)
+        try require(upstreamIssue == nil,
+                    "nonzero SeminarText quality recovery did not return the 60-second result")
+        let upstreamCalls = try String(contentsOf: calls, encoding: .utf8).split(separator: "\n")
+        try require(upstreamCalls == ["300", "60"],
+                    "nonzero SeminarText quality failure did not perform exactly one 60-second retry")
+
+        try Data().write(to: calls)
+        let unrelatedFailure = try fakeExecutable(
+            "fake-unrelated-failure", shortResult: good, ordinaryFailure: "network unavailable"
+        )
+        do {
+            _ = try await runner.transcribeWithQualityRecovery(
+                mediaURL: media, language: .en, executable: unrelatedFailure,
+                modelPath: model.path, outputRoot: root.appendingPathComponent("unrelated-failure"), preferShortChunks: false
+            )
+            throw WorkflowError.processFailed("unrelated SeminarText failure triggered a retry")
+        } catch let error as WorkflowError where error.localizedDescription.contains("unrelated SeminarText failure triggered a retry") {
+            throw error
+        } catch {
+            // Only the explicit upstream quality marker is eligible for fallback.
+        }
+        let unrelatedCalls = try String(contentsOf: calls, encoding: .utf8).split(separator: "\n")
+        try require(unrelatedCalls == ["300"], "unrelated SeminarText failure launched a fallback")
+
+        try Data().write(to: calls)
+        let badExecutable = try fakeExecutable("fake-bad", shortResult: bad)
+        let resumeOutput = root.appendingPathComponent("resume-failed", isDirectory: true)
+        do {
+            _ = try await runner.transcribeWithQualityRecovery(
+                mediaURL: media, language: .en, executable: badExecutable,
+                modelPath: model.path, outputRoot: resumeOutput, preferShortChunks: true
+            )
+            throw WorkflowError.processFailed("invalid resumed package was accepted")
+        } catch let error as WorkflowError where error.localizedDescription.contains("invalid resumed package was accepted") {
+            throw error
+        } catch {
+            // A resumed invalid project receives exactly one short attempt.
+        }
+        let resumeCalls = try String(contentsOf: calls, encoding: .utf8).split(separator: "\n")
+        try require(resumeCalls == ["60"], "resume reran default chunks or retried short chunks")
+        let resumePackages = try FileManager.default.contentsOfDirectory(at: resumeOutput, includingPropertiesForKeys: nil)
+        try require(resumePackages.count == 1, "failed resume lost its diagnostic package")
+
+        try Data().write(to: calls)
+        let failedOutput = root.appendingPathComponent("failed", isDirectory: true)
+        do {
+            _ = try await runner.transcribeWithQualityRecovery(
+                mediaURL: media, language: .en, executable: badExecutable,
+                modelPath: model.path, outputRoot: failedOutput, preferShortChunks: false
+            )
+            throw WorkflowError.processFailed("rejected 60-second fallback was accepted")
+        } catch let error as WorkflowError where error.localizedDescription.contains("rejected 60-second fallback was accepted") {
+            throw error
+        } catch {
+            // Both invalid packages remain available for diagnosis.
+        }
+        let failedCalls = try String(contentsOf: calls, encoding: .utf8).split(separator: "\n")
+        try require(failedCalls == ["300", "60"], "failed fallback retried more than once")
+        let failedPackages = try FileManager.default.contentsOfDirectory(at: failedOutput, includingPropertiesForKeys: nil)
+        try require(failedPackages.count == 2, "failed fallback removed diagnostic packages")
+
+        let malformed = root.appendingPathComponent("malformed.srt")
+        try Data("broken SRT".utf8).write(to: malformed)
+        let malformedPackage = SeminarTextCoreTranscriptionRunner.Result(
+            srtURL: malformed, outputDirectory: root, selectedTimingPackageURL: root
+        )
+        do {
+            _ = try runner.qualityRecoveryIssue(in: malformedPackage)
+            throw WorkflowError.processFailed("malformed SeminarText SRT was treated as quality PASS")
+        } catch let error as WorkflowError where error.localizedDescription.contains("treated as quality PASS") {
+            throw error
+        } catch {
+            // Parsing failures must propagate before output publication.
+        }
+    }
+
+    private static func verifyIncompleteTranscriptionCheckpoint() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("videotext-mixed-transcription-checkpoint-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let media = root.appendingPathComponent("source.mp4")
+        try Data("disposable source".utf8).write(to: media)
+        let project = root.appendingPathComponent("project", isDirectory: true)
+        let store = ProjectStore(history: ProjectHistoryStore(indexURL: root.appendingPathComponent("history.json")))
+        var manifest = try store.ensureProject(at: project, mediaURL: media, mode: .resumeProject)
+        let layout = ProjectLayout(root: project)
+        try SRTService().writePreservingIDs(
+            [SubtitleCue(id: 1, start: 0, end: 1, text: "New transcription.")],
+            to: layout.fullSRTURL
+        )
+        let oldWhisper: [String: Any] = [
+            "transcription": [["tokens": [[
+                "text": " Old transcription.", "offsets": ["from": 0, "to": 1000]
+            ]]]]
+        ]
+        try JSONSerialization.data(withJSONObject: oldWhisper).write(to: layout.whisperJSONURL)
+        let fullHash = SelectedTimingHash.file(layout.fullSRTURL)
+        let jsonHash = SelectedTimingHash.file(layout.whisperJSONURL)
+        let settings = WorkflowSettings(
+            mediaURL: media, projectURL: project, selectedOperations: [.transcribe],
+            mode: .retryFailedOperations, rangeStart: 0, rangeEnd: 1,
+            fragmentName: "checkpoint", burnFragmentSubtitles: false,
+            subtitleStyle: .standard, selectedTopicID: nil,
+            whisperModelPath: "", whisperLanguage: "en"
+        )
+        let engine = WorkflowEngine(store: store)
+        for status: ProjectOperationStatus in [.pending, .running, .stopped, .failed] {
+            manifest.workflow?.operations[WorkflowOperation.transcribe.rawValue] = ProjectOperationRecord(
+                status: status, startedAt: Date(), finishedAt: nil,
+                inputSignature: nil, outputPaths: [], errorMessage: nil
+            )
+            let skipped = try await engine.shouldSkip(
+                .transcribe, settings: settings, manifest: manifest,
+                projectURL: project, mediaURL: media, log: { _ in }
+            )
+            try require(!skipped, "mixed transcript/JSON skipped incomplete \(status.rawValue) checkpoint")
+            try require(SelectedTimingHash.file(layout.fullSRTURL) == fullHash
+                        && SelectedTimingHash.file(layout.whisperJSONURL) == jsonHash,
+                        "checkpoint preflight changed existing transcript artifacts")
+        }
+        manifest.workflow?.operations[WorkflowOperation.transcribe.rawValue]?.status = .completed
+        let validReuse = try await engine.shouldSkip(
+            .transcribe, settings: settings, manifest: manifest,
+            projectURL: project, mediaURL: media, log: { _ in }
+        )
+        try require(validReuse, "completed valid transcription did not retain ordinary no-ASR reuse")
     }
 
     /// An opt-in read-only check for a retained real SeminarText package. It

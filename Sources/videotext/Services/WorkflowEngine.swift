@@ -3120,12 +3120,17 @@ final class WorkflowEngine: @unchecked Sendable {
                         coreResult = recovered
                         log("Восстановлена завершённая расшифровка bundled SeminarText; повторный ASR не запускался.")
                     } else {
-                        coreResult = try await coreSeminarTextTranscription.transcribe(
+                        let existingCues = try? srt.load(from: layout.fullSRTURL)
+                        let needsShortChunkRecovery = existingCues.flatMap {
+                            transcriptionQuality.recoveryIssue(cues: $0)
+                        } != nil
+                        coreResult = try await coreSeminarTextTranscription.transcribeWithQualityRecovery(
                             mediaURL: mediaURL,
                             language: sourceLanguage,
                             executable: seminarText,
                             modelPath: modelPath,
                             outputRoot: layout.seminarTextCoreDirectory,
+                            preferShortChunks: needsShortChunkRecovery,
                             onLog: { message in
                                 tracker.update(operation, fraction: 0.5, indeterminate: true)
                                 log(message)
@@ -3134,22 +3139,28 @@ final class WorkflowEngine: @unchecked Sendable {
                     }
                     let importedCues = try coreSeminarTextTranscription.loadCoreSRT(from: coreResult.srtURL, srt: srt)
                     let cues = try coreSeminarTextTranscription.reconcileForVideoTextTimeline(importedCues)
+                    if let issue = transcriptionQuality.recoveryIssue(cues: cues) {
+                        throw WorkflowError.processFailed("SeminarText сохранил повреждённую расшифровку: \(issue.message). Исходные результаты проекта не заменены.")
+                    }
                     if cues.map(\.start) != importedCues.map(\.start) {
                         log("Скорректированы микроперекрытия на границах фрагментов SeminarText; исходный SRT сохранён в provenance.")
                     }
-                    try srt.writePreservingIDs(cues, to: layout.fullSRTURL)
-                    try writeTranscript(from: cues, to: layout.transcriptURL)
                     let coreWhisperJSON = try SeminarTextCoreWhisperEvidenceImporter().importSelectedWhisperJSON(
                         packageRoot: coreResult.selectedTimingPackageURL,
                         expectedMediaURL: mediaURL,
                         expectedLanguage: sourceLanguage
                     )
-                    try coreWhisperJSON.write(to: layout.whisperJSONURL, options: .atomic)
-                    guard SeminarTextCoreWhisperEvidenceImporter().validateLegacyWhisperJSON(at: layout.whisperJSONURL),
-                          nonemptyFile(layout.fullSRTURL),
-                          nonemptyFile(layout.transcriptURL) else {
+                    let validationURL = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("videotext-core-import-\(UUID().uuidString).json")
+                    defer { try? FileManager.default.removeItem(at: validationURL) }
+                    try coreWhisperJSON.write(to: validationURL, options: .atomic)
+                    guard SeminarTextCoreWhisperEvidenceImporter().validateLegacyWhisperJSON(at: validationURL) else {
                         throw WorkflowError.processFailed("SeminarText не создал полный core transcription package: full.srt, transcript.txt и whisper.json обязательны.")
                     }
+                    try Task.checkCancellation()
+                    try srt.writePreservingIDs(cues, to: layout.fullSRTURL)
+                    try writeTranscript(from: cues, to: layout.transcriptURL)
+                    try coreWhisperJSON.write(to: layout.whisperJSONURL, options: .atomic)
                     let coreEvidence = SeminarTextCoreTranscriptionEvidence(
                         schemaVersion: 1,
                         runtimeIdentity: runtimeIdentity,
@@ -3285,7 +3296,11 @@ final class WorkflowEngine: @unchecked Sendable {
                         )
                         log("Legacy full.srt materialized as the active \(sourceLanguage.rawValue.uppercased()) source without rerunning ASR.")
                     }
-                    guard workingSubtitleMatchesRevision(
+                    guard workingCanonicalSubtitleMatchesRevision(
+                        sourceRevision,
+                        language: sourceLanguage,
+                        projectURL: projectURL
+                    ), workingLocalizedSubtitleMatchesRevision(
                         sourceRevision,
                         language: sourceLanguage,
                         projectURL: projectURL
@@ -3295,8 +3310,8 @@ final class WorkflowEngine: @unchecked Sendable {
                     if current.activeTranscriptRevision(for: targetLanguage)?.origin == .userEdited {
                         throw WorkflowError.processFailed("Перевод содержит ручные правки. Новый профиль перевода не будет автоматически заменять принятую пользователем ревизию.")
                     }
-                    let result: TranslationAdapterResult
-                    let usesLegacyFullSRTPath: Bool
+                    var result: TranslationAdapterResult?
+                    var usesLegacyFullSRTPath = false
                     if isLegacyFullSRTAtEntry {
                         log("Legacy full.srt translation uses the established ownership adapter; ASR is not rerun.")
                         result = try await translationAdapter.translate(
@@ -3324,10 +3339,37 @@ final class WorkflowEngine: @unchecked Sendable {
                             url: layout.selectedTimingSourceUnitsURL,
                             in: projectURL
                         )
-                        let sourceDocument = try selectedTimingTranslation.sourceDocument(
-                            selectedSource,
-                            reconciledWith: activeSourceCues
-                        )
+                        let sourceDocument: TimedSourceDocument?
+                        do {
+                            sourceDocument = try selectedTimingTranslation.sourceDocument(
+                                selectedSource,
+                                reconciledWith: activeSourceCues
+                            )
+                        } catch let incompatibility as SelectedTimingSourceCompatibilityError {
+                            sourceDocument = nil
+                            let fallbackIdentity = "\(sourceRevision.id)|selected-timing-incompatible:\(selectedSource.upstreamManifestSHA256)"
+                            switch incompatibility {
+                            case .temporalCoverage(let cueID):
+                                log("Canonical selected timing verified (manifest \(selectedSource.upstreamManifestSHA256)), but does not cover approved cueId \(cueID). Перевод использует approved SRT ownership adapter; ASR и source artifacts не изменяются.")
+                            }
+                            result = try await translationAdapter.translate(
+                                cues: activeSourceCues,
+                                source: sourceLanguage,
+                                target: targetLanguage,
+                                documentTitle: TranslationContextPlan.documentTitle(for: mediaURL),
+                                sourceIdentity: fallbackIdentity,
+                                checkpointDirectory: layout.translationCacheDirectory(
+                                    source: sourceLanguage,
+                                    target: targetLanguage
+                                ),
+                                onProgress: { tracker.update(operation, fraction: $0) },
+                                onLog: log
+                            )
+                            // Translation Human Review remains enabled here;
+                            // this is not the legacy no-review compatibility path.
+                            usesLegacyFullSRTPath = false
+                        }
+                        if let sourceDocument {
                         log("Перевод \(sourceLanguage.rawValue.uppercased())→\(targetLanguage.rawValue.uppercased()) использует canonical selected timing; TranslateGemma получает только текст unit.")
                         let translated = try await selectedTimingTranslation.translate(
                             sourceDocument: sourceDocument,
@@ -3360,6 +3402,10 @@ final class WorkflowEngine: @unchecked Sendable {
                         result = try translated.adapterResult()
                         tracker.update(operation, fraction: 1)
                         usesLegacyFullSRTPath = false
+                        }
+                    }
+                    guard let result else {
+                        throw WorkflowError.processFailed("Не удалось выбрать безопасный путь перевода.")
                     }
                     try Task.checkCancellation()
                     let report = try registerTranslation(
@@ -4276,6 +4322,38 @@ final class WorkflowEngine: @unchecked Sendable {
         return working == immutable
     }
 
+    private func workingLocalizedSubtitleMatchesRevision(
+        _ revision: TranscriptRevision,
+        language: ArtifactLanguage,
+        projectURL: URL
+    ) -> Bool {
+        let layout = ProjectLayout(root: projectURL)
+        let workingURL = layout.subtitlesURL(language: language)
+        let revisionURL = layout.subtitleRevisionURL(id: revision.id, language: language)
+        guard let working = try? Data(contentsOf: workingURL),
+              let immutable = try? Data(contentsOf: revisionURL) else { return false }
+        return working == immutable
+    }
+
+    private func workingCanonicalSubtitleMatchesRevision(
+        _ revision: TranscriptRevision,
+        language: ArtifactLanguage,
+        projectURL: URL
+    ) -> Bool {
+        let layout = ProjectLayout(root: projectURL)
+        let revisionURL = layout.subtitleRevisionURL(id: revision.id, language: language)
+        guard let working = try? Data(contentsOf: layout.fullSRTURL),
+              let immutable = try? Data(contentsOf: revisionURL) else { return false }
+        return working == immutable
+    }
+
+    private func targetArtifactsAreReady(_ revision: TranscriptRevision, manifest: ProjectManifest) -> Bool {
+        let ids = Set([revision.transcriptArtifactID, revision.subtitleArtifactID])
+        guard ids.count == 2 else { return false }
+        let related = (manifest.artifacts ?? []).filter { ids.contains($0.id) }
+        return Set(related.map(\.id)) == ids && related.allSatisfy { $0.validationStatus == .ready }
+    }
+
     private func restoreCoreWorkflowAfterTranslation(
         projectURL: URL,
         previous: ProjectWorkflowState
@@ -4661,7 +4739,7 @@ final class WorkflowEngine: @unchecked Sendable {
         log("Проверка ffprobe сохранена.")
     }
 
-    private func shouldSkip(
+    func shouldSkip(
         _ operation: WorkflowOperation,
         settings: WorkflowSettings,
         manifest: ProjectManifest,
@@ -4681,6 +4759,11 @@ final class WorkflowEngine: @unchecked Sendable {
                   manifest.languageProfile != nil else { return false }
             return true
         case .transcribe:
+            if let checkpoint = manifest.workflow?.operations[WorkflowOperation.transcribe.rawValue],
+               checkpoint.status != .completed && checkpoint.status != .skipped {
+                log("Предыдущее сохранение расшифровки не завершено; проверяю исходный пакет SeminarText перед восстановлением.")
+                return false
+            }
             guard nonemptyFile(layout.fullSRTURL),
                   nonemptyFile(layout.whisperJSONURL),
                   SeminarTextCoreWhisperEvidenceImporter().validateLegacyWhisperJSON(at: layout.whisperJSONURL) else { return false }
@@ -4738,6 +4821,26 @@ final class WorkflowEngine: @unchecked Sendable {
             } ?? false
             guard (report.status == .ready && report.reviewTaskIDs.isEmpty) || approvedUserEdit else {
                 return false
+            }
+            // A protocol change invalidates machine checkpoints, but must not
+            // make an already approved human target impossible to resume. Its
+            // source/target revision bytes and report lineage are immutable
+            // authority here; pending or stale artifacts still fail closed.
+            if let targetRevision = manifest.activeTranscriptRevision(for: targetLanguage),
+               sourceRevision.reviewStatus == .approved,
+               targetRevision.origin == .userEdited,
+               targetRevision.reviewStatus == .approved,
+               report.schemaVersion == 3,
+               report.sourceLanguage == sourceLanguage,
+               report.targetLanguage == targetLanguage,
+               report.sourceRevisionID == sourceRevision.id,
+               !report.targetRevisionID.isEmpty,
+               workingCanonicalSubtitleMatchesRevision(sourceRevision, language: sourceLanguage, projectURL: projectURL),
+               workingLocalizedSubtitleMatchesRevision(sourceRevision, language: sourceLanguage, projectURL: projectURL),
+               workingLocalizedSubtitleMatchesRevision(targetRevision, language: targetLanguage, projectURL: projectURL),
+               targetArtifactsAreReady(targetRevision, manifest: manifest),
+               TranslationResumeValidator.outputsMatch(report: report, manifest: manifest, layout: layout) {
+                return true
             }
             // An approved translation is intentionally not byte-identical to
             // the machine selected-timing document. Its immutable approved

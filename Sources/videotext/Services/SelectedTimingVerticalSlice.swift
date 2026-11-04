@@ -447,7 +447,7 @@ struct SelectedTimingVerticalSlice {
             // adjacent provenance into this cue and make resume non-idempotent.
             let overlaps = selected.units.filter { $0.start < cue.end && $0.end > cue.start }
             guard !overlaps.isEmpty else {
-                throw WorkflowError.processFailed("Активная исходная расшифровка выходит за пределы выбранных временных данных SeminarText.")
+                throw SelectedTimingSourceCompatibilityError.temporalCoverage(cueID: cue.id)
             }
             let prefix = overlaps.first?.text.prefix(while: { $0.isWhitespace }) ?? ""
             let text = String(prefix) + cue.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -489,6 +489,21 @@ struct SelectedTimingVerticalSlice {
 
     private func average(_ values: [Double]) -> Double? {
         values.isEmpty ? nil : values.reduce(0, +) / Double(values.count)
+    }
+}
+
+/// The selected package and active approved SRT can both be valid while their
+/// independently published timelines have no common executable interval for a
+/// cue. This remains narrower than an import or validation failure: callers
+/// may use approved-SRT ownership only after canonical provenance is verified.
+enum SelectedTimingSourceCompatibilityError: LocalizedError, Equatable {
+    case temporalCoverage(cueID: Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .temporalCoverage(let cueID):
+            return "Approved cueId \(cueID) не покрывается canonical selected timing."
+        }
     }
 }
 
@@ -645,6 +660,10 @@ struct SeminarTextSelectedTimingRunner {
 /// `whisper.json` evidence for quality and filler-word consumers. This is one
 /// SeminarText invocation, not a second transcription or a translation path.
 struct SeminarTextCoreTranscriptionRunner {
+    private enum InvocationFailure: Error {
+        case qualityRetryRequested(String)
+    }
+
     struct Result {
         let srtURL: URL
         let outputDirectory: URL
@@ -663,6 +682,7 @@ struct SeminarTextCoreTranscriptionRunner {
         executable: URL,
         modelPath: String,
         outputRoot: URL,
+        chunkSeconds: Int? = nil,
         onLog: @escaping (String) -> Void = { _ in }
     ) async throws -> Result {
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
@@ -685,6 +705,12 @@ struct SeminarTextCoreTranscriptionRunner {
         if !modelPath.isEmpty {
             arguments.append("SEMINARTEXT_MODEL=\(modelPath)")
         }
+        if let chunkSeconds {
+            guard chunkSeconds == 60 else {
+                throw WorkflowError.processFailed("Неподдерживаемый размер фрагмента восстановления SeminarText.")
+            }
+            arguments.append("SEMINARTEXT_CHUNK_SECONDS=\(chunkSeconds)")
+        }
         arguments += [
             executable.path,
             "transcribe",
@@ -702,6 +728,13 @@ struct SeminarTextCoreTranscriptionRunner {
             onLog(chunk)
         }
         guard result.exitCode == 0 else {
+            let diagnostics = (result.stderr + result.stdout)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if chunkSeconds == nil,
+               diagnostics.contains("ASR quality gate: REJECT"),
+               diagnostics.contains("Повторите с SEMINARTEXT_CHUNK_SECONDS=60.") {
+                throw InvocationFailure.qualityRetryRequested(diagnostics)
+            }
             throw WorkflowError.processFailed("SeminarText transcription завершился с кодом \(result.exitCode): \((result.stderr + result.stdout).trimmingCharacters(in: .whitespacesAndNewlines))")
         }
         let srtURLs = Self.findCoreSRTs(in: invocationRoot)
@@ -717,6 +750,76 @@ struct SeminarTextCoreTranscriptionRunner {
             outputDirectory: srtURL.deletingLastPathComponent(),
             selectedTimingPackageURL: manifestURL.deletingLastPathComponent()
         )
+    }
+
+    /// The first ordinary SeminarText attempt may report success despite an
+    /// unresolved ASR loop in an older bundled runtime. Keep that package for
+    /// diagnosis and make only one smaller-chunk attempt before publication.
+    func transcribeWithQualityRecovery(
+        mediaURL: URL,
+        language: ArtifactLanguage,
+        executable: URL,
+        modelPath: String,
+        outputRoot: URL,
+        preferShortChunks: Bool,
+        onLog: @escaping (String) -> Void = { _ in }
+    ) async throws -> Result {
+        let first: Result
+        do {
+            first = try await transcribe(
+                mediaURL: mediaURL,
+                language: language,
+                executable: executable,
+                modelPath: modelPath,
+                outputRoot: outputRoot,
+                chunkSeconds: preferShortChunks ? 60 : nil,
+                onLog: onLog
+            )
+        } catch InvocationFailure.qualityRetryRequested(let diagnostics) {
+            guard !preferShortChunks else {
+                throw WorkflowError.processFailed("SeminarText сохранил повреждённую расшифровку после восстановления: \(diagnostics). Исходный пакет сохранён; результат проекта не заменён.")
+            }
+            onLog("SeminarText отклонил качество обычной расшифровки. Выполняется один повтор с фрагментами по 60 секунд.")
+            let fallback = try await transcribe(
+                mediaURL: mediaURL,
+                language: language,
+                executable: executable,
+                modelPath: modelPath,
+                outputRoot: outputRoot,
+                chunkSeconds: 60,
+                onLog: onLog
+            )
+            if let remaining = try qualityRecoveryIssue(in: fallback) {
+                throw WorkflowError.processFailed("SeminarText сохранил повреждённую расшифровку после восстановления: \(remaining.message). Оба пакета сохранены; результат проекта не заменён.")
+            }
+            return fallback
+        }
+        if let issue = try qualityRecoveryIssue(in: first) {
+            guard !preferShortChunks else {
+                throw WorkflowError.processFailed("SeminarText сохранил повреждённую расшифровку после восстановления: \(issue.message). Исходный пакет сохранён; результат проекта не заменён.")
+            }
+            onLog("SeminarText вернул повреждённую расшифровку: \(issue.message). Выполняется один повтор с фрагментами по 60 секунд.")
+            let fallback = try await transcribe(
+                mediaURL: mediaURL,
+                language: language,
+                executable: executable,
+                modelPath: modelPath,
+                outputRoot: outputRoot,
+                chunkSeconds: 60,
+                onLog: onLog
+            )
+            if let remaining = try qualityRecoveryIssue(in: fallback) {
+                throw WorkflowError.processFailed("SeminarText сохранил повреждённую расшифровку после восстановления: \(remaining.message). Оба пакета сохранены; результат проекта не заменён.")
+            }
+            return fallback
+        }
+        return first
+    }
+
+    func qualityRecoveryIssue(in result: Result) throws -> TranscriptionRecoveryIssue? {
+        let imported = try loadCoreSRT(from: result.srtURL)
+        let reconciled = try reconcileForVideoTextTimeline(imported)
+        return TranscriptionQualityService().recoveryIssue(cues: reconciled)
     }
 
     /// Reuses only a completed, unambiguous SeminarText attempt for this exact
@@ -790,11 +893,17 @@ struct SeminarTextCoreTranscriptionRunner {
                   ) else {
                 continue
             }
-            candidates.append(Result(
+            let result = Result(
                 srtURL: srtURL,
                 outputDirectory: outputDirectory,
                 selectedTimingPackageURL: manifestURL.deletingLastPathComponent()
-            ))
+            )
+            guard let imported = try? loadCoreSRT(from: srtURL),
+                  let reconciled = try? reconcileForVideoTextTimeline(imported),
+                  TranscriptionQualityService().recoveryIssue(cues: reconciled) == nil else {
+                continue
+            }
+            candidates.append(result)
         }
         return candidates.count == 1 ? candidates[0] : nil
     }
@@ -1452,6 +1561,7 @@ struct SelectedTimingImporter {
                         end: end,
                         sourceUnitEnvelopeStart: segmentEnvelope?.start ?? min(start, end),
                         sourceUnitEnvelopeEnd: segmentEnvelope?.end ?? max(start, end),
+                        usesNativeSegmentEnvelope: collapsedTokenEnvelope,
                         maximumEnd: selectedRange.endSeconds,
                         partID: part.id,
                         confidence: token.confidence,
@@ -1482,27 +1592,13 @@ struct SelectedTimingImporter {
     }
 
     private func sentenceUnits(from atoms: [SelectedTimingAtom]) throws -> [TimedSourceUnit] {
-        var units: [TimedSourceUnit] = []
+        var sentenceAtoms: [[SelectedTimingAtom]] = []
         var current: [SelectedTimingAtom] = []
         func flush() throws {
             guard !current.isEmpty else { return }
             let text = current.map(\.text).joined()
             guard !text.isEmpty else { throw WorkflowError.processFailed("Selected timing создал пустой source unit.") }
-            let partIDs = current.reduce(into: [String]()) { result, atom in
-                if result.last != atom.partID { result.append(atom.partID) }
-            }
-            units.append(TimedSourceUnit(
-                id: units.count + 1,
-                text: text,
-                textSHA256: SelectedTimingHash.string(text),
-                start: current.map(\.sourceUnitEnvelopeStart).min()!,
-                // JSON-full is native Whisper evidence and may include decoder
-                // padding past a media/chunk end. The manifest's signed range is
-                // the truthful upper bound for this source-unit envelope; this
-                // does not alter text or manufacture word-level alignment.
-                end: min(current.map(\.sourceUnitEnvelopeEnd).max()!, current.last!.maximumEnd),
-                sourcePartIDs: partIDs
-            ))
+            sentenceAtoms.append(current)
             current.removeAll(keepingCapacity: true)
         }
         for atom in atoms {
@@ -1510,6 +1606,48 @@ struct SelectedTimingImporter {
             if Self.endsSentence(atom.text) { try flush() }
         }
         try flush()
+
+        var units = sentenceAtoms.enumerated().map { index, sentence in
+            let text = sentence.map(\.text).joined()
+            let partIDs = sentence.reduce(into: [String]()) { result, atom in
+                if result.last != atom.partID { result.append(atom.partID) }
+            }
+            return TimedSourceUnit(
+                id: index + 1,
+                text: text,
+                textSHA256: SelectedTimingHash.string(text),
+                start: sentence.map(\.sourceUnitEnvelopeStart).min()!,
+                // JSON-full is native Whisper evidence and may include decoder
+                // padding past a media/chunk end. The manifest's signed range is
+                // the truthful upper bound for this source-unit envelope; this
+                // does not alter text or manufacture word-level alignment.
+                end: min(sentence.map(\.sourceUnitEnvelopeEnd).max()!, sentence.last!.maximumEnd),
+                sourcePartIDs: partIDs
+            )
+        }
+
+        for index in units.indices.dropLast() {
+            let preceding = sentenceAtoms[index]
+            let following = sentenceAtoms[index + 1]
+            guard let nextRawStart = following.first?.start,
+                  let precedingRawEnd = preceding.map({ max($0.start, $0.end) }).max(),
+                  nextRawStart >= precedingRawEnd,
+                  nextRawStart > units[index].start,
+                  nextRawStart < units[index].end,
+                  preceding.contains(where: {
+                      $0.usesNativeSegmentEnvelope
+                          && $0.sourceUnitEnvelopeEnd >= units[index].end
+                  }) else {
+                continue
+            }
+            // A fully collapsed token run has no usable word-level end. Its
+            // verified native segment envelope is retained unless it extends
+            // beyond the following sentence's first raw token. That would make
+            // the derived executable ranges overlap even though raw speech does
+            // not. Snap only this derived boundary to the next raw start; raw
+            // token evidence, source text and manifest provenance stay intact.
+            units[index].end = nextRawStart
+        }
         return units
     }
 
@@ -1837,6 +1975,7 @@ private struct SelectedTimingAtom {
     var end: TimeInterval
     var sourceUnitEnvelopeStart: TimeInterval
     var sourceUnitEnvelopeEnd: TimeInterval
+    var usesNativeSegmentEnvelope: Bool
     var maximumEnd: TimeInterval
     var partID: String
     var confidence: Double?
