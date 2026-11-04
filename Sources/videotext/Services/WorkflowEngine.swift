@@ -3306,8 +3306,8 @@ final class WorkflowEngine: @unchecked Sendable {
                     if current.activeTranscriptRevision(for: targetLanguage)?.origin == .userEdited {
                         throw WorkflowError.processFailed("Перевод содержит ручные правки. Новый профиль перевода не будет автоматически заменять принятую пользователем ревизию.")
                     }
-                    let result: TranslationAdapterResult
-                    let usesLegacyFullSRTPath: Bool
+                    var result: TranslationAdapterResult?
+                    var usesLegacyFullSRTPath = false
                     if isLegacyFullSRTAtEntry {
                         log("Legacy full.srt translation uses the established ownership adapter; ASR is not rerun.")
                         result = try await translationAdapter.translate(
@@ -3335,10 +3335,37 @@ final class WorkflowEngine: @unchecked Sendable {
                             url: layout.selectedTimingSourceUnitsURL,
                             in: projectURL
                         )
-                        let sourceDocument = try selectedTimingTranslation.sourceDocument(
-                            selectedSource,
-                            reconciledWith: activeSourceCues
-                        )
+                        let sourceDocument: TimedSourceDocument?
+                        do {
+                            sourceDocument = try selectedTimingTranslation.sourceDocument(
+                                selectedSource,
+                                reconciledWith: activeSourceCues
+                            )
+                        } catch let incompatibility as SelectedTimingSourceCompatibilityError {
+                            sourceDocument = nil
+                            let fallbackIdentity = "\(sourceRevision.id)|selected-timing-incompatible:\(selectedSource.upstreamManifestSHA256)"
+                            switch incompatibility {
+                            case .temporalCoverage(let cueID):
+                                log("Canonical selected timing verified (manifest \(selectedSource.upstreamManifestSHA256)), but does not cover approved cueId \(cueID). Перевод использует approved SRT ownership adapter; ASR и source artifacts не изменяются.")
+                            }
+                            result = try await translationAdapter.translate(
+                                cues: activeSourceCues,
+                                source: sourceLanguage,
+                                target: targetLanguage,
+                                documentTitle: TranslationContextPlan.documentTitle(for: mediaURL),
+                                sourceIdentity: fallbackIdentity,
+                                checkpointDirectory: layout.translationCacheDirectory(
+                                    source: sourceLanguage,
+                                    target: targetLanguage
+                                ),
+                                onProgress: { tracker.update(operation, fraction: $0) },
+                                onLog: log
+                            )
+                            // Translation Human Review remains enabled here;
+                            // this is not the legacy no-review compatibility path.
+                            usesLegacyFullSRTPath = false
+                        }
+                        if let sourceDocument {
                         log("Перевод \(sourceLanguage.rawValue.uppercased())→\(targetLanguage.rawValue.uppercased()) использует canonical selected timing; TranslateGemma получает только текст unit.")
                         let translated = try await selectedTimingTranslation.translate(
                             sourceDocument: sourceDocument,
@@ -3371,6 +3398,10 @@ final class WorkflowEngine: @unchecked Sendable {
                         result = try translated.adapterResult()
                         tracker.update(operation, fraction: 1)
                         usesLegacyFullSRTPath = false
+                        }
+                    }
+                    guard let result else {
+                        throw WorkflowError.processFailed("Не удалось выбрать безопасный путь перевода.")
                     }
                     try Task.checkCancellation()
                     let report = try registerTranslation(

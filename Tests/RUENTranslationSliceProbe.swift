@@ -26,6 +26,7 @@ struct RUENTranslationSliceProbe {
         )
         try verifyRelocatedSourceReferenceFailures(root: root.appendingPathComponent("relocated-failures"))
         try await verifyApprovedSourceFlow(root: root.appendingPathComponent("success"))
+        try await verifyVerifiedSelectedTimingTemporalFallback(root: root.appendingPathComponent("selected-timing-temporal-fallback"))
         try await verifyRejectedResponseRetriesAndPersistsEvidence(root: root.appendingPathComponent("retry-success"))
         try await verifySourceFallbackFailsClosed(root: root.appendingPathComponent("source-fallback"))
         try await verifyWrongLanguageFailsClosed(root: root.appendingPathComponent("wrong-language"))
@@ -430,6 +431,93 @@ struct RUENTranslationSliceProbe {
                     "reopen lost approved RU/EN revisions")
     }
 
+    private static func verifyVerifiedSelectedTimingTemporalFallback(root: URL) async throws {
+        let fixture = try makeFixture(root: root)
+        try makeSelectedTimingTemporallyIncompatible(fixture)
+        let sourceSRT = try Data(contentsOf: fixture.layout.subtitlesURL(language: .ru))
+        let selectedManifestURL = try selectedTimingManifestURL(for: fixture)
+        let selectedManifest = try Data(contentsOf: selectedManifestURL)
+        let coreEvidence = try Data(contentsOf: fixture.layout.seminarTextCoreEvidenceURL)
+        try FileManager.default.createDirectory(
+            at: fixture.layout.topicsURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let topics = Data("existing approved topics fixture".utf8)
+        try topics.write(to: fixture.layout.topicsURL, options: .atomic)
+        let manifestHash = SelectedTimingHash.file(try selectedTimingManifestURL(for: fixture))
+        let ownershipProvider = ScriptedLegacyTranslationProvider()
+        let selectedTiming = SelectedTimingVerticalSlice(translator: FailingRUENTranslator())
+        let engine = WorkflowEngine(
+            store: fixture.store,
+            translationAdapter: TranslationAdapter(provider: ownershipProvider),
+            selectedTimingTranslation: selectedTiming
+        )
+        var log: [String] = []
+        let result = try await engine.run(settings: settings(fixture), onLog: { log.append($0) })
+
+        try require(result.checkpoint?.kind == .translatedTranscript && result.checkpoint?.language == .en,
+                    "verified temporal incompatibility did not continue to Translation Human Review")
+        try require(ownershipProvider.calls == 1,
+                    "verified temporal incompatibility did not use the approved-SRT ownership adapter exactly once")
+        try require(log.contains(where: {
+            $0.contains("Canonical selected timing verified (manifest \(manifestHash))")
+                && $0.contains("approved cueId 3")
+                && $0.contains("approved SRT ownership adapter")
+        }), "temporal fallback did not record its verified provenance and cue")
+        try require(try Data(contentsOf: fixture.layout.subtitlesURL(language: .ru)) == sourceSRT,
+                    "temporal fallback changed the approved source SRT")
+        try require(!FileManager.default.fileExists(atPath: fixture.layout.selectedTimingTranslationsURL(source: .ru, target: .en).path),
+                    "temporal fallback incorrectly published a selected-timing translation")
+        let persisted = try selectedTiming.loadPersistedSource(projectURL: fixture.project, mediaURL: fixture.media)
+        try require(persisted?.upstreamManifestSHA256 == manifestHash,
+                    "temporal fallback did not retain the verified selected timing provenance")
+        guard let persisted else { throw ProbeFailure(message: "temporal fallback did not persist selected source") }
+        let approvedCues = try SRTService().load(from: fixture.layout.subtitlesURL(language: .ru))
+        do {
+            _ = try selectedTiming.sourceDocument(persisted, reconciledWith: approvedCues)
+            throw ProbeFailure(message: "temporal fallback fixture unexpectedly reconciled selected timing")
+        } catch SelectedTimingSourceCompatibilityError.temporalCoverage(let cueID) {
+            try require(cueID == 3, "temporal fallback classified the wrong approved cue")
+        }
+        let sourceRevision = try fixture.store.load(from: fixture.project).activeTranscriptRevision(for: .ru)!
+        let plan = try TranslationContextPlan(
+            cues: approvedCues,
+            documentTitle: TranslationContextPlan.documentTitle(for: fixture.media),
+            chunkSize: TranslationAdapter(provider: ownershipProvider).batchSize
+        )
+        let checkpointStore = try TranslationCheckpointStore(
+            directory: fixture.layout.translationCacheDirectory(source: .ru, target: .en),
+            plan: plan,
+            identity: try await ownershipProvider.preferredIdentity(),
+            source: .ru,
+            target: .en,
+            sourceIdentity: "\(sourceRevision.id)|selected-timing-incompatible:\(manifestHash)"
+        )
+        try require(FileManager.default.fileExists(atPath: fixture.layout.translationCacheDirectory(source: .ru, target: .en)
+            .appendingPathComponent(checkpointStore.runIdentity, isDirectory: true).path),
+                    "temporal fallback checkpoint was not isolated by verified manifest and source revision")
+        try require((try fixture.store.load(from: fixture.project)).workflow?.operations[WorkflowOperation.transcribe.rawValue] == nil,
+                    "temporal fallback reran or recorded ASR")
+        let persistedSource = try Data(contentsOf: fixture.layout.selectedTimingSourceUnitsURL)
+        _ = try HumanReviewService(store: fixture.store).approve(projectURL: fixture.project)
+        let callsBeforeResume = ownershipProvider.calls
+        let resumed = try await engine.run(settings: settings(fixture), onLog: { log.append($0) })
+        try require(resumed.checkpoint == nil && ownershipProvider.calls == callsBeforeResume,
+                    "approved temporal fallback did not skip translation on resume")
+        let reopened = try fixture.store.openProject(at: fixture.project).0
+        try require(reopened.activeTranscriptRevision(for: .en)?.reviewStatus == .approved,
+                    "approved temporal fallback target was not ready after reopen")
+        try require(
+            try Data(contentsOf: fixture.layout.subtitlesURL(language: .ru)) == sourceSRT
+                && Data(contentsOf: selectedManifestURL) == selectedManifest
+                && Data(contentsOf: fixture.layout.seminarTextCoreEvidenceURL) == coreEvidence
+                && Data(contentsOf: fixture.layout.selectedTimingSourceUnitsURL) == persistedSource
+                && Data(contentsOf: fixture.layout.topicsURL) == topics,
+            "approval or resume changed source, topics, or selected timing evidence"
+        )
+        print("VERIFIED_SELECTED_TIMING_TEMPORAL_FALLBACK_PASS")
+    }
+
     private static func verifySourceFallbackFailsClosed(root: URL) async throws {
         let fixture = try makeFixture(root: root)
         do {
@@ -741,6 +829,57 @@ struct RUENTranslationSliceProbe {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         try encoder.encode(evidence).write(to: layout.seminarTextCoreEvidenceURL, options: .atomic)
+    }
+
+    /// Creates a hash-consistent canonical package whose selected token timing
+    /// covers only the first approved cue. The approved SRT itself stays
+    /// untouched, exercising the narrow temporal-coverage fallback.
+    private static func makeSelectedTimingTemporallyIncompatible(_ fixture: Fixture) throws {
+        let manifestURL = try selectedTimingManifestURL(for: fixture)
+        let package = manifestURL.deletingLastPathComponent()
+        let jsonURL = package.appendingPathComponent("parts/part_0000.json")
+        var json = try JSONSerialization.jsonObject(with: Data(contentsOf: jsonURL)) as! [String: Any]
+        let transcription = json["transcription"] as! [[String: Any]]
+        let originalTokens = transcription[0]["tokens"] as! [[String: Any]]
+        json["transcription"] = [[
+            "offsets": ["from": 0, "to": 800],
+            "no_speech_prob": 0.01,
+            "tokens": Array(originalTokens.prefix(8))
+        ]]
+        try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+            .write(to: jsonURL, options: .atomic)
+
+        var manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as! [String: Any]
+        var parts = manifest["parts"] as! [[String: Any]]
+        var artifacts = parts[0]["artifacts"] as! [String: [String: String]]
+        var jsonArtifact = artifacts["json_full"]!
+        jsonArtifact["sha256"] = SelectedTimingHash.file(jsonURL)
+        artifacts["json_full"] = jsonArtifact
+        parts[0]["artifacts"] = artifacts
+        manifest["parts"] = parts
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+            .write(to: manifestURL, options: .atomic)
+
+        let evidence = try JSONDecoder().decode(
+            SeminarTextCoreTranscriptionEvidence.self,
+            from: Data(contentsOf: fixture.layout.seminarTextCoreEvidenceURL)
+        )
+        let selectedWhisperJSON = try SeminarTextCoreWhisperEvidenceImporter().importSelectedWhisperJSON(
+            packageRoot: package,
+            expectedMediaURL: fixture.media,
+            expectedLanguage: fixture.sourceLanguage
+        )
+        try writeEvidence(
+            SeminarTextCoreTranscriptionEvidence(
+                schemaVersion: evidence.schemaVersion,
+                runtimeIdentity: evidence.runtimeIdentity,
+                sourceSRTSHA256: evidence.sourceSRTSHA256,
+                selectedTimingManifestSHA256: SelectedTimingHash.file(manifestURL),
+                selectedWhisperJSONSHA256: SelectedTimingHash.data(selectedWhisperJSON),
+                outputDirectory: evidence.outputDirectory
+            ),
+            to: fixture.layout.seminarTextCoreEvidenceURL
+        )
     }
 
     private static func token(_ text: String, _ from: Int, _ to: Int) -> [String: Any] {
