@@ -177,6 +177,28 @@ jobs:
           xcodebuild -version
           swiftc --version
 
+      - name: Prepare exact activated SeminarText material
+        env:
+          CENTRAL: ${{ runner.temp }}/four-product-architecture
+          PROVIDER_SOURCE: ${{ runner.temp }}/seminartext-source
+          PREPARED_SEMINARTEXT: ${{ runner.temp }}/videotext-registry-seminartext
+        run: |
+          git clone --quiet https://github.com/Yurielo/four-product-architecture.git "$CENTRAL"
+          python3 -m venv "$CENTRAL/.venv"
+          "$CENTRAL/.venv/bin/python" -m pip install --disable-pip-version-check -r "$CENTRAL/requirements.txt"
+          "$CENTRAL/.venv/bin/python" scripts/registry_integration.py resolve \
+            --registry-root "$CENTRAL" > "$RUNNER_TEMP/seminartext-activation.json"
+          python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); print("QUALIFIED_PROVIDER_ACTIVATION="+x["activation_event"]); print("QUALIFIED_PROVIDER_SOURCE="+x["release"]["source_commit"])' "$RUNNER_TEMP/seminartext-activation.json"
+          PROVIDER_SHA="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release"]["source_commit"])' "$RUNNER_TEMP/seminartext-activation.json")"
+          git clone --quiet https://github.com/Yurielo/seminartext.git "$PROVIDER_SOURCE"
+          git -C "$PROVIDER_SOURCE" checkout --quiet --detach "$PROVIDER_SHA"
+          "$CENTRAL/.venv/bin/python" scripts/registry_integration.py prepare \
+            --registry-root "$CENTRAL" --material-root "$PROVIDER_SOURCE" \
+            --output "$PREPARED_SEMINARTEXT" > "$RUNNER_TEMP/seminartext-prepared.json"
+          echo "VIDEOTEXT_REGISTRY_ROOT=$CENTRAL" >> "$GITHUB_ENV"
+          echo "VIDEOTEXT_REGISTRY_PYTHON=$CENTRAL/.venv/bin/python" >> "$GITHUB_ENV"
+          echo "VIDEOTEXT_SEMINARTEXT_PREPARED=$PREPARED_SEMINARTEXT" >> "$GITHUB_ENV"
+
       - name: Build exact source snapshot
         env:
           VIDEOTEXT_APP_PATH: ${{ runner.temp }}/videotext-infrastructure-gate.app

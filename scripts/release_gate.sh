@@ -15,8 +15,8 @@ PROMOTE=false
 PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
 usage() {
-  printf 'Использование: %s --profile core <ru-видео> <модель-whisper> [--promote]\n' "$0"
-  printf '       или: %s --profile translation <ru-видео> <модель-whisper> <en-видео> <en-проект> [--promote]\n' "$0"
+  printf 'Использование: %s --profile core <ru-видео> <модель-whisper> [--promote --owner-pass-reference <https-url>]\n' "$0"
+  printf '       или: %s --profile translation <ru-видео> <модель-whisper> <en-видео> <en-проект> [--promote --owner-pass-reference <https-url>]\n' "$0"
 }
 
 if [[ "${1:-}" != "--profile" || $# -lt 4 ]]; then
@@ -43,9 +43,23 @@ case "$PROFILE" in
     ;;
   *) usage >&2; exit 2 ;;
 esac
-if [[ $# -eq 1 ]]; then
-  [[ "$1" == "--promote" ]] || { usage >&2; exit 2; }
-  PROMOTE=true
+OWNER_PASS_REFERENCE="${VIDEOTEXT_OWNER_PASS_REFERENCE:-}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --promote) PROMOTE=true; shift ;;
+    --owner-pass-reference)
+      [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+      OWNER_PASS_REFERENCE="$2"
+      shift 2
+      ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+if [[ "$PROMOTE" == true ]]; then
+  [[ "$OWNER_PASS_REFERENCE" == https://* ]] || {
+    printf 'Для promotion требуется immutable HTTPS Owner PASS reference.\n' >&2
+    exit 2
+  }
 fi
 
 [[ -f "$VIDEO_PATH" ]] || { printf 'Не найдено RU-видео: %s\n' "$VIDEO_PATH" >&2; exit 2; }
@@ -95,6 +109,7 @@ release_files() {
   find "$ROOT/Sources" "$ROOT/Resources" -type f -print
   printf '%s\n' \
     "$ROOT/scripts/build_app.sh" \
+    "$ROOT/scripts/registry_integration.py" \
     "$ROOT/scripts/test_e2e.sh" \
     "$ROOT/scripts/owned_tmp.py" \
     "$ROOT/scripts/test_project_schema.sh" \
@@ -120,6 +135,7 @@ release_files() {
     "$ROOT/scripts/test_tool_runner.sh" \
     "$ROOT/scripts/test_whisper_vad.sh" \
     "$ROOT/scripts/test_transcription_quality.sh" \
+    "$ROOT/scripts/test_release_registry_publication.sh" \
     "$ROOT/scripts/check_baseline.sh" \
     "$ROOT/scripts/test_baseline_guard.sh" \
     "$ROOT/scripts/release_gate.sh" \
@@ -203,6 +219,22 @@ if ! BASELINE_RESULT="$("$ROOT/scripts/check_baseline.sh" 2>&1)"; then
   fail "$BASELINE_RESULT"
 fi
 record baseline_status "$BASELINE_RESULT"
+REGISTRY_ROOT="${VIDEOTEXT_REGISTRY_ROOT:-$ROOT/../four-product-architecture}"
+REGISTRY_PYTHON="${VIDEOTEXT_REGISTRY_PYTHON:-$REGISTRY_ROOT/.venv/bin/python}"
+SEMINARTEXT_MATERIAL_ROOT="${VIDEOTEXT_SEMINARTEXT_MATERIAL_ROOT:-$ROOT/Resources/SeminarText}"
+PREPARED_SEMINARTEXT="$RUN_DIR/SeminarText"
+SEMINARTEXT_DEPENDENCY="$PREPARED_SEMINARTEXT/FOUR_PRODUCT_REGISTRY_DEPENDENCY.json"
+[[ -x "$REGISTRY_PYTHON" ]] || fail "не найден поддерживаемый Python central registry: $REGISTRY_PYTHON"
+if ! "$REGISTRY_PYTHON" "$ROOT/scripts/registry_integration.py" prepare \
+  --registry-root "$REGISTRY_ROOT" --material-root "$SEMINARTEXT_MATERIAL_ROOT" \
+  --output "$PREPARED_SEMINARTEXT" > "$RUN_DIR/seminartext-prepare.json" 2>&1; then
+  fail "не удалось подготовить centrally registered SeminarText; stale bundled fallback запрещен"
+fi
+export VIDEOTEXT_SEMINARTEXT_PREPARED="$PREPARED_SEMINARTEXT"
+record seminartext_dependency_manifest "$SEMINARTEXT_DEPENDENCY"
+record seminartext_dependency_sha256 "$(shasum -a 256 "$SEMINARTEXT_DEPENDENCY" | awk '{print $1}')"
+record seminartext_prepare_log "$RUN_DIR/seminartext-prepare.json"
+record seminartext_activation_event "$("$REGISTRY_PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["activation_event"])' "$SEMINARTEXT_DEPENDENCY")"
 record video_path "$VIDEO_PATH"
 VIDEO_SHA256="$(shasum -a 256 "$VIDEO_PATH" | awk '{print $1}')"
 record video_sha256 "$VIDEO_SHA256"
@@ -225,7 +257,7 @@ record ffmpeg_version "$(ffmpeg -version 2>/dev/null | sed -n '1p')"
 record ffprobe_version "$(ffprobe -version 2>/dev/null | sed -n '1p')"
 record whisper_version "$(whisper-cli --version 2>&1 | sed -n '1p')"
 
-BUNDLED_SEMINARTEXT="$ROOT/Resources/SeminarText/seminartext"
+BUNDLED_SEMINARTEXT="$PREPARED_SEMINARTEXT/seminartext"
 [[ -x "$BUNDLED_SEMINARTEXT" ]] || fail "не найден bundled SeminarText component"
 SEMINARTEXT_HELP="$("$BUNDLED_SEMINARTEXT" transcribe --help 2>&1)" || fail "не удалось проверить bundled SeminarText"
 printf '%s\n' "$SEMINARTEXT_HELP" | /usr/bin/grep -Fq -- '--language' || fail "bundled SeminarText не поддерживает --language"
@@ -259,6 +291,8 @@ focused_checks=(
   test_application_lifecycle.sh
   test_whisper_vad.sh
   test_transcription_quality.sh
+  test_registry_integration.sh
+  test_release_registry_publication.sh
 )
 if [[ "$PROFILE" == "translation" ]]; then
   focused_checks+=(
@@ -419,6 +453,13 @@ record candidate_architecture "$(file "$CANDIDATE/Contents/MacOS/videotext")"
 record smoke_status PASS
 
 if [[ "$PROMOTE" == true ]]; then
+  if ! git -C "$ROOT" fetch --quiet origin refs/heads/main:refs/remotes/origin/main; then
+    fail "не удалось обновить origin/main перед installation"
+  fi
+  if ! git -C "$ROOT" merge-base --is-ancestor "$SOURCE_COMMIT" refs/remotes/origin/main; then
+    fail "Owner-approved source еще не merged on main; installation запрещена"
+  fi
+  record owner_pass_reference "$OWNER_PASS_REFERENCE"
   require_no_active_tools
   if [[ -L "$FINAL_LINK" ]]; then
     FINAL_APP="$(readlink "$FINAL_LINK")"
@@ -470,12 +511,19 @@ if [[ "$PROMOTE" == true ]]; then
   record promotion_command "mv $STAGED_APP $FINAL_APP"
   record promotion_exit_status 0
   record promoted true
+  record post_install_smoke_command "$ROOT/scripts/test_candidate_lifecycle.sh $FINAL_APP"
+  if ! "$ROOT/scripts/test_candidate_lifecycle.sh" "$FINAL_APP" > "$RUN_DIR/post-install-smoke.log" 2>&1; then
+    record post_install_smoke_status FAIL
+    record post_install_smoke_log "$RUN_DIR/post-install-smoke.log"
+    fail "installed app не прошла post-install smoke"
+  fi
+  record post_install_smoke_status PASS
+  record post_install_smoke_log "$RUN_DIR/post-install-smoke.log"
 else
   record promoted false
 fi
 
 record completed_at "$(date -u '+%Y%m%dT%H%M%SZ')"
-record status PASS
 
 required_evidence=(
   source_commit source_tree_clean source_version source_build release_profile
@@ -494,12 +542,14 @@ if [[ "$PROMOTE" == true ]]; then
   required_evidence+=(
     promotion_copy_command promotion_copy_exit_status
     promotion_command promotion_exit_status final_path final_sha256
+    post_install_smoke_command post_install_smoke_status post_install_smoke_log
   )
 fi
 for key in "${required_evidence[@]}"; do
   /usr/bin/grep -q "^${key}=" "$EVIDENCE" || fail "evidence не содержит $key"
 done
+record status PASS
 printf 'RELEASE GATE PASS\nCandidate: %s\nEvidence: %s\n' "$CANDIDATE" "$EVIDENCE"
 if [[ "$PROMOTE" == false ]]; then
-  printf 'Стабильная сборка не заменена. Для продвижения повторите с --promote.\n'
+  printf 'Стабильная сборка не заменена. После Owner PASS доставьте точный Candidate по native lifecycle.\n'
 fi

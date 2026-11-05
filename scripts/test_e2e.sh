@@ -8,6 +8,9 @@ fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK_ROOT="${VIDEOTEXT_EPHEMERAL_WORK_ROOT:-${ROOT}/../work}"
+SEMINARTEXT_BUNDLE="${VIDEOTEXT_SEMINARTEXT_PREPARED:-}"
+REGISTRY_ROOT="${VIDEOTEXT_REGISTRY_ROOT:-$ROOT/../four-product-architecture}"
+REGISTRY_PYTHON="${VIDEOTEXT_REGISTRY_PYTHON:-$REGISTRY_ROOT/.venv/bin/python}"
 TEST_APP="${WORK_ROOT}/videotext-e2e.app"
 TEST_BINARY="${TEST_APP}/Contents/MacOS/videotext-e2e"
 SWIFT_SOURCES=()
@@ -66,9 +69,19 @@ mkdir -p "$(dirname "${TEST_BINARY}")"
 cp "${ROOT}/Resources/Info.plist" "${TEST_APP}/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable videotext-e2e' "${TEST_APP}/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.codex.videotext.e2e' "${TEST_APP}/Contents/Info.plist"
-[[ -x "${ROOT}/Resources/SeminarText/seminartext" ]] || { echo "Missing bundled canonical SeminarText component." >&2; exit 2; }
+[[ -n "$SEMINARTEXT_BUNDLE" && -d "$SEMINARTEXT_BUNDLE" ]] || {
+  echo "Missing prepared registered SeminarText bundle; run registry_integration.py prepare." >&2; exit 2;
+}
+[[ -f "$SEMINARTEXT_BUNDLE/FOUR_PRODUCT_REGISTRY_DEPENDENCY.json" && -x "$SEMINARTEXT_BUNDLE/seminartext" ]] || {
+  echo "Prepared SeminarText bundle is incomplete." >&2; exit 2;
+}
+[[ -x "$REGISTRY_PYTHON" ]] || { echo "Missing supported central registry Python: $REGISTRY_PYTHON" >&2; exit 2; }
+"$REGISTRY_PYTHON" "$ROOT/scripts/registry_integration.py" verify \
+  --registry-root "$REGISTRY_ROOT" --bundle "$SEMINARTEXT_BUNDLE" >/dev/null || {
+  echo "Prepared SeminarText bundle is not the current registered activation." >&2; exit 2;
+}
 mkdir -p "${TEST_APP}/Contents/Resources/SeminarText"
-ditto --norsrc "${ROOT}/Resources/SeminarText" "${TEST_APP}/Contents/Resources/SeminarText"
+ditto --norsrc "$SEMINARTEXT_BUNDLE" "${TEST_APP}/Contents/Resources/SeminarText"
 chmod +x "${TEST_APP}/Contents/Resources/SeminarText/seminartext"
 
 while IFS= read -r source; do
