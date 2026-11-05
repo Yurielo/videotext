@@ -1,94 +1,74 @@
 # Four-Product Registry integration
 
-VideoText bundles SeminarText. It never treats the installed standalone
-SeminarText application, a repository head, or an older source bundle as a
-substitute for a centrally activated provider release.
+VideoText bundles SeminarText. The authoritative central activation identifies
+the provider release; a repository HEAD or an older local bundle cannot replace
+that identity.
 
-## Preparation for a future build
+## Verified build input
 
-The central registry is the sole source of the current SeminarText activation.
-`scripts/registry_integration.py resolve` fetches and validates central `main`,
-then requires the current SeminarText event, its retained successful native
-activation proof, its source commit, release identity and every artifact.
+`scripts/registry_integration.py resolve` validates central `main` and its
+current SeminarText event, native activation proof, source commit and component
+inventory. `prepare` copies every component from a material root only when its
+SHA-256 matches the registered receipt. It writes a bound dependency manifest.
 
-For a real build, provide a directory containing the exact registered source
-material, laid out by the component `repository_path` values retained in that
-activation receipt. The command copies only those checked files and writes a
-bound manifest:
+The currently registered SeminarText source is
+`9c99028ea15388a3850770c7cfe6c816406c4335` with 36 components. Supply a
+clean archive of that exact commit as `VIDEOTEXT_SEMINARTEXT_MATERIAL_ROOT` for
+the release gate. The default `Resources/SeminarText` is incomplete for this
+activation and correctly fails closed. No installed product is used as an
+implicit source or modified during preparation.
 
 ```sh
 CENTRAL=/exact/four-product-architecture
-CENTRAL_PYTHON="$CENTRAL/.venv/bin/python"
-"$CENTRAL_PYTHON" scripts/registry_integration.py prepare \
-  --registry-root "$CENTRAL" \
-  --material-root /exact/registered-seminartext-material \
-  --output /private/tmp/videotext-seminartext-prepared
-export VIDEOTEXT_SEMINARTEXT_PREPARED=/private/tmp/videotext-seminartext-prepared
-scripts/build_app.sh
+export VIDEOTEXT_REGISTRY_ROOT="$CENTRAL"
+export VIDEOTEXT_REGISTRY_PYTHON="$CENTRAL/.venv/bin/python"
+export VIDEOTEXT_SEMINARTEXT_MATERIAL_ROOT=/exact/registered-seminartext-source
+scripts/release_gate.sh --profile core /exact/short-video.mp4 /exact/model.bin
 ```
 
-`build_app.sh` and `test_e2e.sh` reject absent or incomplete preparation. They
-also re-resolve central `main` and verify that the prepared manifest still
-matches its current SeminarText event. They do not copy `Resources/SeminarText`
-as a fallback. The release gate prepares
-one bundle before its checks, passes that exact bundle to both E2E executions
-and candidate build, and retains the activation event and manifest hash in its
-existing evidence. It defaults material input to `Resources/SeminarText`, which
-is safe because hash mismatch is a hard failure; a future release normally sets
-`VIDEOTEXT_SEMINARTEXT_MATERIAL_ROOT` to verified material for the registered
-provider event.
+`build_app.sh` and `test_e2e.sh` re-resolve current central state and reject an
+absent, incomplete or stale prepared bundle before changing an app target.
+Both E2E executions and the Candidate build use the same verified preparation.
+The release evidence records the activation event and manifest hash. The clean
+hosted macOS packaging check resolves the real current central activation and
+checks out that exact SeminarText source commit into a disposable runner path.
+It logs `QUALIFIED_PROVIDER_ACTIVATION` and `QUALIFIED_PROVIDER_SOURCE`; compare
+both to the retained Candidate manifest before recording the CI/CD verdict.
+An intervening provider activation requires requalification. The workflow
+performs no central publication or product installation.
 
-This changes future preparation only. It does not modify any existing VideoText
-application, replace its bundled SeminarText, run a product E2E, or claim that
-the existing VideoText activation uses a newer provider.
+## Publication after native delivery
 
-The governed clean macOS packaging check uses a disposable local fixture made
-from the checked-in bundle solely to exercise the fail-closed integration path.
-It has an isolated Git repository and cannot publish; it is not a SeminarText
-registration and is never used by a real release gate.
+The existing lifecycle is:
 
-## VideoText publication after delivery
+`Owner PASS → final gate → merge → install exact Candidate → post-install smoke → DELIVERED`.
 
-The current delivery chain remains exactly:
-
-`Owner PASS → Final Gate → Merge → install exact Candidate → post-install smoke → DELIVERED`.
-
-On the `--promote` path, `release_gate.sh` requires the existing immutable
-Owner PASS URL. It verifies that the approved source is already merged on
-`origin/main`, installs the exact candidate, runs its post-install smoke, then
-records and publishes the native delivery fact through the existing central
-publisher. These adapter commands are evidence and publication steps; they do
-not grant Owner PASS, installation, or delivery authority.
+After native delivery, `complete_registry_delivery.sh` checks the retained
+pre-owner release evidence, immutable Owner PASS receipt, native post-owner
+delivery receipt, accepted Candidate, installed bytes, bundled SeminarText
+inventory, source ancestry, version and lifecycle. It then records an immutable
+delivery receipt and publishes with the existing central `registry.py` publisher.
+It does not build, sign, install or launch VideoText.
 
 ```sh
-scripts/release_gate.sh --profile core /exact/short-video.mp4 /exact/model.bin \
-  --promote \
-  --owner-pass-reference https://github.com/Yurielo/videotext/issues/NN#issuecomment-NN
+scripts/complete_registry_delivery.sh \
+  /exact/pre-owner/evidence.env \
+  /exact/post-owner-delivery.json \
+  https://github.com/Yurielo/videotext/issues/NN#issuecomment-NN \
+  /Users/yurielokhin/Applications/videotext.app \
+  /exact/retained/registry-publication
 ```
 
-The receipt requires a promoted PASS evidence record, same candidate/final
-digest, post-install smoke PASS, merged source commit, exact installed bundle
-digest, an immutable Owner PASS reference, and the retained SeminarText
-dependency manifest. Publication retains immutable event/proof bytes, calls the
-central `registry.py publish` function, and stores a read-back confirmation.
-Failure leaves native delivery intact and evidence retryable. Retry uses the
-same receipt/outbox; it may never re-seal a later SeminarText or VideoText
-event. A newer SeminarText event after delivery rejects publication: prepare a
-new consumer release through its normal lifecycle.
+`release_gate.sh --promote` rebuilds its Candidate and therefore is not the
+publication path for the exact Candidate already accepted by the Owner.
+Publication does not run for a build, Candidate, merge or installation alone.
+If central publication fails, native delivery and the exact outbox remain
+intact; rerun the same command to retry. An intervening provider activation
+does not rewrite the delivered VideoText dependency pin. The central registry
+reports that provider relationship as `UPDATE_REQUIRED` when appropriate.
 
-The adapter's `record-delivery` and `publish` subcommands remain the only
-recovery path for an interrupted publication, using the exact retained release
-evidence, receipt and outbox from that delivery. They are not a replacement for
-the gate's normal lifecycle integration.
-
-The delivery gate does not publish on build, candidate creation, source merge,
-or installation alone. Central rollback remains a new verified native activation
-record under the existing central rollback contract.
-
-## Present prerequisite
-
-At the time this adapter was added, central `seminartext.current` is null. The
-adapter therefore rejects production preparation before any VideoText build or
-E2E. This is expected, and no synthetic activation is permitted in the real
-registry. Existing VideoText 0.6.8 remains registered with its historical
-embedded SeminarText source `cf7a8445fa9f9dffc62b7ae24062e80475a3d223`.
+At this integration check, central `seminartext.current` is event
+`sha256:ab55491793b6207ae0bfd4c61e1872f5104d9e70e6d016fc98b2b22bc619ba91`.
+The current VideoText activation is 0.7.0 and already pins the same SeminarText
+source. A new VideoText activation still requires its own qualified Candidate,
+Owner PASS and native delivery.

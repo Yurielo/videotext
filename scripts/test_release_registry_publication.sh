@@ -3,16 +3,16 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 GATE="$ROOT/scripts/release_gate.sh"
+DELIVERY="$ROOT/scripts/complete_registry_delivery.sh"
 
-grep -Fq -- '--owner-pass-reference' "$GATE"
-grep -Fq -- 'record-delivery' "$GATE"
-grep -Fq -- 'registry_integration.py" publish' "$GATE"
-grep -Fq -- 'merge-base --is-ancestor "$SOURCE_COMMIT" refs/remotes/origin/main' "$GATE"
-
-smoke_line="$(grep -n -F 'post_install_smoke_status PASS' "$GATE" | cut -d: -f1 | head -1)"
-delivery_line="$(grep -n -F 'record-delivery' "$GATE" | cut -d: -f1 | head -1)"
-publish_line="$(grep -n -F 'registry_integration.py" publish' "$GATE" | cut -d: -f1 | head -1)"
-[[ -n "$smoke_line" && -n "$delivery_line" && -n "$publish_line" ]]
-(( smoke_line < delivery_line && delivery_line < publish_line ))
+grep -Fq -- 'seminartext_dependency_manifest' "$GATE"
+grep -Fq -- 'candidate_seminartext_sha256' "$GATE"
+grep -Fq -- '--native-delivery' "$DELIVERY"
+grep -Fq -- 'record-delivery' "$DELIVERY"
+grep -Fq -- 'registry_integration.py" publish' "$DELIVERY"
+if grep -Fq -- 'registry_integration.py" publish' "$GATE"; then
+  echo 'Release gate must not publish a rebuilt promotion as accepted delivery' >&2
+  exit 1
+fi
 
 printf 'RELEASE_REGISTRY_PUBLICATION_CONTRACT_PASS\n'

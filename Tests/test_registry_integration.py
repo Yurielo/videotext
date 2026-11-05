@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -48,6 +49,8 @@ class RegistryIntegrationTests(unittest.TestCase):
         self.git(self.registry, "config", "user.name", "Fixture")
         self.git(self.registry, "config", "user.email", "fixture@example.invalid")
         self.git(self.registry, "remote", "add", "origin", "https://github.com/Yurielo/four-product-architecture.git")
+        central_patch = mock.patch.object(adapter, "central_module", side_effect=lambda root: self.load_fake())
+        central_patch.start(); self.addCleanup(central_patch.stop)
         self.material = self.root / "material"; (self.material / "seminartext_modules").mkdir(parents=True)
         (self.material / "seminartext").write_text("#!/bin/sh\nexit 0\n"); (self.material / "seminartext").chmod(0o755)
         (self.material / "SEMINARTEXT_VERSION").write_text("4.0.0\n")
@@ -137,7 +140,9 @@ class RegistryIntegrationTests(unittest.TestCase):
             "VIDEOTEXT_REGISTRY_ROOT": str(self.registry), "VIDEOTEXT_REGISTRY_PYTHON": os.sys.executable,
             "PATH": os.environ["PATH"]}, capture_output=True, text=True)
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertIn("metadata differs", result.stderr)
+        self.assertIn("Prepared SeminarText bundle is not the current registered activation", result.stderr)
+        with self.assertRaisesRegex(adapter.Rejected, "metadata differs"):
+            adapter.verify_bundle(prepared, adapter.resolve(self.registry))
         self.assertEqual(marker.read_text(), "stable app")
 
     def delivery_inputs(self):
@@ -145,6 +150,8 @@ class RegistryIntegrationTests(unittest.TestCase):
         dependency = adapter.prepare(self.registry, self.material, prepared)
         app = self.root / "installed.app"; app.mkdir()
         (app / "payload").write_text("installed")
+        bundled = app / "Contents/Resources/SeminarText"
+        shutil.copytree(prepared, bundled)
         digest = adapter.file_list_digest(app)
         evidence = self.root / "release.env"
         evidence.write_text("\n".join((
@@ -156,45 +163,105 @@ class RegistryIntegrationTests(unittest.TestCase):
             "completed_at=20261027T010000Z", "candidate_version=0.6.9", "candidate_build=fixture", "\n")))
         return prepared, app, evidence, dependency
 
-    def test_delivery_receipt_is_idempotent_and_requires_passing_smoke(self):
-        _, app, evidence, dependency = self.delivery_inputs()
-        receipt_path = self.root / "receipt.json"
+    def test_delivery_without_native_receipt_is_rejected(self):
+        _, app, evidence, _ = self.delivery_inputs()
+        with self.assertRaisesRegex(adapter.Rejected, "native post-owner delivery receipt is required"):
+            adapter.delivery_receipt(self.root, self.registry, evidence,
+                                     "https://owner.example/pass", app, self.root / "receipt.json")
+
+    def test_native_delivery_binds_exact_accepted_candidate(self):
+        _, app, evidence, _ = self.delivery_inputs()
+        candidate = self.root / "candidate.app"
+        shutil.copytree(app, candidate)
+        digest = adapter.file_list_digest(app)
+        evidence.write_text(evidence.read_text().replace("promoted=true", "promoted=false")
+                            + f"candidate_path={candidate}\n")
+        owner = self.root / "owner-pass.json"
+        owner.write_text(json.dumps({"status": "PASS", "acceptedHead": "2" * 40,
+                                     "candidatePath": str(candidate),
+                                     "candidatePathIndependentContentSha256": digest}))
+        smoke = self.root / "post-install.log"; smoke.write_text("PASS\n")
+        native = self.root / "post-owner-delivery.json"
+        record = {"kind": "videotext-native-post-owner-delivery", "status": "DELIVERED",
+                  "prState": "MERGED", "mergeTreeEqualsAcceptedHead": True,
+                  "acceptedHead": "2" * 40, "candidatePath": str(candidate),
+                  "contentDigest": digest, "installedContentDigest": digest,
+                  "installedPath": str(app), "postInstallLifecycle": "PASS",
+                  "codesignStrictDeep": "PASS", "installedVersion": "0.6.9",
+                  "installedBuild": "fixture", "mergeCommit": "3" * 40,
+                  "ownerPassReceipt": str(owner),
+                  "ownerPassReceiptSha256": adapter.sha256(owner.read_bytes()),
+                  "postInstallLifecycleLog": str(smoke),
+                  "postInstallLifecycleLogSha256": adapter.sha256(smoke.read_bytes()),
+                  "recordedAt": "2026-10-27T01:00:00+00:00"}
+        native.write_text(json.dumps(record))
         original_git = adapter.git
         def delivery_git(root, *arguments):
-            if arguments and arguments[0] == "merge-base":
-                return ""
+            if arguments and arguments[0] == "merge-base": return ""
+            if arguments and arguments[0] == "rev-parse": return "a" * 40
             return original_git(root, *arguments)
-        with mock.patch.object(adapter, "git", side_effect=delivery_git):
-            first = adapter.delivery_receipt(self.root, self.registry, evidence, "https://owner.example/pass", app, receipt_path)
-            second = adapter.delivery_receipt(self.root, self.registry, evidence, "https://owner.example/pass", app, receipt_path)
-        self.assertEqual(first, second)
-        self.assertEqual(first["delivered_at"], "2026-10-27T01:00:00+00:00")
-        failed = self.root / "failed.env"
-        failed.write_text(evidence.read_text().replace("post_install_smoke_status=PASS", "post_install_smoke_status=FAIL"))
-        with self.assertRaisesRegex(adapter.Rejected, "post-install smoke did not pass"):
-            adapter.delivery_receipt(self.root, self.registry, failed, "https://owner.example/pass", app, self.root / "failed.json")
-        stale = json.loads(json.dumps(dependency))
-        stale["activation_event"] = "sha256:" + "f" * 64
         with mock.patch.object(adapter, "git", side_effect=delivery_git), \
-             mock.patch.object(adapter, "verify", return_value=stale), \
-             self.assertRaisesRegex(adapter.Rejected, "no longer the current"):
-            adapter.delivery_receipt(self.root, self.registry, evidence, "https://owner.example/pass", app, self.root / "stale.json")
+             mock.patch.object(adapter, "video_remote_main", return_value="a" * 40):
+            receipt = adapter.delivery_receipt(self.root, self.registry, evidence,
+                                               "https://owner.example/pass", app,
+                                               self.root / "native-receipt.json", native)
+            self.assertEqual(receipt, adapter.delivery_receipt(
+                self.root, self.registry, evidence, "https://owner.example/pass", app,
+                self.root / "native-receipt.json", native))
+        self.assertEqual(receipt["native_delivery_evidence"], str(native.resolve()))
+        self.assertEqual(receipt["installed_app_sha256"], digest)
+        self.assertTrue(all(item["location"].startswith(str(app.resolve()))
+                            for item in receipt["bundled_dependency"]["artifacts"]))
+        changed = dict(record); changed["contentDigest"] = "0" * 64
+        native.write_text(json.dumps(changed))
+        with mock.patch.object(adapter, "git", side_effect=delivery_git), \
+             mock.patch.object(adapter, "video_remote_main", return_value="a" * 40), \
+             self.assertRaisesRegex(adapter.Rejected, "differs from accepted candidate"):
+            adapter.delivery_receipt(self.root, self.registry, evidence,
+                                     "https://owner.example/pass", app,
+                                     self.root / "rejected.json", native)
+
+    def test_publish_rejects_receipt_without_native_delivery(self):
+        _, app, evidence, _ = self.delivery_inputs()
+        receipt = self.root / "forged-receipt.json"
+        receipt.write_text(json.dumps({"product": "videotext", "status": "DELIVERED",
+                                       "release_gate_evidence": str(evidence),
+                                       "owner_pass_reference": "https://owner.example/pass",
+                                       "installed_app": str(app)}))
+        with self.assertRaisesRegex(adapter.Rejected, "native post-owner delivery receipt is required"):
+            adapter.publish(self.registry, receipt, self.root / "outbox")
 
     def test_publication_binds_exact_dependency_and_is_retained(self):
         dependency=adapter.resolve(self.registry)
+        bundled = dict(dependency["dependency"])
+        bundled["artifacts"] = [{**item, "location": "/fixture/videotext.app/Contents/Resources/SeminarText/" + component["repository_path"]}
+                                for item, component in zip(dependency["release"]["artifacts"], self.components)]
+        bundled["manifest"] = "/fixture/videotext.app/Contents/Resources/SeminarText/FOUR_PRODUCT_REGISTRY_DEPENDENCY.json"
         receipt={"product":"videotext","status":"DELIVERED","delivered_at":"2026-10-27T01:00:00+00:00",
                  "source_commit":"2"*40,"release_gate_evidence":str(self.root / "release.env"),
+                 "owner_pass_reference":"https://owner.example/pass",
+                 "native_delivery_evidence":str(self.root / "native.json"),
+                 "version":"0.6.9","build":"fixture",
                  "installed_app":"/fixture/videotext.app","installed_app_sha256":"a"*64,
-                 "seminartext_dependency":dependency}
+                 "seminartext_dependency":dependency,"bundled_dependency":bundled}
         (self.root / "release.env").write_text("candidate_version=0.6.9\ncandidate_build=fixture\n")
         outbox=self.root / "outbox"; central, head, event=adapter.publication_event(self.registry,receipt,outbox)
-        self.assertEqual(event["dependencies"],[dependency["dependency"]])
+        self.assertEqual(event["dependencies"],[bundled])
+        self.assertTrue(all(item["location"].startswith("/fixture/videotext.app/Contents/Resources/SeminarText/")
+                            for item in event["dependencies"][0]["artifacts"]))
         self.assertEqual(event["predecessor"],None)
         self.assertEqual(event["release"]["source_commit"],"2"*40)
         self.assertEqual(event["evidence"][0]["path"],"evidence/videotext-activation-"+hashlib.sha256((outbox / "publication-evidence.json").read_bytes()).hexdigest()+".json")
         (self.root / "receipt.json").write_text(json.dumps(receipt))
-        self.assertEqual(adapter.publish(self.registry, self.root / "receipt.json", outbox)["status"], "PUBLISHED")
-        self.assertEqual(adapter.publish(self.registry, self.root / "receipt.json", outbox)["status"], "PUBLISHED")
+        with mock.patch.object(adapter, "delivery_receipt", return_value=receipt):
+            self.assertEqual(adapter.publish(self.registry, self.root / "receipt.json", outbox)["status"], "PUBLISHED")
+            self.assertEqual(adapter.publish(self.registry, self.root / "receipt.json", outbox)["status"], "PUBLISHED")
+        (outbox / "publication-event.json").unlink()
+        _, _, recovered = adapter.publication_event(self.registry, receipt, outbox)
+        self.assertEqual(recovered, event)
+        (outbox / "publication-evidence.json").unlink()
+        _, _, recovered = adapter.publication_event(self.registry, receipt, outbox)
+        self.assertEqual(recovered, event)
         _, _, retry = adapter.publication_event(self.registry,receipt,outbox)
         self.assertEqual(retry,event)
 

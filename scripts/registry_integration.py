@@ -113,11 +113,26 @@ def central_module(root):
                        "git@github.com:Yurielo/four-product-architecture"}, "unexpected central registry origin")
     require(not git(root, "diff", "HEAD", "--", "registry.py", "schemas/registry.schema.json"),
             "central publisher/schema has local modifications")
+    remote = git(root, "ls-remote", "--exit-code", "origin", "refs/heads/main").split()
+    require(len(remote) == 2 and remote[1] == "refs/heads/main", "ambiguous central remote main")
+    git(root, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "origin", remote[0])
+    for relative in ("registry.py", "schemas/registry.schema.json"):
+        committed = subprocess.run(["git", "-C", str(root), "show", f"{remote[0]}:{relative}"],
+                                   capture_output=True, check=True).stdout
+        require((root / relative).read_bytes() == committed,
+                f"local central {relative} differs from current remote main")
     spec = importlib.util.spec_from_file_location("four_product_registry", root / "registry.py")
     module = importlib.util.module_from_spec(spec)
     require(spec.loader is not None, "central registry module is unavailable")
     spec.loader.exec_module(module)
     return module
+
+
+def video_remote_main(root):
+    line = git(root, "ls-remote", "--exit-code", "origin", "refs/heads/main").split()
+    require(len(line) == 2 and line[1] == "refs/heads/main", "ambiguous VideoText remote main")
+    git(root, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "origin", line[0])
+    return line[0]
 
 
 def central_state(root, central):
@@ -134,9 +149,9 @@ def central_event(root, central, state, identity):
     return event
 
 
-def seminartext_dependency(root, central):
+def seminartext_dependency(root, central, activation_event=None):
     head, state = central_state(root, central)
-    identity = state["products"]["seminartext"]["current"]
+    identity = activation_event or state["products"]["seminartext"]["current"]
     require(identity is not None, "SeminarText has no centrally registered activation; refusing stale bundle fallback")
     event = central_event(root, central, state, identity)
     require(event["product"] == "seminartext" and event["action"] in {"activate", "rollback"},
@@ -262,35 +277,95 @@ def file_list_digest(path):
     return sha256(b"".join(rows))
 
 
-def delivery_receipt(root, registry_root, release_evidence, owner_pass_ref, installed_app, output):
+def delivery_receipt(root, registry_root, release_evidence, owner_pass_ref, installed_app, output,
+                     native_delivery=None):
     """Record only the existing chain's final native facts, then retain them."""
     root, installed_app, output = Path(root).resolve(), Path(installed_app).resolve(), Path(output).resolve()
     values = parse_evidence(release_evidence)
-    require(values.get("status") == "PASS" and values.get("promoted") == "true", "release evidence is not a promoted PASS")
-    required = ("source_commit", "candidate_sha256", "final_sha256", "seminartext_dependency_sha256",
-                "seminartext_dependency_manifest", "post_install_smoke_status", "post_install_smoke_log", "completed_at")
+    require(values.get("status") == "PASS", "release evidence is not PASS")
+    required = ("source_commit", "candidate_sha256", "seminartext_dependency_sha256",
+                "seminartext_dependency_manifest", "candidate_version", "candidate_build")
     require(all(values.get(name) for name in required), "release evidence lacks a completed delivery chain")
-    require(values["candidate_sha256"] == values["final_sha256"], "installed candidate identity differs from accepted candidate")
-    require(values["post_install_smoke_status"] == "PASS", "post-install smoke did not pass")
     require(owner_pass_ref.startswith("https://"), "Owner PASS reference must be an immutable URL")
-    require(git(root, "merge-base", "--is-ancestor", values["source_commit"], "refs/remotes/origin/main") == "",
+    require(native_delivery is not None, "native post-owner delivery receipt is required")
+    main_head = video_remote_main(root)
+    require(git(root, "merge-base", "--is-ancestor", values["source_commit"], main_head) == "",
             "accepted VideoText source is not merged on main")
     require(installed_app.is_dir() and not installed_app.is_symlink(), "installed VideoText app is unavailable")
     installed_digest = file_list_digest(installed_app)
-    require(installed_digest == values["final_sha256"], "installed app differs from delivery candidate")
+    if native_delivery is not None:
+        native_delivery = Path(native_delivery).resolve()
+        native = read(native_delivery)
+        require(native.get("kind") == "videotext-native-post-owner-delivery"
+                and native.get("status") == "DELIVERED" and native.get("prState") == "MERGED"
+                and native.get("mergeTreeEqualsAcceptedHead") is True,
+                "native post-owner delivery is incomplete")
+        require(native.get("acceptedHead") == values["source_commit"],
+                "native delivery accepted a different source")
+        require(native.get("candidatePath") == values.get("candidate_path")
+                and native.get("contentDigest") == values["candidate_sha256"]
+                and native.get("installedContentDigest") == installed_digest
+                and installed_digest == values["candidate_sha256"],
+                "native delivery differs from accepted candidate")
+        require(Path(native.get("installedPath", "")).resolve() == installed_app,
+                "native delivery identifies another installed app")
+        require(native.get("postInstallLifecycle") == "PASS" and native.get("codesignStrictDeep") == "PASS",
+                "native post-install verification did not pass")
+        require(native.get("installedVersion") == values["candidate_version"]
+                and native.get("installedBuild") == values["candidate_build"],
+                "native installed version differs from release evidence")
+        candidate = Path(native["candidatePath"])
+        require(candidate.is_dir() and file_list_digest(candidate) == installed_digest,
+                "accepted Candidate is missing or its content changed")
+        owner_receipt = Path(native.get("ownerPassReceipt", ""))
+        require(regular(owner_receipt) and sha256(owner_receipt.read_bytes()) == native.get("ownerPassReceiptSha256"),
+                "native Owner PASS receipt is missing or changed")
+        owner = read(owner_receipt)
+        require(owner.get("status") == "PASS" and owner.get("acceptedHead") == values["source_commit"]
+                and owner.get("candidatePath") == str(candidate)
+                and owner.get("candidatePathIndependentContentSha256") == installed_digest,
+                "Owner PASS does not bind the accepted Candidate")
+        require(git(root, "merge-base", "--is-ancestor", native["mergeCommit"], main_head) == "",
+                "native merge commit is not on main")
+        require(git(root, "merge-base", "--is-ancestor", values["source_commit"], native["mergeCommit"]) == "",
+                "native merge does not contain accepted source")
+        require(git(root, "rev-parse", f"{values['source_commit']}^{{tree}}") ==
+                git(root, "rev-parse", f"{native['mergeCommit']}^{{tree}}"),
+                "native merge tree differs from accepted source")
+        delivered_at = datetime.fromisoformat(native["recordedAt"]).astimezone(timezone.utc).isoformat()
+        smoke_ref = native["postInstallLifecycleLog"]
+        require(regular(smoke_ref) and sha256(Path(smoke_ref).read_bytes()) == native.get("postInstallLifecycleLogSha256"),
+                "native post-install lifecycle log is missing or changed")
+        native_reference = str(native_delivery)
     dependency_path = Path(values["seminartext_dependency_manifest"])
     dependency = read(dependency_path)
     require(sha256(dependency_path.read_bytes()) == values["seminartext_dependency_sha256"],
             "release evidence dependency manifest hash differs")
-    current_dependency = verify(registry_root, dependency_path.parent)
-    require(same_provider_activation(dependency, current_dependency),
-            "release evidence dependency is no longer the current registered SeminarText activation")
+    registered_dependency = seminartext_dependency(registry_root, central_module(registry_root),
+                                                   dependency.get("activation_event"))
+    verify_bundle(dependency_path.parent, registered_dependency)
+    require(same_provider_activation(dependency, registered_dependency),
+            "release evidence dependency differs from registered SeminarText activation")
+    bundled_manifest = installed_app / "Contents/Resources/SeminarText/FOUR_PRODUCT_REGISTRY_DEPENDENCY.json"
+    require(regular(bundled_manifest) and sha256(bundled_manifest.read_bytes()) == values["seminartext_dependency_sha256"],
+            "installed app carries another SeminarText dependency")
+    verify_bundle(bundled_manifest.parent, dependency)
+    bundled_dependency = {"provider": "seminartext", "role": "selected-timing-runtime", "mode": "bundled",
+                          "source_commit": dependency["release"]["source_commit"],
+                          "artifacts": [{"role": component["role"],
+                                         "location": str(bundled_manifest.parent / component["path"]),
+                                         "source_commit": dependency["release"]["source_commit"],
+                                         "digest": {"algorithm": "sha256-file", "value": component["sha256"]}}
+                                        for component in dependency["components"]],
+                          "manifest": str(bundled_manifest)}
     receipt = {"schema_version": 1, "product": "videotext", "status": "DELIVERED",
-               "delivered_at": evidence_time(values["completed_at"]), "owner_pass_reference": owner_pass_ref,
+               "delivered_at": delivered_at, "owner_pass_reference": owner_pass_ref,
                "source_commit": values["source_commit"], "release_gate_evidence": str(Path(release_evidence).resolve()),
+               "native_delivery_evidence": native_reference,
+               "version": values["candidate_version"], "build": values["candidate_build"],
                "installed_app": str(installed_app), "installed_app_sha256": installed_digest,
-               "post_install_smoke": {"status": "PASS", "reference": values["post_install_smoke_log"]},
-               "seminartext_dependency": dependency}
+               "post_install_smoke": {"status": "PASS", "reference": smoke_ref},
+               "seminartext_dependency": dependency, "bundled_dependency": bundled_dependency}
     retain(output, encode(receipt))
     return receipt
 
@@ -300,16 +375,31 @@ def publication_event(registry_root, receipt, outbox):
     head, state = central_state(Path(registry_root), central)
     require(receipt.get("product") == "videotext" and receipt.get("status") == "DELIVERED", "delivery receipt is incomplete")
     dependency = receipt["seminartext_dependency"]
+    bundled = receipt["bundled_dependency"]
+    release = {"native_ref": receipt["native_delivery_evidence"], "version": receipt["version"],
+               "build": receipt["build"], "source_commit": receipt["source_commit"],
+               "artifacts": [{"role": "installed-app", "location": receipt["installed_app"],
+                              "source_commit": receipt["source_commit"],
+                              "digest": {"algorithm": "sha256-file-list-v1", "value": receipt["installed_app_sha256"]}}]}
     outbox = Path(outbox)
     retained_event = outbox / "publication-event.json"
     retained_proof = outbox / "publication-evidence.json"
+    pending = outbox / "publication-pending.json"
+    if pending.exists():
+        sealed = read(pending)
+        require(set(sealed) == {"event", "proof"}, "retained pending publication is invalid")
+        retain(retained_proof, central.encode(sealed["proof"]))
+        retain(retained_event, central.encode(sealed["event"]))
     if retained_event.exists() or retained_proof.exists():
         require(retained_event.is_file() and retained_proof.is_file(), "publication outbox is incomplete")
         event, proof = central.decode(retained_event.read_bytes()), central.decode(retained_proof.read_bytes())
         require(event.get("product") == "videotext", "retained publication event has wrong product")
+        require(event.get("release") == release and event.get("target") == "local-primary"
+                and event.get("activated_at") == receipt["delivered_at"],
+                "retained publication event differs from native delivery")
         require(event.get("release", {}).get("source_commit") == receipt["source_commit"],
                 "retained publication event has wrong release")
-        require(event.get("dependencies") == [dependency["dependency"]], "retained publication event has wrong dependency")
+        require(event.get("dependencies") == [bundled], "retained publication event has wrong dependency")
         require(event.get("event_id") == central.event_id(event), "retained publication event identity changed")
         require(proof.get("kind") == "native_activation" and proof.get("status") == "SUCCEEDED", "retained publication proof failed")
         require(proof.get("native_evidence") == receipt, "retained publication proof has wrong native receipt")
@@ -317,27 +407,22 @@ def publication_event(registry_root, receipt, outbox):
         require(len(event.get("evidence", [])) == 1 and event["evidence"][0].get("sha256") == sha256(retained_proof.read_bytes()),
                 "retained publication proof identity changed")
         return central, head, event
-    current_dependency = seminartext_dependency(Path(registry_root), central)
-    require(dependency["activation_event"] == current_dependency["activation_event"],
-            "SeminarText changed after VideoText delivery; do not publish a stale delivery")
+    # A delivered consumer retains its verified provider pin even when the
+    # provider subsequently activates another release. The central registry
+    # reports UPDATE_REQUIRED without rewriting historical dependency identity.
     previous = state["products"]["videotext"]["current"]
     old = central_event(registry_root, central, state, previous) if previous else None
-    release = {"native_ref": receipt["release_gate_evidence"], "version": parse_evidence(receipt["release_gate_evidence"]).get("candidate_version"),
-               "build": parse_evidence(receipt["release_gate_evidence"]).get("candidate_build"),
-               "source_commit": receipt["source_commit"],
-               "artifacts": [{"role": "installed-app", "location": receipt["installed_app"],
-                              "source_commit": receipt["source_commit"],
-                              "digest": {"algorithm": "sha256-file-list-v1", "value": receipt["installed_app_sha256"]}}]}
     event = {"product": "videotext", "generation": old["generation"] + 1 if old else 1,
              "predecessor": previous, "action": "activate", "rollback_of": None,
              "target": "local-primary", "activated_at": receipt["delivered_at"], "recorded_at": receipt["delivered_at"],
-             "release": release, "dependencies": [dependency["dependency"]]}
+             "release": release, "dependencies": [bundled]}
     proof = {"kind": "native_activation", "status": "SUCCEEDED", "subject_sha256": central.subject_hash(event),
-             "native_reference": receipt["release_gate_evidence"], "native_evidence": receipt}
+             "native_reference": receipt["native_delivery_evidence"], "native_evidence": receipt}
     payload = central.encode(proof)
     path = "evidence/videotext-activation-" + sha256(payload) + ".json"
     event["evidence"] = [{"path": path, "sha256": sha256(payload)}]
     event["event_id"] = central.event_id(event)
+    retain(pending, central.encode({"event": event, "proof": proof}))
     retain(outbox / "publication-evidence.json", payload)
     retain(outbox / "publication-event.json", central.encode(event))
     return central, head, event
@@ -347,6 +432,10 @@ def publish(registry_root, receipt_path, outbox):
     outbox = Path(outbox)
     with lock(outbox):
         receipt = read(receipt_path)
+        delivery_receipt(Path(__file__).resolve().parents[1], registry_root,
+                         receipt["release_gate_evidence"], receipt["owner_pass_reference"],
+                         receipt["installed_app"], receipt_path,
+                         receipt.get("native_delivery_evidence"))
         central, head, event = publication_event(registry_root, receipt, outbox)
         proof = (outbox / "publication-evidence.json").read_bytes()
         require(sha256(proof) == event["evidence"][0]["sha256"], "retained publication proof changed")
@@ -370,6 +459,7 @@ def main():
     delivery.add_argument("--root", type=Path, required=True); delivery.add_argument("--registry-root", type=Path, required=True)
     delivery.add_argument("--release-evidence", type=Path, required=True); delivery.add_argument("--owner-pass-reference", required=True)
     delivery.add_argument("--installed-app", type=Path, required=True); delivery.add_argument("--output", type=Path, required=True)
+    delivery.add_argument("--native-delivery", type=Path, required=True)
     send = commands.add_parser("publish")
     send.add_argument("--registry-root", type=Path, required=True); send.add_argument("--receipt", type=Path, required=True)
     send.add_argument("--outbox", type=Path, required=True)
@@ -378,7 +468,7 @@ def main():
         if args.command == "resolve": result = resolve(args.registry_root)
         elif args.command == "prepare": result = prepare(args.registry_root, args.material_root, args.output)
         elif args.command == "verify": result = verify(args.registry_root, args.bundle)
-        elif args.command == "record-delivery": result = delivery_receipt(args.root, args.registry_root, args.release_evidence, args.owner_pass_reference, args.installed_app, args.output)
+        elif args.command == "record-delivery": result = delivery_receipt(args.root, args.registry_root, args.release_evidence, args.owner_pass_reference, args.installed_app, args.output, args.native_delivery)
         else: result = publish(args.registry_root, args.receipt, args.outbox)
         print(json.dumps(result, ensure_ascii=False, indent=2)); return 0
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:

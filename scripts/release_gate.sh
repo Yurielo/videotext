@@ -549,28 +549,7 @@ for key in "${required_evidence[@]}"; do
   /usr/bin/grep -q "^${key}=" "$EVIDENCE" || fail "evidence не содержит $key"
 done
 record status PASS
-if [[ "$PROMOTE" == true ]]; then
-  DELIVERY_RECEIPT="$RUN_DIR/delivery-receipt.json"
-  PUBLICATION_OUTBOX="$RUN_DIR/registry-publication"
-  if ! "$REGISTRY_PYTHON" "$ROOT/scripts/registry_integration.py" record-delivery \
-      --root "$ROOT" --registry-root "$REGISTRY_ROOT" --release-evidence "$EVIDENCE" \
-      --owner-pass-reference "$OWNER_PASS_REFERENCE" --installed-app "$FINAL_APP" \
-      --output "$DELIVERY_RECEIPT" > "$RUN_DIR/registry-delivery.log" 2>&1; then
-    record registry_delivery_log "$RUN_DIR/registry-delivery.log"
-    fail "не удалось сохранить DELIVERED receipt для central registry"
-  fi
-  record registry_delivery_receipt "$DELIVERY_RECEIPT"
-  record registry_delivery_log "$RUN_DIR/registry-delivery.log"
-  if ! "$REGISTRY_PYTHON" "$ROOT/scripts/registry_integration.py" publish \
-      --registry-root "$REGISTRY_ROOT" --receipt "$DELIVERY_RECEIPT" \
-      --outbox "$PUBLICATION_OUTBOX" > "$RUN_DIR/registry-publication.log" 2>&1; then
-    record registry_publication_log "$RUN_DIR/registry-publication.log"
-    fail "central VideoText activation publication не подтверждена"
-  fi
-  record registry_publication_outbox "$PUBLICATION_OUTBOX"
-  record registry_publication_log "$RUN_DIR/registry-publication.log"
-fi
 printf 'RELEASE GATE PASS\nCandidate: %s\nEvidence: %s\n' "$CANDIDATE" "$EVIDENCE"
 if [[ "$PROMOTE" == false ]]; then
-  printf 'Стабильная сборка не заменена. Для продвижения повторите с --promote.\n'
+  printf 'Стабильная сборка не заменена. После Owner PASS доставьте точный Candidate по native lifecycle.\n'
 fi

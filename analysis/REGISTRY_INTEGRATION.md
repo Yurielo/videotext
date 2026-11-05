@@ -1,56 +1,50 @@
-# VideoText registry integration — authority and current boundary
+# VideoText registry integration — verified authority and release boundary
 
-Task authority: **Four-Product Architecture — VideoText Registry Integration**.
-This bounded task authorizes the adapter and its verification, not a VideoText
-build, Owner acceptance, installation, activation or synthetic central event.
+Issue #51 / PR #52. This task prepares a new VideoText release and its future
+registry publication; it does not authorize installation or activation before
+exact Candidate Owner acceptance.
 
-| Binding source | Exact commit | SHA-256 |
+| Binding source | Resolved commit | Document SHA-256 |
 | --- | --- | --- |
-| Integra unified rules | `86e0801963e85e8d8b121c569fe624bb64ede5df` | `8b8e31c7620d45e1e14429e07e7b97b2adc118745ce781a55b932213c55b646b` |
-| Central registry `AGENTS.md` | `66c6a5128922f65c1993b59f5ba38923683aeb1e` | `d97fff57c37671d4f904f04e9723f06c7364e911aff534b58ec1ca8bea5da536` |
+| Integra unified rules | `9c39583c9be328fc2b4f98992f0d92e6e471fc2c` | `8b8e31c7620d45e1e14429e07e7b97b2adc118745ce781a55b932213c55b646b` |
+| Central registry `AGENTS.md` | `226768180bbb217485c7d5ec53d360d8ebcb4615` | `d97fff57c37671d4f904f04e9723f06c7364e911aff534b58ec1ca8bea5da536` |
 | Central architecture | same central commit | `61a49437994bd481d9be71bd26a7d24bfff77ae9e04abddf127e9c4c1fcbc9a0` |
-| Central publication contract | same central commit | `cc50ac0a524370678bf0115d65b9dc6de24972ea624f191963e7c267a20f4b2b` |
-| VideoText `AGENTS.md` | `814c2aeab4eb76cd345c484575507ac73da11784` | `57200d50eaca5389267d63a248fbfae56213ecc1e314987020a9019726987d01` |
+| VideoText `AGENTS.md` | `c3a4424a1deee42598bab8cf4ba70b43fcaf7e91` | `57200d50eaca5389267d63a248fbfae56213ecc1e314987020a9019726987d01` |
 | VideoText release gate | same VideoText commit | `79ece3bb3017ca2450e6bc17c740fb70645129055bfae3dcc6c3a644ed9b4869` |
 
-## Reconciled state
+## Current registry state
 
-Central validation at `66c6a5128922f65c1993b59f5ba38923683aeb1e` is VALID
-with two historical events: VideoText `0.6.8` and BookText `0.1.0`. VideoText
-current event is `sha256:60f3c037c659f5386cafdc0cf9c51350e28bb5ba5f7ac0ff3fa6eedfc9aa840f`.
-Its retained embedded SeminarText source is
-`cf7a8445fa9f9dffc62b7ae24062e80475a3d223`. This is historical provenance,
-not a substitute for a current provider release.
+Central `seminartext.current` is activation
+`sha256:ab55491793b6207ae0bfd4c61e1872f5104d9e70e6d016fc98b2b22bc619ba91`.
+Its verified native proof identifies SeminarText source
+`9c99028ea15388a3850770c7cfe6c816406c4335` and 36 components. The CLI
+digest is `97bcbb2c7d9c6936c8fbe8efa1f5ad0b78e807eb7cea73b0f5a7b7f484889bd1`.
+Current VideoText activation is 0.7.0, central generation 3, event
+`sha256:0e56e700a7432fe6eeff88fd379cd9ac1ee78a7543029494cc6fb9672e6fc0d2`.
+It already pins this SeminarText source. The prior analysis describing an
+unregistered provider and VideoText 0.6.8 is historical and no longer a release
+gate premise.
 
-`seminartext.current` remains null with its retained reason: a complete native
-post-deploy success receipt has not been established. Consequently, central
-status reports `PROVIDER_UNREGISTERED` for VideoText's actual old dependency.
+## Boundary checks
 
-The VideoText source checkout used for implementation is the clean canonical
-main `814c2aeab4eb76cd345c484575507ac73da11784`, obtained from the verified
-GitHub repository. The pre-existing `Documents/videotext` directory was an
-unrelated empty Git skeleton without an origin or commit and was not changed.
+The tracked `Resources/SeminarText` cannot supply the registered 36-component
+inventory: preparation stops at absent `SEMINARTEXT_4_ROADMAP.md`. An archive of
+the exact registered source commit passes all 36 SHA-256 checks. A real release
+must explicitly supply that material root; a missing or mismatched component
+never falls back to an installed provider or stale bundle.
 
-## Adapter boundary
+The PR's original `release_gate.sh --promote` publication wiring could rebuild
+the exact Candidate already accepted by the Owner. That is incompatible with
+the retained Candidate identity required by `docs/RELEASE_GATE.md`. Registry
+publication is now a separate completion step after the native post-owner
+delivery receipt. It verifies the pre-owner release record, accepted Candidate,
+Owner PASS receipt, merge ancestry, installed app, embedded provider manifest,
+codesign and post-install lifecycle. It neither rebuilds nor installs.
 
-The adapter imports the existing central `registry.py`; it does not copy its
-schema, validation, event identity, append-only logic or Git CAS publisher.
-Future preparation resolves central remote main and requires the exact current
-SeminarText event plus successful bound native receipt. It validates every
-retained component/artifact against supplied material before bundling and makes
-the resulting manifest part of candidate evidence. Build/E2E then revalidate
-the prepared bundle against central current state. There is no fallback to the
-tracked historical bundle, a standalone installation, or repository HEAD.
+The adapter uses the central publisher and immutable outbox. Publication
+failure leaves the delivered product intact and supports retry. A later
+SeminarText activation does not invalidate the historical pinned dependency;
+central dependency status reports update need without changing the pin.
 
-VideoText publication is now wired into the existing `--promote` lifecycle,
-after a required immutable Owner PASS URL, final gate, confirmed merge on
-`origin/main`, exact installation and passing post-install smoke. The adapter's
-delivery receipt records those completed facts deterministically and the
-central publisher atomically retains native evidence/event/current. A failed
-publication leaves delivery unchanged with its exact outbox retained for retry.
-Newer same-product history and altered retained data are rejected by the
-central publisher; an unprepared current provider blocks new publication rather
-than rewriting a dependency.
-
-No real registry history, installed VideoText app, SeminarText installation,
-Candidate, Owner decision or release input was altered during this task.
+No real central registry event or installed application was changed while
+preparing this integration.
